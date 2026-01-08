@@ -1,13 +1,13 @@
-# CHANGELOG
+# 变更日志 (CHANGELOG)
 
-All notable changes to this project will be documented in this file.
+本文件记录此项目的所有重大变更。
 
-## [Unreleased]
+## [未发布]
 
-### Added
-- Project documentation initialized based on **Titan OS** vision.
-- `ROADMAP.md` and `AGENTS.md` compliant structure.
-- Phase 1 Development Plan.
+### 新增
+- 基于 **Titan OS** 愿景初始化项目文档。
+- 符合 `@AGENTS.md` 规范的项目结构。
+- 阶段 1 开发计划。
 
-### Changed
-- Project pivot: Removed Roc language integration, moved to pure Zig system programming model.
+### 变更
+- 项目转型：移除 Roc 语言集成，转向纯 Zig 系统编程模型。

@@ -1,28 +1,28 @@
-# ROADMAP
+# 项目路线图 (ROADMAP)
 
-> Source of Truth for Titan OS project status.
+> Titan OS 项目状态的单一真理来源 (Source of Truth)。
 
-## Status: 🏗️ Phase 1: Kernel Bootstrapping
+## 当前状态: 🏗️ 阶段 1: 内核引导 (Kernel Bootstrapping)
 
-- [ ] **Phase 1: The Kernel**
-    - [ ] Setup build system with cross-compilation support (`solana`, `wasm`) `[STORY-001]`
-    - [ ] Implement `TitanAllocator` for unified memory management
-    - [ ] Implement basic syscall wrappers (`log`, `exit`)
-    - [ ] Unified Entrypoint implementation
-- [ ] **Phase 2: Standard Library**
-    - [ ] `titan.math` (Safe math)
-    - [ ] `titan.collections` (Optimized Map/List)
-    - [ ] Chain-specific drivers (Near, Stylus)
-- [ ] **Phase 3: Ecosystem & Tools**
-    - [ ] `titan` CLI scaffolding
-    - [ ] Deployment tools
+- [ ] **阶段 1: 内核 (The Kernel)**
+    - [ ] 建立支持交叉编译的构建系统 (`solana`, `wasm`) `[STORY-001]`
+    - [ ] 实现用于统一内存管理的 `TitanAllocator`
+    - [ ] 实现基础系统调用封装 (`log`, `exit`)
+    - [ ] 统一入口点 (Entrypoint) 实现
+- [ ] **阶段 2: 标准库 (Standard Library)**
+    - [ ] `titan.math` (安全数学库)
+    - [ ] `titan.collections` (优化后的集合库 Map/List)
+    - [ ] 特定链的驱动程序 (Near, Stylus)
+- [ ] **阶段 3: 生态与工具 (Ecosystem & Tools)**
+    - [ ] `titan` CLI 项目脚手架
+    - [ ] 部署工具
 
-## Milestones
+## 里程碑 (Milestones)
 
-- **M1: Cross-Chain Hello World** (Target: End of Week 1)
-    - Successful compilation to both `.so` (Solana) and `.wasm` (Generic).
+- **M1: 跨链 Hello World** (目标：第一周结束)
+    - 成功编译为 `.so` (Solana) 和 `.wasm` (通用 Wasm)。
 - **M2: Titan OS Alpha**
-    - Standard library functional on at least 3 major chains.
+    - 标准库在至少 3 条主流链上功能完备。
 
-## History
-- **2026-01-08**: Project pivoted to **Titan OS** (Pure Zig vision). Initialized documentation.
+## 历史记录
+- **2026-01-08**: 项目转型为 **Titan OS** (纯 Zig 愿景)。初始化文档。

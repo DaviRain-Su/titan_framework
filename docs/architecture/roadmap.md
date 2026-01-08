@@ -1,33 +1,33 @@
-# Development Roadmap: Titan OS
+# 阶段路线图: Titan OS
 
-This roadmap outlines the evolution of Titan OS from a multi-target build tool to a full-fledged Blockchain Operating System.
+本路线图概述了 Titan OS 从多目标构建工具演变为完整区块链操作系统的过程。
 
-## Phase 1: The Kernel (Bootstrapping)
+## 阶段 1: 内核 (引导阶段)
 
-*   **Goal:** Build the minimal "Titan Core" that runs on Solana and Generic Wasm.
-*   **Key Actions:**
-    *   **Build System:** Configure `build.zig` to handle cross-compilation targets (`-Dtarget=solana`, `-Dtarget=wasm`).
-    *   **Memory Allocator:** Implement a unified `TitanAllocator` that maps to the underlying chain's memory model.
-    *   **Syscalls:** Implement `titan.os.log` and basic `titan.os.return` for both SBF and Wasm.
-    *   **Proof of Concept:** A "Hello World" Zig program that compiles to both `.so` and `.wasm` and runs on local test validators.
+*   **目标:** 构建能在 Solana 和通用 Wasm 上运行的最小“Titan 内核”。
+*   **关键行动:**
+    *   **构建系统:** 配置 `build.zig` 以处理交叉编译目标 (`-Dtarget=solana`, `-Dtarget=wasm`)。
+    *   **内存分配器:** 实现统一的 `TitanAllocator`，映射到各链底层的内存模型。
+    *   **系统调用:** 实现针对 SBF 和 Wasm 的基础 `titan.os.log` 和 `titan.os.return`。
+    *   **概念验证:** 一个简单的 Zig 程序，能同时编译为 `.so` 和 `.wasm`，并在本地测试验证器上运行。
 
-## Phase 2: The Standard Library (User Space)
+## 阶段 2: 标准库 (用户空间)
 
-*   **Goal:** Provide the "glibc" of Web3.
-*   **Key Actions:**
-    *   **Titan Std:** Develop `titan.math` (safe math), `titan.collections` (optimized maps/lists), and `titan.types` (Address, Pubkey).
-    *   **Drivers:** Implement specific "Drivers" for major chains (Near, Arbitrum Stylus) to map the generic syscalls to actual host functions.
-    *   **Testing Framework:** A local test runner that mocks the Kernel layer, allowing developers to run `zig test` on their contracts without deploying.
+*   **目标:** 提供 Web3 的“glibc”。
+*   **关键行动:**
+    *   **Titan 标准库:** 开发 `titan.math` (安全数学)、`titan.collections` (优化的 Map/List) 和 `titan.types` (Address, Pubkey)。
+    *   **驱动程序:** 为主要链（Near, Arbitrum Stylus）实现特定的“驱动程序”，将通用系统调用映射为实际的宿主函数。
+    *   **测试框架:** 一个能模拟内核层的本地测试运行器，允许开发者在不部署的情况下对合约运行 `zig test`。
 
-## Phase 3: The Ecosystem (Toolchain)
+## 阶段 3: 生态系统 (工具链)
 
-*   **Goal:** Developer Experience & Production Readiness.
-*   **Key Actions:**
-    *   **Titan CLI:** A tool to scaffold projects (`titan init`) and handle deployments (`titan deploy`).
-    *   **Package Manager:** Integrate with Zig's package manager (`build.zig.zon`) to share Titan libraries.
-    *   **Auditing Standards:** Establish coding standards for secure Zig smart contract development.
+*   **目标:** 提升开发体验与生产就绪度。
+*   **关键行动:**
+    *   **Titan CLI:** 用于初始化项目 (`titan init`) 和处理部署 (`titan deploy`) 的工具。
+    *   **包管理器:** 集成 Zig 的包管理器 (`build.zig.zon`) 以共享 Titan 库。
+    *   **审计标准:** 建立安全 Zig 智能合约开发的编码规范。
 
-## Long-term Vision
+## 长期愿景
 
-*   **OS-level Interoperability:** Standardize the "System Calls" across chains so that a contract's logic is mathematically identical regardless of where it runs.
-*   **RISC-V Support:** As chains like CKB or others adopt RISC-V, Titan OS can simply add a new Backend Target.
+*   **操作系统级互操作性:** 标准化各链间的“系统调用”，使合约逻辑在数学上保持一致，无论其运行在何处。
+*   **RISC-V 支持:** 随着 CKB 等链采用 RISC-V，Titan OS 只需增加新的后端目标即可。

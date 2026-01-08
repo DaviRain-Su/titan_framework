@@ -1,32 +1,32 @@
-# System Overview: Titan OS
+# 系统概览: Titan OS
 
-## Vision
+## 愿景 (Vision)
 
-To build **Titan OS**, the "Linux of Web3 Infrastructure".
+打造 **Titan OS**，即“Web3 基础设施的 Linux”。
 
-Just as **C** is the system programming language that built Linux and unified the computing world, **Zig** will be the system programming language for Titan OS, unifying the fragmented blockchain world.
+正如 **C** 语言是构建 Linux 并统一计算世界的系统编程语言一样，**Zig** 将作为 Titan OS 的系统编程语言，统一碎片化的区块链世界。
 
-**Goal:** Enable developers to use **Zig** to write high-performance, bare-metal smart contracts and blockchain logic that runs natively on any high-performance Virtual Machine (Solana SBF, WebAssembly, etc.).
+**目标：** 使开发者能够使用 **Zig** 编写高性能、裸机级别的智能合约和区块链逻辑，并能原生运行在任何高性能虚拟机（Solana SBF, WebAssembly 等）上。
 
-## Core Philosophy: The "Linux" Analogy
+## 核心哲学: “Linux” 类比
 
-*   **The Kernel (Titan Core):** A set of low-level, zero-cost abstractions written in Zig. It manages memory, system calls, and hardware (chain) interactions, just like the Linux Kernel manages CPU and RAM.
-*   **The User Space (Applications):** Developers write smart contracts in Zig, utilizing the Titan Standard Library. They don't need to know if they are running on Solana or Near, just as a C developer doesn't worry about the specific CPU architecture.
-*   **The Language (Zig):** Chosen for its manual memory management, lack of hidden runtime, and extreme performance—perfect for the resource-constrained environments of blockchains.
+*   **内核 (Titan Core):** 一套使用 Zig 编写的低级、零成本抽象。它管理内存、系统调用和硬件（链）交互，就像 Linux 内核管理 CPU 和内存一样。
+*   **用户空间 (User Space):** 开发者使用 Titan 标准库编写智能合约。他们无需关心运行在 Solana 还是 Near 上，就像 C 开发者无需担心具体的 CPU 架构一样。
+*   **语言 (Zig):** 选择 Zig 是因为其手动内存管理、无隐藏运行时以及极致的性能——非常适合区块链这种资源受限的环境。
 
-## Strategic Positioning
+## 战略定位
 
-> **"One Language (Zig), One OS (Titan), Any Chain."**
+> **“统一语言 (Zig)，统一操作系统 (Titan)，适配任何链。”**
 
-We explicitly move away from high-level "VM-based" compatibility (like EVM) and focus on **Native Performance**.
+我们明确放弃了高层“基于虚拟机”的兼容性（如 EVM），转而专注于 **原生性能 (Native Performance)**。
 
-*   **Target Architectures:**
-    *   **SBF (Solana Bytecode Format):** The high-performance standard.
-    *   **WebAssembly (Wasm):** The universal standard (Near, Polkadot, Cosmos, Arbitrum Stylus).
-*   **Performance:** Bare-metal speed. No interpreters, no overhead.
+*   **目标架构:**
+    *   **SBF (Solana Bytecode Format):** 高性能标准。
+    *   **WebAssembly (Wasm):** 通用标准 (Near, Polkadot, Cosmos, Arbitrum Stylus)。
+*   **性能:** 裸机速度。无解释器，无额外开销。
 
-## Key Value Proposition
+## 核心价值主张
 
-1.  **Unified System Programming:** A single Zig codebase compiles to `.so` (Solana) and `.wasm` (Generic).
-2.  **Zero-Cost Abstraction:** Titan OS provides a unified API (`OS.alloc`, `OS.log`) that compiles down to the exact system calls of the target chain with zero runtime overhead.
-3.  **Future Proof:** As new high-performance chains emerge (e.g., using RISC-V or new VMs), Titan OS only needs to update the "Kernel" layer, and all user applications gain support instantly.
+1.  **统一系统编程:** 一套 Zig 代码库即可编译为 `.so` (Solana) 和 `.wasm` (通用 Wasm)。
+2.  **零成本抽象:** Titan OS 提供统一的 API (`OS.alloc`, `OS.log`)，这些 API 会编译为目标链精确的系统调用，且无运行时开销。
+3.  **面向未来:** 随着新的高性能链出现（例如采用 RISC-V 或新虚拟机），Titan OS 只需更新“内核”层，所有用户应用即可瞬间获得支持。
