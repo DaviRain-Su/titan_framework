@@ -33,6 +33,11 @@ pub const CoreContext = struct {
 };
 ```
 
+### 2.0.1 命名约定 (Naming Convention)
+
+*   `titan.Context` 指向 `CoreContext`。
+*   各后端通过命名空间暴露扩展上下文（如 `titan.sbf.Context`）。
+
 ### 2.1 系统基础
 ```zig
 /// 立即终止程序执行，并返回状态码

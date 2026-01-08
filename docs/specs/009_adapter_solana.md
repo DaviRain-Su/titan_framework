@@ -59,6 +59,8 @@ pub const SolanaContext = struct {
 };
 ```
 
+**命名约定**: `titan.sbf.Context` 指向 `SolanaContext`。
+
 *   **主状态账户选择**: `accounts` 中第一个 `is_writable = true` 的账户。
 *   **失败行为**: 如果不存在可写账户，返回 `Error.InvalidInput`。
 
