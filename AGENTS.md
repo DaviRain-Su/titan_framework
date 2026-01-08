@@ -261,6 +261,16 @@ const result = doSomething() catch |err| {
 
 ---
 
+## 设计参考 (Design References)
+
+由于 Titan OS 的定位是 "Web3 的 Linux"，其设计应参考 Linux 内核的经典实现。在设计系统接口、内存管理或调度策略时，可参考以下资源：
+
+- **Linux Kernel Source Tree (Git)**: [https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git)
+- **Bootlin Elixir (Cross Referencer)**: [https://elixir.bootlin.com/linux/latest/source](https://elixir.bootlin.com/linux/latest/source) (推荐用于快速检索内核符号)
+- **OSDev Wiki**: [https://wiki.osdev.org/Main_Page](https://wiki.osdev.org/Main_Page) (操作系统开发基础知识)
+
+---
+
 ## 相关文档
 
 - `ROADMAP.md` - 项目路线图（Source of Truth）
