@@ -20,6 +20,19 @@ pub const impl = switch (build_options.target_chain) {
 
 任何一个新的后端（如未来支持 Aptos 或 Ton），都必须严格实现以下所有函数签名：
 
+### 2.0 CoreContext 抽象 (Platform-Agnostic)
+
+`CoreContext` 仅包含跨链通用的最小运行时信息，不绑定任何具体账户模型。
+
+```zig
+pub const CoreContext = struct {
+    /// Raw input bytes (Borsh by default).
+    input: []const u8,
+    /// Optional program id (not all chains have this notion).
+    program_id: ?Pubkey,
+};
+```
+
 ### 2.1 系统基础
 ```zig
 /// 立即终止程序执行，并返回状态码

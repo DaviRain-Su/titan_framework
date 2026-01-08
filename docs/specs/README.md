@@ -25,6 +25,7 @@
 | **012** | [跨链通信协议](012_interchain_messaging.md) | 统一的 LayerZero/IBC 抽象接口。 |
 | **013** | [事件与索引](013_events_indexing.md) | 统一的 Log/Event 发送与索引标准。 |
 | **014** | [合约升级机制](014_upgradability.md) | 代理升级、原生升级与状态迁移标准。 |
+| **015** | [EVM 适配器](015_adapter_evm.md) | 基于 Arbitrum Stylus 的 EVM 互操作规范。 |
 
 ## 高级设计 (Advanced Designs)
 

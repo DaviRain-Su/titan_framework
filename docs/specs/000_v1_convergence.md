@@ -49,6 +49,19 @@ pub fn set_custom_code(code: u32) void;
 **新设计**: **Struct-based Mapping**。
 用户定义一个大结构体 `MyAccountData`，Titan 将其直接序列化到 Account Data 中。不支持动态增长的 `HashMap`，仅支持固定布局或简单的 `ArrayList`（尾部增长）。
 
+**V1 约束**:
+*   **不提供** `titan.storage.set/get` KV 接口。
+*   **主状态账户**: `Context.accounts` 中 **第一个 `is_writable = true` 的账户**。
+    *   若不存在可写账户，返回 `Error.InvalidInput`。
+*   **访问方式**: 仅支持显式结构体映射。
+
+```zig
+// V1 storage access (Struct-based Mapping only)
+var state = ctx.accounts[state_index].load_as(MyAccountData);
+state.counter += 1;
+try ctx.accounts[state_index].save(state);
+```
+
 ## 3. IDL 生成策略 (IDL Strategy)
 
 **问题**: Zig `@typeInfo` 无法稳定获取函数参数名。
@@ -98,5 +111,8 @@ pub fn transfer(to: Address, amount: u64, opts: TransferOptions) !void;
     *   输入解析 (Borsh Struct)
     *   简单状态读写 (Direct Struct Mapping)
     *   CPI (Solana 原生)
+
+**V1 约束**:
+*   所有会分配内存的 API 必须显式传入 `allocator`，不允许隐式分配。
 
 **结论**: 我们先做一个 **"Better Anchor for Zig"**，跑通后再扩展到 Wasm。

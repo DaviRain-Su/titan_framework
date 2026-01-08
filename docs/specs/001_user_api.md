@@ -7,6 +7,22 @@
 *   **统一错误处理**: 所有系统错误统一归纳为 `titan.Error` 错误集。
 *   **无特定链依赖**: 用户代码中禁止出现 `solana_program`、`near_sdk` 或任何特定链的术语。
 
+## 1.1 Context 与 Allocator 的职责边界
+
+*   **Allocator**: 只负责内存分配策略（Bump/Arena/Custom），所有会分配内存的 API 必须显式接收 `allocator`。
+*   **Context**: 只承载运行时环境（账户列表、输入数据、程序 ID、主状态账户索引等），不隐式分配内存。
+
+```zig
+pub fn main(ctx: *titan.Context, allocator: std.mem.Allocator) !void {
+    const input = try titan.os.read_input_copy(allocator);
+    defer allocator.free(input);
+
+    var state = ctx.accounts[ctx.state_account_index].load_as(MyState);
+    state.counter += 1;
+    try ctx.accounts[ctx.state_account_index].save(state);
+}
+```
+
 ## 2. Hello World 示例
 
 这是最简单的 Titan 应用程序结构：
@@ -38,17 +54,19 @@ pub fn main() !void {
 
 ## 3. 存储接口 (Storage API)
 
-存储操作必须抽象为 Key-Value (键-值) 结构，即便底层（如 Solana）是基于 Account (账户) 模型的。
+V1 不提供 KV 风格的 `titan.storage.set/get`。存储仅允许显式结构体映射到账户数据。
 
 ```zig
-// 写入数据
-// 将 "my_value" 字符串写入到键 "my_key" 下
-try titan.storage.set("my_key", "my_value");
+// V1: Explicit Struct-based Mapping
+const MyState = struct {
+    counter: u64,
+};
 
-// 读取数据
-// 需要传入缓冲区，或者使用 alloc_get 让系统自动分配内存
-var buf: [64]u8 = undefined;
-const len = try titan.storage.get("my_key", &buf);
+pub fn update(ctx: *titan.Context) !void {
+    var state = ctx.accounts[ctx.state_account_index].load_as(MyState);
+    state.counter += 1;
+    try ctx.accounts[ctx.state_account_index].save(state);
+}
 ```
 
 ## 4. 资产接口 (Token API) - 阶段 2 规划

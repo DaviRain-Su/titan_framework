@@ -38,12 +38,36 @@ Solana 提供了 32KB 的堆。
 
 ## 4. 账户模型适配 (The Account Model)
 
-Titan 的 `storage.get/set` 在 Solana 上如何工作？
+### 4.1 V1 规则: Struct-based Mapping Only
 
-*   **默认模式**: 假设当前程序管理一个主状态账户。
-*   **实现**:
-    *   `storage.set(k, v)` -> 修改主账户 `data` 字段中的对应偏移量。
-    *   这要求 Titan 在 Account Data 内部实现一个微型文件系统或 KV 结构。
+V1 不提供 `titan.storage.set/get` KV 接口，存储仅允许显式结构体映射。
+
+### 4.2 SolanaContext (V1)
+
+Solana 后端提供扩展上下文以承载账户模型信息。
+
+```zig
+pub const SolanaContext = struct {
+    /// All accounts passed to the program.
+    accounts: []AccountInfo,
+    /// Instruction data bytes (Borsh by default).
+    instruction_data: []const u8,
+    /// Current program id.
+    program_id: Pubkey,
+    /// V1 rule: first writable account index.
+    state_account_index: usize,
+};
+```
+
+*   **主状态账户选择**: `accounts` 中第一个 `is_writable = true` 的账户。
+*   **失败行为**: 如果不存在可写账户，返回 `Error.InvalidInput`。
+
+```zig
+// Example: load/save explicit struct state
+var state = ctx.accounts[state_index].load_as(MyAccountData);
+state.counter += 1;
+try ctx.accounts[state_index].save(state);
+```
 
 ## 5. Panic 处理
 调用 `sol_panic_` 导致交易失败并打印日志。

@@ -54,9 +54,11 @@ Titan OS 不仅仅是一个 SDK，它是一个**虚拟操作系统**。它在碎
     *   统一 Token 接口 (适配 NEP-141)。
 
 ### V3: 全链互操作与高级特性 (Interoperability & Advanced)
-*   **目标**: 连接 TON 与以太坊生态，引入隐私计算。
+*   **目标**: 连接 TON 与以太坊生态，引入隐私计算，并开放内核能力给其他语言。
 *   **能力**:
     *   **TON 适配**: Zig -> Tact 转译器。
+    *   **EVM 适配**: 深度集成 **Arbitrum Stylus**，允许 Titan 合约以 Wasm 形式运行在 EVM 链上，并提供 `titan.evm` 模块访问 EVM 特有状态。
+    *   **LibTitan (多语言绑定)**: 将 Titan 内核编译为 C-ABI 库 (`libtitan`), 允许 Rust、C++ 甚至 Go 开发者链接 Titan 内核，享受跨链 HAL 的红利。
     *   **ZK 隐私**: 集成 zk-SNARKs 原语 (Groth16/Plonk 验证)。
     *   **Titan IBC**: 基于 intent 的跨链消息协议。
     *   **形式化验证**: 导出逻辑模型供验证工具使用。
