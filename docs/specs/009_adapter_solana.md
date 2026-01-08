@@ -11,14 +11,65 @@ export fn entrypoint(input: [*]u8) u64
 
 ### 1.1 输入数据布局
 `input` 指针指向一个序列化的字节流：
-1.  `num_accounts` (u64)
-2.  `AccountInfo` 数组
-3.  `instruction_data_len` (u64)
+1.  `num_accounts` (u64, little-endian)
+2.  `AccountInfo` 数组 (见 1.2)
+3.  `instruction_data_len` (u64, little-endian)
 4.  `instruction_data` (bytes)
-5.  `program_id` (Pubkey)
+5.  `program_id` (Pubkey, 32 bytes)
 
 **Titan 内核职责**:
 在 `_start` 阶段，内核必须解析这个字节流，并将其转换为 Titan 的标准 `Context` 结构体。
+
+### 1.2 AccountInfo 字节布局 (Critical for V1)
+
+每个 `AccountInfo` 在输入流中的布局如下（**无对齐填充，紧凑排列**）：
+
+```
+Offset  Size    Field               Description
+──────────────────────────────────────────────────────────────
+0       1       is_duplicate        0 = 首次出现, 0xFF = 重复引用 (跳过)
+                                    若 0xFF，后续仅跟随 4 字节索引
+
+以下字段仅当 is_duplicate = 0 时存在：
+1       1       is_signer           0 = false, 1 = true
+2       1       is_writable         0 = false, 1 = true
+3       1       executable          0 = false, 1 = true
+4       4       _padding            (原始布局要求，可忽略内容)
+8       32      key                 账户公钥 (Pubkey)
+40      32      owner               所有者程序公钥
+72      8       lamports            账户余额 (u64, little-endian)
+80      8       data_len            数据长度 (u64)
+88      N       data                账户数据 (N = data_len, 8字节对齐填充)
+88+N'   8       rent_epoch          租期纪元 (u64)
+──────────────────────────────────────────────────────────────
+```
+
+**Zig 结构体定义:**
+```zig
+pub const AccountInfo = struct {
+    key: *const Pubkey,
+    lamports: *u64,
+    data: []u8,
+    owner: *const Pubkey,
+    rent_epoch: u64,
+    is_signer: bool,
+    is_writable: bool,
+    executable: bool,
+};
+```
+
+### 1.3 返回值语义
+
+| 返回值 | 含义 | Titan Error |
+| :--- | :--- | :--- |
+| `0` | 成功 | - |
+| `1` | 自定义错误 (配合 `set_custom_code`) | `CustomError` |
+| `0x100000000` | InvalidInput | `InvalidInput` |
+| `0x100000001` | InvalidAccountData | `InvalidInput` |
+| `0x100000002` | AccountDataTooSmall | `OutOfMemory` |
+| `0x100000003` | InsufficientFunds | `Unauthorized` |
+| `0x100000004` | IncorrectProgramId | `InvalidInput` |
+| `0x100000005` | MissingRequiredSignature | `Unauthorized` |
 
 ## 2. 系统调用映射 (Syscalls)
 

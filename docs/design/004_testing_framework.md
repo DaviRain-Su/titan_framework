@@ -41,7 +41,126 @@ test "transfer logic" {
 }
 ```
 
-## 3. 集成测试 (Scenario Testing)
+## 3. V1 Mock Runtime API (Critical)
+
+### 3.1 Runtime 结构体
+
+```zig
+pub const Runtime = struct {
+    /// 模拟的账户存储: pubkey -> AccountData
+    accounts: std.AutoHashMap(Pubkey, AccountData),
+    /// 捕获的日志输出
+    logs: std.ArrayList([]const u8),
+    /// 最后一次调用的返回数据
+    return_data: ?[]const u8,
+    /// 模拟的区块高度
+    block_height: u64,
+    /// 模拟的时间戳
+    timestamp: u64,
+    /// 内部分配器
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator) Runtime;
+    pub fn deinit(self: *Runtime) void;
+};
+
+pub const AccountData = struct {
+    lamports: u64,
+    data: []u8,
+    owner: Pubkey,
+    is_signer: bool,
+    is_writable: bool,
+};
+```
+
+### 3.2 账户操作 API
+
+```zig
+/// 创建或更新账户
+pub fn set_account(self: *Runtime, pubkey: Pubkey, data: AccountData) void;
+
+/// 获取账户（如果存在）
+pub fn get_account(self: *Runtime, pubkey: Pubkey) ?AccountData;
+
+/// 设置账户数据（简化接口）
+pub fn set_account_data(self: *Runtime, pubkey: Pubkey, data: []const u8) void;
+
+/// 标记账户为 signer
+pub fn set_signer(self: *Runtime, pubkey: Pubkey, is_signer: bool) void;
+```
+
+### 3.3 输入注入 API
+
+```zig
+/// 构建模拟的交易输入
+pub fn build_instruction(
+    self: *Runtime,
+    program_id: Pubkey,
+    accounts: []const AccountMeta,
+    data: []const u8,
+) InstructionInput;
+
+/// 执行合约入口点
+pub fn invoke(
+    self: *Runtime,
+    program: anytype,  // 合约模块
+    input: InstructionInput,
+) !void;
+```
+
+### 3.4 断言与捕获 API
+
+```zig
+/// 获取所有日志
+pub fn get_logs(self: *Runtime) []const []const u8;
+
+/// 清空日志
+pub fn clear_logs(self: *Runtime) void;
+
+/// 获取返回数据
+pub fn get_return_data(self: *Runtime) ?[]const u8;
+
+/// 断言日志包含特定字符串
+pub fn expect_log_contains(self: *Runtime, expected: []const u8) !void;
+```
+
+### 3.5 完整测试示例
+
+```zig
+test "counter increment" {
+    var runtime = titan.testing.Runtime.init(std.testing.allocator);
+    defer runtime.deinit();
+
+    // 1. 设置账户
+    const program_id = Pubkey.fromBase58("MyProgram...");
+    const state_account = Pubkey.fromBase58("StateAcc...");
+
+    runtime.set_account(state_account, .{
+        .lamports = 1_000_000,
+        .data = &std.mem.zeroes([64]u8),
+        .owner = program_id,
+        .is_signer = false,
+        .is_writable = true,
+    });
+
+    // 2. 构建指令
+    const input = runtime.build_instruction(
+        program_id,
+        &.{ .{ .pubkey = state_account, .is_signer = false, .is_writable = true } },
+        &[_]u8{ 0x01 }, // Increment 指令
+    );
+
+    // 3. 执行
+    try runtime.invoke(@import("my_program"), input);
+
+    // 4. 断言
+    const account = runtime.get_account(state_account).?;
+    const counter = std.mem.readInt(u64, account.data[0..8], .little);
+    try std.testing.expectEqual(@as(u64, 1), counter);
+}
+```
+
+## 4. 集成测试 (Scenario Testing)
 
 除了单元测试，我们还需要支持多合约交互的场景测试。
 

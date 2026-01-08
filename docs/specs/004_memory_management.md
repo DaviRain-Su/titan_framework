@@ -63,3 +63,66 @@ pub fn heap_grow(delta: usize) ![*]u8;
 ```
 
 这些原语仅供 `TitanAllocator` 内部使用，用户空间应尽量避免直接调用。
+
+## 5. V1 Bump Allocator 实现规范 (Critical)
+
+### 5.1 常量定义
+
+```zig
+/// Solana SBF 堆起始地址 (由 runtime 固定)
+pub const HEAP_START: usize = 0x300000000;
+
+/// V1 默认堆大小: 32KB
+pub const HEAP_SIZE: usize = 32 * 1024;
+
+/// 对齐要求: 8 字节 (满足大多数类型)
+pub const ALIGNMENT: usize = 8;
+```
+
+### 5.2 状态结构
+
+```zig
+/// Bump Allocator 内部状态 (存储在堆的起始位置)
+const BumpState = struct {
+    /// 当前分配指针 (向高地址增长)
+    pos: usize,
+    /// 堆结束边界
+    end: usize,
+};
+
+/// 全局状态指针 (在 entrypoint 初始化)
+var state: *BumpState = undefined;
+```
+
+### 5.3 生命周期
+
+| 阶段 | 操作 | 说明 |
+| :--- | :--- | :--- |
+| **初始化** | `entrypoint` 入口处调用 `bump_init()` | 设置 `pos = HEAP_START + @sizeOf(BumpState)`, `end = HEAP_START + HEAP_SIZE` |
+| **分配** | `alloc(len, alignment)` | 对齐 `pos`，检查 `pos + len <= end`，返回指针并移动 `pos` |
+| **释放** | `free(ptr)` | **V1 不支持单独释放**，调用为空操作 (no-op) |
+| **重置** | `reset()` | 将 `pos` 重置为初始值，**仅在交易边界调用** |
+
+### 5.4 OOM 行为
+
+```zig
+pub fn alloc(len: usize, alignment: u8) ?[*]u8 {
+    const aligned_pos = std.mem.alignForward(usize, state.pos, alignment);
+    const new_pos = aligned_pos + len;
+
+    if (new_pos > state.end) {
+        // OOM: 返回 null，上层转换为 Error.OutOfMemory
+        return null;
+    }
+
+    state.pos = new_pos;
+    return @ptrFromInt(aligned_pos);
+}
+```
+
+### 5.5 不变量 (Invariants)
+
+1. `HEAP_START <= state.pos <= state.end`
+2. 所有返回的指针地址满足请求的对齐要求
+3. 一次交易内的 `state.pos` 单调递增（无回退）
+4. `reset()` 仅在交易结束或测试边界调用
