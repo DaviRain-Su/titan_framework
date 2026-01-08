@@ -271,6 +271,36 @@ const result = doSomething() catch |err| {
 
 ---
 
+## SDK 与底层架构参考 (SDK & Architecture References)
+
+在实现 `arch/` 和 `drivers/` 层时，必须严格参照以下官方底层规范，确保 ABI 兼容性。
+
+### 1. Solana (SBF / Sealevel)
+- **Solana Program Library (C/Rust)**: [https://github.com/solana-labs/solana-program-library](https://github.com/solana-labs/solana-program-library)
+- **SBF 内存布局与入口点**: 
+  - 输入格式: [Serialized Instruction Data](https://docs.solanalabs.com/implemented-proposals/program-derived-addresses)
+  - 系统调用列表: `sol_log`, `sol_invoke_signed`, `sol_set_return_data`。
+- **Sealevel VM 原理**: 账户模型、CPI 机制、PDA 派生规则。
+
+### 2. Near Protocol (Wasm)
+- **Near SDK (Rust)**: [https://github.com/near/near-sdk-rs](https://github.com/near/near-sdk-rs)
+- **Runtime Host Functions**:
+  - `near-sys` crate: 定义了所有 `extern "C"` 导入。
+  - **Registers API**: Near 不直接把数据写入内存，而是使用寄存器 (`read_register`, `register_len`)，Titan 必须封装这一层以模拟线性内存。
+- **Nomicon (Specs)**: [https://nomicon.io/](https://nomicon.io/) (数据结构与序列化标准)。
+
+### 3. Cosmos (CosmWasm)
+- **CosmWasm Book**: [https://book.cosmwasm.com/](https://book.cosmwasm.com/)
+- **Entrypoints**: `instantiate`, `execute`, `query`.
+- **Imports**: `db_read`, `db_write`, `addr_validate`.
+
+### 4. TON (TVM / Tact)
+- **TVM Whitepaper**: 深入理解 Stack-based 虚拟机和 Cell 数据结构。
+- **Tact Compiler**: [https://github.com/tact-lang/tact](https://github.com/tact-lang/tact) (参考其如何将高级语法编译为 FunC/Fift)。
+- **TL-B Scheme**: 数据序列化标准。
+
+---
+
 ## 相关文档
 
 - `ROADMAP.md` - 项目路线图（Source of Truth）

@@ -1,109 +1,89 @@
 # 设计 006: 异步编程模型 (Async Programming Model)
 
-> 状态: 草稿
-> 难度: 极高 (Core Architecture)
+> 状态: 规划中 (V2 Target)
+> 核心问题: 如何统一处理 Solana (Sync) 和 Near (Async) 的调用逻辑？
 
-## 1. 核心挑战 (The Challenge)
+## 1. 核心挑战
 
-区块链世界的执行模型分裂为两大阵营：
+*   **Solana**: `call()` 是原子的，直接返回结果。
+*   **Near**: `call()` 是异步的，返回 Promise ID。当前交易结束，结果在下一笔交易的回调中处理。
 
-1.  **原子同步 (Atomic/Sync)**: 如 **Solana**, Aptos, Sui。
-    *   调用其他合约 (`CPI`) 是立即完成的。
-    *   所有逻辑在一个交易内原子执行。
-    *   代码风格: `let bal = token.balance_of(user);` (直接拿到值)
+## 2. 解决方案: 显式状态机 (Explicit State Machine)
 
-2.  **异步消息 (Async/Message)**: 如 **Near**, **TON**, Polkadot, Eth L2 (跨链)。
-    *   调用其他合约是“发射并遗忘” (Fire-and-Forget) 或“注册回调”。
-    *   逻辑被拆分为多个区块/交易。
-    *   代码风格: `token.balance_of(user).then(callback);`
+Titan OS V1/V2 不做隐式的编译器魔法 (Async/Await)。我们要求用户显式定义状态机。
 
-Titan OS 的终极目标是：**用户只需写一种逻辑，编译器自动适配两种模型。**
-
-## 2. 抽象方案: `TitanPromise`
-
-我们引入 `TitanPromise<T>` 概念。这是一种编译时的多态类型。
+### 2.1 API 设计
 
 ```zig
 const titan = @import("titan");
 
-pub fn check_balance_and_withdraw(user: Address) !void {
-    // 1. 发起跨合约调用
-    // 返回值是一个 Promise
-    const balance_future = titan.token.balance_of(user);
+// 定义状态结构体 (必须可序列化)
+const SwapState = struct {
+    user: Address,
+    amount_in: u64,
+    min_out: u64,
+};
 
-    // 2. 等待结果 (await)
-    // 这一步是魔法所在
-    const balance = try balance_future.await_result();
+// 步骤 1: 发起调用
+pub fn swap_step1(ctx: Context, args: SwapArgs) !void {
+    // 保存中间状态
+    const state = SwapState { ... };
+    
+    // 发起异步调用
+    // 在 Solana 上: 立即执行 balance_of，然后立即调用 swap_step2
+    // 在 Near 上: 发起 promise，注册 swap_step2 为回调
+    try titan.async.call(
+        .target = token_program,
+        .method = "balance_of",
+        .args = .{ args.user },
+        .callback = swap_step2, // 下一步函数
+        .state = state,         // 传递状态
+    );
+}
 
-    // 3. 后续逻辑
-    if (balance > 100) {
-        try titan.token.transfer(user, 100);
-    }
+// 步骤 2: 处理结果
+pub fn swap_step2(ctx: Context, result: u64, state: SwapState) !void {
+    if (result < state.amount_in) return error.InsufficientBalance;
+    // ...
 }
 ```
 
-## 3. 编译时分叉 (Compiler Divergence)
+## 3. 实现原理 (Under the Hood)
 
-`await_result()` 函数在不同架构下有完全不同的实现：
-
-### 3.1 场景 A: Solana (同步模式)
-在 Solana 上，`await_result()` 会被编译为：
-*   **立即执行** `sol_invoke_signed`。
-*   解析返回数据 (`return_data`)。
-*   **直接返回**结果。
-*   *性能开销*: 零。这就是普通的函数调用。
-
-### 3.2 场景 B: Near/TON (异步模式)
-这是最复杂的部分。Zig 编译器需要进行 **CPS 变换 (Continuation-Passing Style)** 或 **状态机生成**。
-
-由于 Zig 目前没有原生的 Async/Await (暂被移除)，我们采用 **“回调展开” (Callback Unrolling)** 策略。
-
-**构建系统的魔法**:
-当目标是 `near` 时，编译器（或者我们的预处理工具）会将 `await_result` 之后的代码**切割**到一个新的回调函数中。
+### 3.1 Solana 实现 (Sync Wrapper)
+`titan.async.call` 在 Solana 上是一个简单的 wrapper：
 
 ```zig
-// 伪代码: 编译到 Near 时的自动代码生成
-pub fn check_balance_and_withdraw(user: Address) {
-    // 1. 发起调用
-    let promise_id = promise_create(..., "balance_of", ...);
-    
-    // 2. 注册回调 (指向生成的 part2 函数)
-    promise_then(promise_id, ..., "check_balance_callback", ...);
-}
+// Solana implementation
+pub fn call(..., callback: anytype, state: anytype) !void {
+    // 1. 同步执行 CPI
+    const result_data = try sol_invoke(...);
+    const result = deserialize(result_data);
 
-// 自动生成的后续逻辑
-export fn check_balance_callback() {
-    // 1. 获取结果
-    let balance = promise_result();
-    
-    // 2. 原来的后续逻辑
-    if (balance > 100) {
-        // ...
-    }
+    // 2. 立即调用回调
+    try callback(ctx, result, state);
 }
 ```
 
-## 4. 受限的编程模型
-
-为了让这种自动切割可行，Titan OS 对异步代码施加限制：
-
-1.  **顶层 Await**: `await_result()` 只能在主业务逻辑中调用，不能深层嵌套。
-2.  **状态持久化**: 在 `await` 之前的局部变量，如果 `await` 之后还需要用，必须能够被序列化（自动保存到合约状态或闭包中）。
-
-## 5. 显式异步 (Alternative: Explicit Async)
-
-如果自动切割太激进，我们也可以提供显式 API：
+### 3.2 Near 实现 (Promise Chain)
+`titan.async.call` 在 Near 上操作 Promise：
 
 ```zig
-// 用户显式定义两段逻辑
-pub fn step1(ctx: Context) !void {
-    // 发起调用，并告诉系统下一步去哪
-    try titan.async.call(token, "balance_of", .{}, .callback = step2);
-}
-
-pub fn step2(ctx: Context, result: u64) !void {
-    if (result > 100) { ... }
+// Near implementation
+pub fn call(..., callback: anytype, state: anytype) !void {
+    // 1. 序列化状态
+    const state_bytes = serialize(state);
+    
+    // 2. 创建 Promise
+    const id = promise_create(...);
+    
+    // 3. 注册回调 (Tell host to call `callback` with `state`)
+    promise_then(id, self_address, "swap_step2", state_bytes, ...);
 }
 ```
 
-**设计决策**: V1 版本优先支持 **显式异步** (Explicit Async)，因为这更容易实现且更透明。V2 版本再尝试实现基于 AST 分析的自动切割 (Implicit Async)。
+## 4. 局限性
+*   用户必须手动拆分逻辑。
+*   状态对象 (`state`) 的大小受限于链的参数限制 (Near 较宽松，Solana 无此限制因内存共享)。
+
+这种设计虽然繁琐，但它是**显式、零魔法且类型安全**的。

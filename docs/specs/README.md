@@ -19,6 +19,12 @@
 | **006** | [序列化与 ABI](006_serialization_abi.md) | 定义数据交换格式 (Borsh) 与跨合约调用标准。 |
 | **007** | [错误处理](007_error_handling.md) | 定义系统错误集 (`titan.Error`) 与 Panic 机制。 |
 | **008** | [统一代币标准](008_unified_token.md) | 定义跨链通用的 Token 接口 (SPL/ERC20/NEP141)。 |
+| **009** | [Solana 适配器](009_adapter_solana.md) | Solana SBF 底层实现细节。 |
+| **010** | [Near 适配器](010_adapter_near.md) | Near Wasm 底层实现细节。 |
+| **011** | [TON 适配器](011_adapter_ton.md) | TON Tact 转译实现细节。 |
+| **012** | [跨链通信协议](012_interchain_messaging.md) | 统一的 LayerZero/IBC 抽象接口。 |
+| **013** | [事件与索引](013_events_indexing.md) | 统一的 Log/Event 发送与索引标准。 |
+| **014** | [合约升级机制](014_upgradability.md) | 代理升级、原生升级与状态迁移标准。 |
 
 ## 高级设计 (Advanced Designs)
 
@@ -31,3 +37,6 @@
 | **D-005** | [CLI 工具链](design/005_cli_toolchain.md) | 定义开发者命令行交互流程。 |
 | **D-006** | [异步编程模型](design/006_async_model.md) | 定义同步与异步调用的统一抽象 (Promise)。 |
 | **D-007** | [IDL 与客户端](design/007_idl_client_gen.md) | 定义接口描述语言及 SDK 生成。 |
+| **D-008** | [SDK 映射策略](design/008_sdk_mapping_strategy.md) | 定义多链 SDK 的最大公约数提取策略。 |
+| **D-009** | [ZK 隐私架构](design/009_zk_privacy.md) | 定义链上验证与链下电路编译流程。 |
+| **D-010** | [形式化验证](design/010_formal_verification.md) | 定义基于 SMT 求解器的代码安全性证明。 |

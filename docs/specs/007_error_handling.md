@@ -17,8 +17,13 @@ pub const Error = error {
     Unauthorized,       // 签名或权限缺失
     InstructionFailed,  // 跨合约调用失败
     Timeout,            // 执行超时 (Gas 耗尽)
-    Custom(u32),        // 用户自定义错误码
+    CustomError,        // 用户自定义错误 (配合 set_custom_code 使用)
 };
+
+// 辅助函数：设置自定义错误码
+// 由于 Zig error set 不支持 payload，使用副作用函数传递额外信息
+pub fn set_custom_code(code: u32) void;
+pub fn get_custom_code() u32;
 ```
 
 ## 2. Panic 处理

@@ -1,6 +1,6 @@
 # 设计 007: IDL 与客户端生成 (IDL & Client Generation)
 
-> 状态: 草稿
+> 状态: **已生效 (Effective/Converged)**
 
 ## 1. 概述 (Overview)
 
@@ -33,23 +33,39 @@ Titan IDL 是一个 JSON 文件，类似于 Solana 的 Anchor IDL，但更通用
 
 ## 3. 自动生成机制 (Auto-Generation)
 
-我们不希望用户手写 JSON。Titan 利用 Zig 强大的反射能力 (`@typeInfo`) 在编译时自动生成 IDL。
-
-### 3.1 编译时反射
+### 3.1 强制结构化参数 (Struct-Based Args)
+为了解决 Zig `@typeInfo` 无法稳定获取函数参数名的问题，Titan 强制要求所有公开指令（Instruction）必须接受单一的结构体参数。
 
 ```zig
-// 在构建阶段运行的一个特殊步骤
-pub fn generate_idl() !void {
-    const entrypoints = @import("src/main.zig").entrypoints;
-    
-    // 遍历所有导出函数
-    inline for (entrypoints) |func| {
-        // 分析参数名和类型
-        const args = @typeInfo(@TypeOf(func)).Fn.args;
-        // 导出到 JSON
-    }
-}
+const TransferArgs = struct {
+    to: Address,
+    amount: u64,
+};
+
+pub fn transfer(ctx: Context, args: TransferArgs) !void { ... }
 ```
+
+构建系统通过反射 `TransferArgs` 的字段名（`to`, `amount`）来生成 IDL 中的 `args` 列表。
+
+### 3.2 元数据注解 (Metadata Annotations)
+Zig 没有类似 Rust `#[derive]` 的属性宏。我们使用 **Comptime Mixin** 模式。
+
+用户需要在模块顶部声明一个 IDL 元数据常量：
+
+```zig
+pub const titan_idl_meta = .{
+    .instructions = .{
+        .{ .name = "transfer", .docs = "Transfers tokens", .impl = transfer },
+    },
+    .accounts = .{
+        .{ .name = "MyState", .type = MyState },
+    }
+};
+```
+
+> **注意**: 避免使用双下划线前缀 (`__`)，因为这在许多语言中被视为编译器/运行时保留符号。
+
+这种方式虽然比 Rust 宏繁琐一点，但它是纯 Zig 的，且类型安全。构建脚本会扫描 `root.zig` 中的 `titan_idl_meta` 常量并导出 JSON。
 
 ## 4. 多语言客户端生成 (SDK Generation)
 

@@ -58,18 +58,19 @@ pub fn transfer(from: Signer, to: Address, amount: u64) !void { ... }
 
 ## 5. 重入保护 (Reentrancy Protection)
 
-### 5.1 互斥锁 (Mutex)
-*   Titan 内核提供轻量级的 `ReentrancyGuard`。
-*   利用底层链的临时存储（如 Solana 的 Transaction scoped memory）设置标志位。
+### 5.1 同步环境 (Solana)
+*   **机制**: 使用临时内存 (Instruction-scoped memory) 或 Transient Storage (如果可用)。
+*   **实现**: `var lock = try Mutex.acquire(); defer lock.release();`
 
-```zig
-pub fn withdraw() !void {
-    var guard = try titan.security.ReentrancyGuard.acquire();
-    defer guard.release();
-
-    // 业务逻辑...
-}
-```
+### 5.2 异步环境 (Near/TON) - **关键修正**
+*   **问题**: 异步调用跨越多个区块，内存锁无效。
+*   **机制**: 必须使用 **持久化存储 (Storage)** 作为锁的载体。
+*   **实现**: `titan.security.AsyncGuard`。
+    1.  `acquire()`: 写入 Storage Key `IS_LOCKED = true`。
+    2.  发起异步调用。
+    3.  在回调函数中 `release()`: 写入 `IS_LOCKED = false`。
+*   **死锁风险**: 如果异步调用失败且未触发回调，锁将永远无法释放。
+*   **超时机制**: AsyncGuard 必须包含 `timeout` 字段。如果当前时间超过 `lock_time + timeout`，允许强制覆盖锁。
 
 ## 6. 供应链安全
 *   **锁定依赖**: 强制使用 `build.zig.zon` 锁定所有依赖库的哈希值。

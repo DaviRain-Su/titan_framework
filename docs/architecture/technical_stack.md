@@ -17,9 +17,9 @@ Titan OS 的结构类似于传统操作系统，分为 **用户空间 (User Spac
 *   **功能:** 使用 Zig 的 `comptime` 抽象底层虚拟机的差异。
 *   **组件:**
     *   **内存管理器:** 将 `Allocator` 映射到 Solana 的堆内存或 Wasm 的线性内存。
-    *   **系统调用接口:** 
+    *   **系统调用接口 (Syscall Interface):** 
         *   `titan.log()` -> `sol_log_compute_units()` (Solana) / `log_utf8` (Near)。
-        *   `titan.storage.read()` -> `sol_get_return_data()` (Solana) / `storage_read` (Near)。
+        *   `titan.storage.read()` -> 映射到 `AccountInfo.data` (Solana) / `storage_read` (Near)。
     *   **入口点 (Entrypoint):** 生成各链所需的特定 `entrypoint` 符号（例如 Solana 的 `entrypoint`，Wasm 的导出函数）。
 
 ## 3. 编译目标 (硬件层)
