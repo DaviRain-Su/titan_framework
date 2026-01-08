@@ -18,3 +18,16 @@
 | **005** | [标准库](005_standard_library.md) | 定义 `titan.lib`，包含数学、集合与加密原语。 |
 | **006** | [序列化与 ABI](006_serialization_abi.md) | 定义数据交换格式 (Borsh) 与跨合约调用标准。 |
 | **007** | [错误处理](007_error_handling.md) | 定义系统错误集 (`titan.Error`) 与 Panic 机制。 |
+| **008** | [统一代币标准](008_unified_token.md) | 定义跨链通用的 Token 接口 (SPL/ERC20/NEP141)。 |
+
+## 高级设计 (Advanced Designs)
+
+| ID | 标题 | 描述 |
+| :--- | :--- | :--- |
+| **D-001** | [内核结构](design/001_kernel_structure.md) | 定义 Linux 风格的源码树结构。 |
+| **D-002** | [驱动模型](design/002_driver_model.md) | 定义如何扩展特定链的功能 (CPI, Promise)。 |
+| **D-003** | [安全模型](design/003_security_model.md) | 定义默认安全的内存与权限机制。 |
+| **D-004** | [测试框架](design/004_testing_framework.md) | 定义本地 Mock Runtime 和模糊测试策略。 |
+| **D-005** | [CLI 工具链](design/005_cli_toolchain.md) | 定义开发者命令行交互流程。 |
+| **D-006** | [异步编程模型](design/006_async_model.md) | 定义同步与异步调用的统一抽象 (Promise)。 |
+| **D-007** | [IDL 与客户端](design/007_idl_client_gen.md) | 定义接口描述语言及 SDK 生成。 |
