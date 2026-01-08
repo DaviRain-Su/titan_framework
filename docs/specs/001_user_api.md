@@ -23,6 +23,23 @@ pub fn main(ctx: *titan.Context, allocator: std.mem.Allocator) !void {
 }
 ```
 
+## 1.2 用户感知层级 (Account Abstraction)
+
+V1 仍以 Solana 为唯一后端，因此账户模型无法完全隐藏，但 Titan 尽量将其降级为**高级概念**。
+
+*   **默认路径 (推荐)**: 用户仅使用主状态入口，不直接操作账户数组。
+*   **高级路径 (可选)**: 需要多账户/CPI 时才显式使用 `ctx.accounts`。
+
+```zig
+// Default path: hide accounts
+var state = ctx.state().load_as(MyState);
+state.counter += 1;
+try ctx.state().save(state);
+
+// Advanced path: explicit accounts
+const token_account = ctx.accounts[idx];
+```
+
 ## 2. Hello World 示例
 
 这是最简单的 Titan 应用程序结构：
