@@ -2,6 +2,8 @@
 
 本规范定义了 Titan OS 如何处理数据的输入与输出，以及合约之间如何通信。
 
+**设计原则**: 序列化是资源 IO 边界的一部分，必须保证跨链 IO 语义一致。
+
 ## 1. 统一数据交换格式 (Titan Binary Format)
 
 为了实现“一次编写，到处运行”，Titan OS 推荐在所有链上优先使用 **Borsh (Binary Object Representation Serializer for Hashing)** 作为默认序列化格式。

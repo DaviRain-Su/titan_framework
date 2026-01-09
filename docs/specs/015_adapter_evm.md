@@ -3,6 +3,8 @@
 > 状态: 规划中 (V2/V3 Target)
 > 核心策略: 不编译为 EVM Bytecode，而是通过 **Arbitrum Stylus** 运行 Wasm。
 
+**设计原则**: 将 EVM ABI 与调用模型映射为统一资源/IO 语义。
+
 ## 1. 架构映射 (Architecture Mapping)
 
 我们不尝试将 Zig 编译为传统的 EVM 字节码（因为架构差异太大）。相反，我们利用 Arbitrum 的 **Stylus** 技术，它允许 EVM 节点直接执行 Wasm。

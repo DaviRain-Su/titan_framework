@@ -3,6 +3,8 @@
 > 状态: 待实现
 > 所属 Story: [001-内核引导](../../stories/001-kernel-bootstrap.md)
 
+**设计原则**: 内存分配属于资源 IO 边界，必须显式可控。
+
 ## 1. 背景与目标
 Zig 标准库的 `std.heap.page_allocator` 依赖于操作系统的 `mmap`，这在区块链上是不存在的。我们需要实现符合 `std.mem.Allocator` 接口的自定义分配器，分别映射到 SBF 的 Heap 和 Wasm 的 Linear Memory。
 

@@ -3,6 +3,8 @@
 > 状态: 草稿
 > 关联故事: [001-内核引导](../../stories/001-kernel-bootstrap.md)
 
+**设计原则**: 采用 Linux “一切皆资源/IO”抽象，内核目录划分围绕资源后端与 IO 接口。
+
 ## 1. 概述 (Overview)
 
 受 Linux 内核源码树的启发，Titan OS 采用了 **架构相关代码 (`arch/`)** 与 **架构无关代码 (`kernel/`, `mm/`, `include/`)** 严格分离的设计。

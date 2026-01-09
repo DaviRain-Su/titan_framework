@@ -2,6 +2,8 @@
 
 欢迎来到 Titan OS！本指南将带您完成环境配置、创建第一个 Titan 智能合约，并将其编译到不同的区块链平台。
 
+**设计原则**: Titan OS 将链上能力抽象为统一资源/IO 语义，本指南以此为默认心智模型。
+
 ## 1. 环境准备 (Prerequisites)
 
 Titan OS 依赖于 Zig 编译器。为了支持 Solana SBF 架构，我们需要一个包含 SBF 后端的定制版 Zig。

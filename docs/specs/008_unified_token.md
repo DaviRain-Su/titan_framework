@@ -2,6 +2,8 @@
 
 本规范定义了 Titan OS 上的“标准代币接口”。它旨在抽象 Solana 的 SPL Token、Ethereum 的 ERC-20 和 Near 的 NEP-141。
 
+**设计原则**: Token 交互被建模为资源 IO（读余额/写转账/调用跨合约）。
+
 ## 1. 核心接口 (`titan.token.IToken`)
 
 ```zig

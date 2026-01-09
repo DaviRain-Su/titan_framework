@@ -3,6 +3,8 @@
 > 状态: 草稿
 > 核心问题: 如何用一套 Titan API 覆盖差异巨大的 Solana/Near/Cosmos SDK？
 
+**设计原则**: SDK 映射应收敛为资源/IO 抽象的最小公约数。
+
 ## 1. 核心理念：最大公约数 + 驱动扩展
 
 我们不可能覆盖 100% 的 SDK 功能（比如 Solana 的 Account Rent 机制在 Near 上不存在）。我们的策略是：

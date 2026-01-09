@@ -4,6 +4,8 @@
 > 所属 Story: [Story ID](../stories/xxx.md)
 > 负责人: AI Agent
 
+**设计原则**: 功能描述应明确其资源/IO 抽象位置。
+
 ## 1. 背景与目标 (Context & Goals)
 简述为什么需要这个功能，以及它解决了什么具体问题。
 

@@ -1,3 +1,5 @@
+设计原则：相关链特性说明仅作为资源/IO 抽象的背景知识。
+
 还有一个问题：现在的一些区块链平台，如 Near 是使用 Wasm（WebAssembly）作为运行时的，波卡（Polkadot）也是。除此之外，还有什么类似的平台吗？
 
 这是一个非常敏锐的问题。你提到的 Near 和 Polkadot（Substrate）确实是 WebAssembly (Wasm) 在区块链领域最著名的两个代表。

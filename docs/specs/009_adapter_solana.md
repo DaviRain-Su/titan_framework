@@ -2,6 +2,8 @@
 
 本规范定义了 Titan OS 如何在底层对接 Solana SBF (Sealevel) 运行时。
 
+**设计原则**: 将 Solana 运行时能力映射为统一资源/IO 语义。
+
 ## 1. 入口点 (Entrypoint)
 
 Solana 程序的入口是：

@@ -2,6 +2,8 @@
 
 > 状态: **已生效 (Effective/Converged)**
 
+**设计原则**: IDL 描述资源/IO 边界，保证多链交互语义一致。
+
 ## 1. 概述 (Overview)
 
 为了让前端（TypeScript/React）或后端（Rust/Go）能与 Titan 合约交互，我们需要一种标准的方式来描述合约接口。我们称之为 **Titan IDL**。

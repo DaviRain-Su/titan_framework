@@ -2,6 +2,8 @@
 
 本规范定义了 Titan OS 应用层通用的跨链通信接口。目标是让开发者像调用本地函数一样，调用另一条链上的合约。
 
+**设计原则**: 跨链消息被视为系统级 IO 资源，需遵循统一的发送/接收语义。
+
 ## 1. 设计理念
 
 Titan OS 不自己造跨链桥，而是定义一层 **"Meta-Bridge Interface" (元桥接口)**。底层适配 LayerZero, Wormhole, IBC 或 Chainlink CCIP。

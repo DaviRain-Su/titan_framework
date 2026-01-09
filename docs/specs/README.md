@@ -2,6 +2,10 @@
 
 本文档汇集了 Titan OS 的所有核心技术规范。这些规范是系统设计和实现的单一真理来源。
 
+## 统一设计原则
+
+所有规范遵循 Linux 的“**一切皆资源/IO**”抽象：链上对象被视为资源，通过统一 IO 语义访问。详见 `docs/architecture/master_architecture.md` 中的资源模型说明。
+
 ## 核心规范 (Core Specs)
 
 | ID | 标题 | 描述 |
@@ -26,6 +30,8 @@
 | **013** | [事件与索引](013_events_indexing.md) | 统一的 Log/Event 发送与索引标准。 |
 | **014** | [合约升级机制](014_upgradability.md) | 代理升级、原生升级与状态迁移标准。 |
 | **015** | [EVM 适配器](015_adapter_evm.md) | 基于 Arbitrum Stylus 的 EVM 互操作规范。 |
+| **017** | [运行时引导](017_runtime_bootstrap.md) | 定义如何从底层 entrypoint 引导至用户 main 函数。 |
+| **018** | [多链存储适配](018_multichain_storage.md) | Near/Cosmos/Polkadot 的存储层实现细节。 |
 
 ## 高级设计 (Advanced Designs)
 
@@ -40,4 +46,5 @@
 | **D-007** | [IDL 与客户端](design/007_idl_client_gen.md) | 定义接口描述语言及 SDK 生成。 |
 | **D-008** | [SDK 映射策略](design/008_sdk_mapping_strategy.md) | 定义多链 SDK 的最大公约数提取策略。 |
 | **D-009** | [ZK 隐私架构](design/009_zk_privacy.md) | 定义链上验证与链下电路编译流程。 |
-| **D-010** | [形式化验证](design/010_formal_verification.md) | 定义基于 SMT 求解器的代码安全性证明。 |
+| **D-010** | [形式化验证](../design/010_formal_verification.md) | 定义基于 SMT 求解器的代码安全性证明。 |
+| **D-011** | [PDA KV 实现](../design/011_pda_kv_implementation.md) | 详解 Solana 上 Key 到 PDA 账户的映射机制。 |

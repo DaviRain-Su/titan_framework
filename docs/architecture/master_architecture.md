@@ -35,6 +35,21 @@ Titan OS 不仅仅是一个 SDK，它是一个**虚拟操作系统**。它在碎
 *   **Framework**: `titan.token`, `titan.governance`.
 *   **Applications**: 用户编写的 DeFi/GameFi 逻辑。
 
+## 2.1 Linux 风格资源模型 (Resource/IO Abstraction)
+
+Titan OS 采用 Linux 的核心思想：**一切皆资源 (Resource)**，统一通过 **IO 语义** 访问。
+
+| Linux 概念 | Titan 对应 | 说明 |
+| :--- | :--- | :--- |
+| File/FD | Resource/Handle | 链上对象被视为可操作资源 |
+| Read/Write | `read_input` / `set_output` / `storage_read` / `storage_write` | 统一 IO 接口 |
+| IPC | `call` / `invoke` | 跨合约调用视为进程间通信 |
+| Log | `log` / `emit_event` | 写入型 IO |
+| Process Table | `Context` | 资源表：账户/输入/权限 |
+| Driver | `arch/*` / `drivers/*` | 资源后端实现 |
+
+**设计约束**: 新增能力应优先抽象为“资源 + IO 操作”，而非暴露底层链特性。
+
 ## 3. 演进路线图 (Evolution Roadmap)
 
 ### V1: 内核引导与 Solana 原生 (Kernel Bootstrap)

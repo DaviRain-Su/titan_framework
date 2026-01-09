@@ -2,6 +2,8 @@
 
 本规范定义了 Titan OS 如何在底层对接 TON (The Open Network) 运行时。由于 TVM 架构的特殊性（非冯·诺依曼架构），本适配器采用 **源码转译 (Source-to-Source Transpilation)** 策略，而非直接编译为字节码。
 
+**设计原则**: 将 TON 的 Actor/Message 模型映射为资源/IO 抽象。
+
 ## 1. 架构映射策略
 
 | Titan 概念 | TON (TVM/Tact) 概念 | 适配策略 |

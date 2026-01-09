@@ -1,6 +1,8 @@
 # 设计 010: 形式化验证 (Formal Verification)
 
 > 状态: 规划中 (V3 Target)
+
+**设计原则**: 形式化验证聚焦资源/IO 边界，确保系统级语义正确。
 > 目标: 让 Titan 合约能够数学证明其安全性，消除逻辑漏洞。
 
 ## 1. 验证策略 (Verification Strategy)

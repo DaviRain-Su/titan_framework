@@ -3,6 +3,8 @@
 > 状态: 规划中 (V3 Target)
 > 目标: 为 Titan OS 提供原生的隐私计算能力，使开发者能够轻松构建隐私 DeFi 和匿名投票应用。
 
+**设计原则**: ZK 证明作为资源 IO 的安全扩展，不改变核心 IO 语义。
+
 ## 1. 设计哲学 (Philosophy)
 
 Titan OS 不做复杂的电路生成器（Circuit Generator）。我们将 ZK 视为一种 **"Off-chain Compute, On-chain Verify" (链下计算，链上验证)** 的扩展能力。
