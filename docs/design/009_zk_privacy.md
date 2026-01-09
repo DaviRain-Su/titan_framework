@@ -1,64 +1,57 @@
 # 设计 009: 零知识隐私架构 (ZK Privacy Architecture)
 
 > 状态: 规划中 (V3 Target)
-> 目标: 为 Titan OS 提供原生的隐私计算能力，使开发者能够轻松构建隐私 DeFi 和匿名投票应用。
+> 核心战略: **Zig as a ZK DSL**。通过转译技术，让开发者使用 Zig 编写电路。
 
-**设计原则**: ZK 证明作为资源 IO 的安全扩展，不改变核心 IO 语义。
+## 1. 终极愿景
 
-## 1. 设计哲学 (Philosophy)
+我们不强制开发者学习 Noir 或 Circom。Titan OS 的编译器将支持把 Zig 代码的一个受限子集 (**Titan-Z**) 转译为 **Noir** 代码。
 
-Titan OS 不做复杂的电路生成器（Circuit Generator）。我们将 ZK 视为一种 **"Off-chain Compute, On-chain Verify" (链下计算，链上验证)** 的扩展能力。
+**Write Circuits in Zig.**
 
-Titan OS 的核心职责是提供**极致高效的链上验证器**。
+## 2. 架构流程 (The Transpilation Pipeline)
 
-## 2. 架构分层
+1.  **编写**: 用户在 `.zig` 文件中编写带有 `@zk` 标注的函数。
+2.  **转译 (titan-zk)**:
+    *   解析 Zig AST。
+    *   检查约束 (无动态循环，无指针)。
+    *   生成 `.nr` (Noir) 源码。
+3.  **编译**: 调用 `nargo` 将 `.nr` 编译为证明密钥 (Proving Key) 和验证密钥 (Verifying Key)。
+4.  **集成**: 自动生成 Zig 验证器代码，供合约调用。
 
-### 2.1 链下 (Off-Chain): 电路层
-用户使用成熟的工具栈（Circom, Halo2, Noir）编写电路。
-Titan CLI 提供插件，将电路的 Verification Key (VK) 编译为 Zig 常量。
-
-```bash
-titan zk compile --circuit my_circuit.circom --output src/verifier.zig
-```
-
-### 2.2 链上 (On-Chain): 验证层
-Titan 标准库 `titan.zk` 提供通用的验证原语。
+## 3. 代码示例
 
 ```zig
-// 验证一个 Groth16 证明
-const is_valid = try titan.zk.groth16.verify(
-    verifier_key,
-    public_inputs,
-    proof
-);
+const std = @import("std");
+const zk = @import("titan.zk");
+
+/// @zk_circuit
+/// 这是一个 ZK 电路，不是普通函数
+pub fn check_password(public_hash: u256, secret_password: u256) bool {
+    // 这里的 hash 会被转译为 Noir 的 std::hash::pedersen
+    const computed = zk.hash(secret_password);
+    
+    // 生成约束: computed == public_hash
+    return computed == public_hash;
+}
 ```
 
-## 3. 底层适配 (Backend Adapters)
+## 4. 语义映射 (Semantic Mapping)
 
-不同的链对密码学曲线的支持不同。Titan 必须抹平差异。
+| Zig 概念 | Noir 映射 | 限制 |
+| :--- | :--- | :--- |
+| `u64/u256` | `Field` | 模数运算语义差异需处理 |
+| `if (cond) a else b` | `if cond { a } else { b }` | 必须可展开为 Mux 门 |
+| `inline for` | `for` (Unrolled) | 循环次数必须编译时确定 |
+| `struct` | `struct` | 无指针引用 |
 
-| 曲线 (Curve) | Solana 实现 | Near 实现 | EVM (Stylus) 实现 | Titan 策略 |
-| :--- | :--- | :--- | :--- | :--- |
-| **BN254** | `sol_alt_bn128` (Syscall) | `alt_bn128` (Host Func) | Precompile 0x06/0x07/0x08 | **原生支持** (零开销) |
-| **BLS12-381** | `sol_poseidon` (部分支持) | `bls12381` (Host Func) | 无 Precompile (需软实现) | **混合支持** (优先 Syscall，降级为 Wasm 软实现) |
+## 5. 价值主张
 
-## 4. API 设计 (`titan.zk`)
+这是 Titan OS 统一体验的最后一块拼图。
+*   **统一语言**: 合约用 Zig，驱动用 Zig，工具用 Zig，**现在连电路也用 Zig**。
+*   **工具复用**: 复用 Zig 的 LSP (自动补全、跳转)，不需要为 Noir 单独配置编辑器环境。
 
-```zig
-pub const ZkProof = struct {
-    a: [2]u256,
-    b: [2][2]u256,
-    c: [2]u256,
-};
+## 6. 备选方案
 
-pub fn verify(proof: ZkProof, inputs: []const u256) !bool;
-```
-
-## 5. 隐私代币标准 (Confidential Token)
-
-基于 ZK 能力，Titan OS V3 将推出 **Titan Privacy Token (TPT)** 标准。
-*   余额加密 (ElGamal)。
-*   转账使用 ZK 证明 (类似 ZCash/Tornado)。
-*   合规接口 (View Key for Auditors)。
-
-这是一套开箱即用的隐私方案，开发者无需懂 ZK 即可发行隐私币。
+如果转译难度过大，回退到 **"Inline Noir"** 方案：
+在 Zig 文件中通过字符串字面量嵌入 Noir 代码（类似 Rust 的 `asm!` 宏）。

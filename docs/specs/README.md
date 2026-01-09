@@ -32,6 +32,8 @@
 | **015** | [EVM 适配器](015_adapter_evm.md) | 基于 Arbitrum Stylus 的 EVM 互操作规范。 |
 | **017** | [运行时引导](017_runtime_bootstrap.md) | 定义如何从底层 entrypoint 引导至用户 main 函数。 |
 | **018** | [多链存储适配](018_multichain_storage.md) | Near/Cosmos/Polkadot 的存储层实现细节。 |
+| **019** | [Nervos 适配器](019_adapter_ckb.md) | 基于 Cell 模型的 Extended UTXO 适配规范。 |
+| **020** | [原生 EVM 适配器](020_adapter_evm_native.md) | Zig 到 Yul 的源码转译规范。 |
 
 ## 高级设计 (Advanced Designs)
 
