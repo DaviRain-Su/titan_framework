@@ -62,6 +62,10 @@ pub const TargetChain = enum {
     btc_native,
     /// Stacks (Zig -> Clarity)
     stacks,
+
+    // ===== ZK/隐私层 =====
+    /// ZK 电路 (Zig -> Noir -> ACIR)
+    zk_noir,
 };
 ```
 
@@ -84,6 +88,7 @@ pub const TargetChain = enum {
 | `btc_l2_evm` | N/A (转译) | N/A | `.yul` | 023 |
 | `btc_native` | N/A (转译) | N/A | `.miniscript` | 023 |
 | `stacks` | N/A (转译) | N/A | `.clar` | 023 |
+| `zk_noir` | N/A (转译) | N/A | `.nr` + `.acir` | D-009 |
 
 ### 3.2 内核接口实现状态
 
@@ -237,6 +242,7 @@ pub const storage_write = if (@hasDecl(impl, "storage_write")) impl.storage_writ
 | **1** | Solana, Near, CosmWasm, Substrate | 低 | 高 | LLVM 主场，验证核心价值 |
 | **1.5** | BTC L2 (EVM), BTC L1 (Miniscript) | 低-中 | 极高 | 复用 Yul，BTC 流动性最大 |
 | **2** | Stylus, CKB, Stacks | 中 | 中高 | 市场存量大，有差异化需求 |
+| **2.5** | ZK (Noir) | 中 | 极高 | 隐私应用刚需，Zig→Noir 语法接近 |
 | **3** | TON, EVM Native | 极高 | 极高 | 架构特殊，需专门团队攻克 |
 
 **关键决策**:
@@ -263,10 +269,12 @@ pub const storage_write = if (@hasDecl(impl, "storage_write")) impl.storage_writ
 - [x] 设计: `ckb` 后端规范 (019)
 - [x] 设计: `evm_native` 转译规范 (020)
 - [x] 设计: `bitcoin` 生态规范 (023) - BTC L1/L2/Stacks
+- [x] 设计: `zk_noir` ZK 隐私架构 (D-009)
 - [x] 实现: `evm_native` 参考实现 ([zig-to-yul](https://github.com/DaviRain-Su/zig-to-yul) v0.1.0) ✅
 - [ ] 实现: `btc_l2_evm` (复用 zig-to-yul) ← 零新工作
 - [ ] 实现: `btc_native` Miniscript 转译器
 - [ ] 实现: `stacks` Clarity 转译器
+- [ ] 实现: `zk_noir` Zig → Noir 转译器
 - [ ] 实现: `ton` 转译器 CLI (需专门团队) ⚠️ Tier 3
 - [ ] 实现: RISC-V 后端
 
@@ -322,6 +330,17 @@ zig build -Dtarget_chain=stylus          # Arbitrum Stylus .wasm
 titan-ton-bridge compile src/contract.zig -o contract.tact
 titan-evm-bridge compile src/contract.zig -o contract.yul
 zig build -Dtarget_chain=ckb             # CKB .elf
+
+# BTC 生态
+titan-evm compile src/contract.zig -o contract.yul   # BTC L2 (EVM)
+titan-btc compile src/contract.zig -o spending.miniscript  # BTC L1
+titan-stacks compile src/contract.zig -o contract.clar     # Stacks
+
+# ZK 电路 (Zig → Noir)
+titan-zk compile src/circuits/circuit.zig -o build/  # 输出 .nr + .acir
+titan-zk codegen verifier -i build/circuit.acir -o build/Verifier.sol
+titan-zk prove build/circuit.acir -i inputs.json -o proof.bin
+titan-zk verify build/circuit.acir -p proof.bin -i public_inputs.json
 ```
 
 ## 10. 结论

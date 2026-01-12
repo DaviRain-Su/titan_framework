@@ -112,25 +112,25 @@ Titan 的核心创新是**多态编译器 (Polymorphic Compiler)**：根据目�
 │               ┌─────────────────┴─────────────────┐                         │
 │               │                                   │                         │
 │               ▼                                   ▼                         │
-│  ┌────────────────────────────┐    ┌────────────────────────────────────┐  │
-│  │   路径 A: 原生编译         │    │   路径 B: 源对源转译               │  │
-│  │   (Native Compilation)     │    │   (Source-to-Source Transpilation) │  │
-│  │                            │    │                                    │  │
-│  │   Zig -> LLVM -> Target    │    │   Zig -> comptime -> IR -> Target  │  │
-│  │                            │    │                                    │  │
-│  │  ┌──────────────────────┐  │    │  ┌──────────────────────────────┐  │  │
-│  │  │ Solana (SBF)    ✓    │  │    │  │ TON: Zig -> Fift -> TVM     │  │  │
-│  │  │ Near (Wasm)     ✓    │  │    │  │ EVM: Zig -> Yul  -> Bytecode│  │  │
-│  │  │ CosmWasm (Wasm) ✓    │  │    │  │                              │  │  │
-│  │  │ Substrate (Wasm)✓    │  │    │  │ 参考实现: zig-to-yul v0.1.0 │  │  │
-│  │  │ Stylus (Wasm)   ✓    │  │    │  └──────────────────────────────┘  │  │
-│  │  │ CKB (RISC-V)    ✓    │  │    │                                    │  │
-│  │  └──────────────────────┘  │    │                                    │  │
-│  └────────────────────────────┘    └────────────────────────────────────┘  │
+│  ┌──────────────────────────┐  ┌──────────────────────────┐  ┌──────────────────────────┐  │
+│  │  路径 A: 原生编译        │  │  路径 B: 源对源转译      │  │  路径 C: ZK 电路编译     │  │
+│  │  (Native Compilation)    │  │  (Transpilation)         │  │  (ZK Circuit)            │  │
+│  │                          │  │                          │  │                          │  │
+│  │  Zig -> LLVM -> Target   │  │  Zig -> comptime -> IR   │  │  Zig -> Noir -> ACIR     │  │
+│  │                          │  │           -> Target      │  │      -> Verifier         │  │
+│  │  ┌────────────────────┐  │  │  ┌────────────────────┐  │  │  ┌────────────────────┐  │  │
+│  │  │ Solana (SBF)   ✓   │  │  │  │ TON -> Fift -> TVM│  │  │  │ 隐私空投           │  │  │
+│  │  │ Near (Wasm)    ✓   │  │  │  │ EVM -> Yul -> bin │  │  │  │ 身份验证           │  │  │
+│  │  │ CosmWasm       ✓   │  │  │  │ BTC -> Miniscript │  │  │  │ 资格证明           │  │  │
+│  │  │ Substrate      ✓   │  │  │  │ Stacks -> Clarity │  │  │  │ 可验证计算         │  │  │
+│  │  │ Stylus (Wasm)  ✓   │  │  │  │                    │  │  │  └────────────────────┘  │  │
+│  │  │ CKB (RISC-V)   ✓   │  │  │  │ 参考: zig-to-yul  │  │  │  输出: .nr + Verifier.sol│  │
+│  │  └────────────────────┘  │  │  └────────────────────┘  │  │  详见: D-009, D-012      │  │
+│  └──────────────────────────┘  └──────────────────────────┘  └──────────────────────────┘  │
 │                                                                             │
 │                              输出端 (Output)                                │
 │  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │    .so (SBF)  │  .wasm (Wasm)  │  .boc (TVM)  │  .bin (EVM)         │   │
+│  │  .so (SBF) │ .wasm (Wasm) │ .boc (TVM) │ .bin (EVM) │ .nr/.acir (ZK)│   │
 │  └─────────────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -226,8 +226,9 @@ titan-evm compile contract.zig     # -> .bin (via Yul)
 1.  **内存模型**: 采用 **Caller-Allocated** 模式作为系统调用标准，兼容 Wasm 的拷贝需求和 Solana 的零拷贝优化。
 2.  **异步处理**: 显式状态机 (V1/V2) -> 编译器辅助 CPS 变换 (V3)。
 3.  **IDL 生成**: 强制入口参数结构化，利用 Zig 编译时反射生成 JSON 规范。
-4.  **混合编译**: LLVM 原生路径 (Solana/Wasm) + 转译路径 (TON/EVM)，根据平台特性选择最优方案。
+4.  **三路编译**: LLVM 原生 (Solana/Wasm) + 转译 (TON/EVM/BTC) + ZK 电路 (Noir)，根据目标平台选择最优路径。
 5.  **Zig comptime**: 利用编译时元编程实现 DSL，无运行时开销。
+6.  **ZK 隐私**: Zig → Noir 转译，生成 ACIR 电路 + Solidity Verifier，实现链上验证。
 
 ## 6. 战略价值 (Strategic Value)
 
@@ -287,6 +288,8 @@ titan-evm compile contract.zig     # -> .bin (via Yul)
 | Near Wasm 后端设计 | ✅ | 规范 010 |
 | TON 转译器设计 | ✅ | 规范 011 (含 Fift/comptime DSL) |
 | Bitcoin 生态设计 | ✅ | 规范 023 (BTC L1/L2/Stacks) |
+| ZK 隐私架构设计 | ✅ | 设计 D-009 (Zig → Noir) |
+| ZK 计算层设计 | ✅ | 设计 D-012 (链下执行 + 链上验证) |
 
 ### 7.2 集成阶段 (下一步)
 
@@ -297,6 +300,8 @@ titan-evm compile contract.zig     # -> .bin (via Yul)
 | 统一 titan.* API | P1 | 抽象层对齐 |
 | zig-to-yul 集成到 Titan | P1 | 复用已有实现，覆盖 EVM + BTC L2 |
 | BTC L1 Miniscript 转译器 | P1 | 逻辑简单，复用转译架构 |
+| ZK: titan.zk SDK 设计 | P2 | Merkle 证明、哈希函数封装 |
+| ZK: Zig → Noir 转译器 | P2 | 电路代码生成 |
 
 ### 7.3 高级阶段 (长期)
 
@@ -312,19 +317,21 @@ titan-evm compile contract.zig     # -> .bin (via Yul)
 
 **一句话总结**:
 
-> **Titan OS = LLVM 原生编译 (Solana/Wasm) + Zig comptime 转译 (TON/EVM/BTC)**
+> **Titan OS = LLVM 原生 (Solana/Wasm) + 转译 (TON/EVM/BTC) + ZK (Noir)**
 >
-> **降维打击，全链通吃。**
+> **降维打击，全链通吃，隐私可验证。**
 
-这是目前市面上**唯一**能打通以下生态的架构方案：
+这是目前市面上**唯一**能打通以下生态 + 支持 ZK 隐私的架构方案：
 
-| 生态 | 规模 | Titan 支持 |
-| :--- | :--- | :---: |
-| **Bitcoin** | $1T+ 市值 | ✅ (Miniscript/Yul) |
-| **Ethereum + L2** | $100B+ TVL | ✅ (Yul) |
-| **Solana** | 1000万+ 用户 | ✅ (SBF) |
-| **TON/Telegram** | 9亿用户 | ✅ (Fift) |
-| **Cosmos** | 50+ 链 | ✅ (Wasm) |
-| **Polkadot** | 100+ 平行链 | ✅ (Wasm) |
+| 生态 | 规模 | Titan 支持 | 路径 |
+| :--- | :--- | :---: | :--- |
+| **Bitcoin** | $1T+ 市值 | ✅ | Miniscript/Yul |
+| **Ethereum + L2** | $100B+ TVL | ✅ | Yul |
+| **Solana** | 1000万+ 用户 | ✅ | SBF (LLVM) |
+| **TON/Telegram** | 9亿用户 | ✅ | Fift |
+| **Cosmos** | 50+ 链 | ✅ | Wasm |
+| **Polkadot** | 100+ 平行链 | ✅ | Wasm |
+| **ZK 隐私** | 所有 EVM 链 | ✅ | Noir → Verifier.sol |
 
 **没有任何一条有价值的链是覆盖不到的。**
+**没有任何一个隐私场景是实现不了的。**
