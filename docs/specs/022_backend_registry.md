@@ -191,15 +191,53 @@ pub const storage_read = if (@hasDecl(impl, "storage_read")) impl.storage_read e
 pub const storage_write = if (@hasDecl(impl, "storage_write")) impl.storage_write else @compileError("storage_write not available");
 ```
 
-## 6. 后端实现路线图
+## 6. 战略优先级与实现路线图
 
-### Phase 1: V1 (当前)
+### 6.0 优先级分层 (Strategic Tiers)
+
+基于技术难度和商业价值，后端分为三个战略优先级：
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    后端战略优先级金字塔                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│                     ┌─────────────┐                             │
+│                     │   Tier 3    │  TON (外星架构)             │
+│                     │  终极挑战   │  EVM Native (Yul 转译)      │
+│                     └──────┬──────┘                             │
+│                            │                                    │
+│                   ┌────────┴────────┐                           │
+│                   │     Tier 2      │  EVM (Stylus)             │
+│                   │   战略扩张      │  CKB (RISC-V)             │
+│                   └────────┬────────┘                           │
+│                            │                                    │
+│           ┌────────────────┴────────────────┐                   │
+│           │            Tier 1               │                   │
+│           │          必须拿下               │                   │
+│           │  Solana (SBF) + Wasm (Near/Cosmos/Substrate)        │
+│           └─────────────────────────────────┘                   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+| Tier | 目标链 | 技术难度 | 商业价值 | 优先级原因 |
+| :--- | :--- | :--- | :--- | :--- |
+| **1** | Solana, Near, CosmWasm, Substrate | 低 | 高 | LLVM 主场，验证核心价值 |
+| **2** | Stylus, CKB | 中 | 中高 | 市场存量大，有差异化需求 |
+| **3** | TON, EVM Native | 极高 | 极高 | 架构特殊，需专门团队攻克 |
+
+**关键决策**:
+- **Tier 1 先行**: 用 Solana + Near 证明 "Write Once, Compile Anywhere"
+- **Tier 3 延后**: TON/EVM Native 作为融资后的"特种部队"任务
+
+### Phase 1: V1 (当前) - Tier 1 核心
 - [x] 设计: `solana` 后端规范 (009)
 - [x] 设计: `mock` 后端规范 (004)
 - [ ] 实现: `solana` 后端
 - [ ] 实现: `mock` 后端
 
-### Phase 2: V2 (Wasm 扩展)
+### Phase 2: V2 (Wasm 扩展) - Tier 1 完整
 - [x] 设计: `near` 后端规范 (010)
 - [x] 设计: `cosmwasm` 后端规范 (016)
 - [x] 设计: `substrate` 后端规范 (021)
@@ -207,11 +245,11 @@ pub const storage_write = if (@hasDecl(impl, "storage_write")) impl.storage_writ
 - [ ] 实现: Wasm 共享基础设施
 - [ ] 实现: 各 Wasm 后端适配
 
-### Phase 3: V3 (全链覆盖)
-- [x] 设计: `ton` 转译规范 (011)
+### Phase 3: V3 (全链覆盖) - Tier 2 + Tier 3
+- [x] 设计: `ton` 转译规范 (011) ⚠️ Tier 3
 - [x] 设计: `ckb` 后端规范 (019)
-- [x] 设计: `evm_native` 转译规范 (020)
-- [ ] 实现: 转译器 CLI 工具
+- [x] 设计: `evm_native` 转译规范 (020) ⚠️ Tier 3
+- [ ] 实现: 转译器 CLI 工具 (需专门团队)
 - [ ] 实现: RISC-V 后端
 
 ## 7. 新增后端指南
