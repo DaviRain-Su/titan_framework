@@ -67,3 +67,4 @@
 | **D-011** | [PDA KV 实现](../design/011_pda_kv_implementation.md) | 详解 Solana 上 Key 到 PDA 账户的映射机制。 |
 | **D-012** | [ZK 计算层](../design/012_zk_compute_layer.md) | 链下执行 + 链上验证架构，实现传统互联网应用体验。 |
 | **D-013** | [通用类型系统](../design/013_universal_type_system.md) | 链感知类型抽象，实现 Write Once Compile Anywhere。 |
+| **D-014** | [Roc Platform 接口](../design/014_roc_platform_interface.md) | Roc TEA 架构与 Zig Platform 双层输入规范。 |
