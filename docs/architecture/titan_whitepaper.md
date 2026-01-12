@@ -5069,6 +5069,593 @@ struct SwapIntent: AppIntent {
 >
 > **The Uber for Transactions. The OS for AI Agents.**
 
+### 16.12 Linux 架构类比：守护进程与 D-Bus
+
+Titan Intents 在 Linux 架构中对应的是 **System Services (Daemons)** 和 **D-Bus (消息总线)**。
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Linux vs Titan 架构层级对照                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  层级              │ Linux                    │ Titan OS                    │
+│  ─────────────────┼──────────────────────────┼─────────────────────────────│
+│  用户层            │ Applications / Shell     │ AI Agent / Titan SDK        │
+│  (User)           │ (浏览器、终端)            │ (发起意图请求)               │
+│                   │                          │                             │
+│  意图/服务层       │ D-Bus + Daemons          │ Intent Bus + Solvers        │
+│  (Services)       │ (systemd, cupsd, networkd)│ (意图撮合与任务调度)         │
+│                   │                          │                             │
+│  系统调用层        │ POSIX Syscalls           │ TICP / C ABI                │
+│  (Syscall)        │ (read, write, send)      │ (titan_transfer, titan_swap)│
+│                   │                          │                             │
+│  内核层            │ Linux Kernel             │ Zig Kernel                  │
+│  (Kernel)         │ (进程调度、内存管理)       │ (交易签名、状态管理)         │
+│                   │                          │                             │
+│  硬件层            │ CPU / Disk / NIC         │ Solana / EVM / TON / BTC    │
+│  (Hardware)       │ (物理设备)                │ (区块链虚拟机)               │
+│                   │                          │                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Linux 场景类比：**
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    打印任务 vs 跨链交易                                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Linux 打印场景:                                                             │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │  用户意图: "我要打印这个 PDF"                                          │ │
+│  │                                                                       │ │
+│  │  内核层 (Kernel):                                                     │ │
+│  │  └── 只懂怎么向 USB 端口发送电压信号，不懂 PDF                        │ │
+│  │                                                                       │ │
+│  │  服务层 (CUPS Daemon):                                                │ │
+│  │  └── 打印服务进程 (专业 Solver)                                       │ │
+│  │      • 接收 PDF                                                       │ │
+│  │      • 找到合适的打印机驱动                                           │ │
+│  │      • 转换为打印机能懂的 PCL 语言                                    │ │
+│  │      • 排队发送                                                       │ │
+│  │                                                                       │ │
+│  │  结果: 用户不需要知道打印机是 HP 还是 Canon，任务完成                 │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+│  Titan 跨链场景:                                                             │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │  用户意图: "我要把 SOL 换成 ETH 买 NFT"                               │ │
+│  │                                                                       │ │
+│  │  内核层 (Zig Kernel):                                                 │ │
+│  │  └── 只懂怎么签交易，不懂汇率和路由                                   │ │
+│  │                                                                       │ │
+│  │  服务层 (Solver Network):                                             │ │
+│  │  └── 求解器节点 (专业 Solver)                                         │ │
+│  │      • 接收意图                                                       │ │
+│  │      • 计算最优跨链路径                                               │ │
+│  │      • 垫付资金，生成交易                                             │ │
+│  │      • 在多链上执行                                                   │ │
+│  │                                                                       │ │
+│  │  结果: 用户不需要知道走了 Wormhole 还是 LayerZero，任务完成           │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**D-Bus 消息总线类比：**
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    D-Bus vs Intent Bus                                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Linux D-Bus:                                                                │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │                                                                       │ │
+│  │  浏览器 ────► D-Bus ────► "谁能帮我连上 WiFi？"                       │ │
+│  │                │                                                      │ │
+│  │                ▼                                                      │ │
+│  │         NetworkManager (Daemon)                                       │ │
+│  │                │                                                      │ │
+│  │                ▼                                                      │ │
+│  │         "连上了！" ────► 浏览器                                       │ │
+│  │                                                                       │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+│  Titan Intent Bus:                                                           │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │                                                                       │ │
+│  │  AI Agent ────► Intent Bus ────► "谁能帮我换 100 SOL → USDT？"       │ │
+│  │                     │                                                 │ │
+│  │          ┌──────────┼──────────┐                                     │ │
+│  │          ▼          ▼          ▼                                      │ │
+│  │     Solver A   Solver B   Solver C   (竞争抢单)                      │ │
+│  │          │                                                            │ │
+│  │          ▼                                                            │ │
+│  │     "换好了！9880 USDT" ────► AI Agent                               │ │
+│  │                                                                       │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 16.13 关键架构决策：Network，不是 Chain
+
+**核心问题：Titan 需要做一条 L1 区块链吗？**
+
+**答案：不需要。做网络 (Network)，不做链 (Chain)。**
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    为什么不做 L1 链？                                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  如果做 "Titan Chain" (L1):                                                 │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │                                                                       │ │
+│  │  ❌ 弊端:                                                             │ │
+│  │  • 用户必须把 USDC 从以太坊跨桥转进 Titan Chain                      │ │
+│  │  • 流动性割裂 (Liquidity Fragmentation)                               │ │
+│  │  • 用户体验极差                                                       │ │
+│  │  • 需要维护昂贵的共识安全 (PoS/PoW)                                  │ │
+│  │                                                                       │ │
+│  │  Linux 类比:                                                          │ │
+│  │  这就像开发了 Linux，但强迫用户必须购买 "Titan 牌电脑" 才能运行       │ │
+│  │                                                                       │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+│  正确做法: Titan Solver Network (覆盖网络)                                   │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │                                                                       │ │
+│  │  ✅ 优势:                                                             │ │
+│  │  • 用户资产留在原链 (Solana/ETH/BTC)，安全感强                       │ │
+│  │  • 无流动性割裂问题                                                   │ │
+│  │  • 轻资产运营，无需维护共识安全                                       │ │
+│  │  • 连接所有链，而不是竞争所有链                                       │ │
+│  │                                                                       │ │
+│  │  Linux 类比:                                                          │ │
+│  │  守护进程 (Daemons) 不是跑在 CPU 晶体管里的 (链上)                   │ │
+│  │  而是跑在内存里的 (链下/旁路)                                         │ │
+│  │                                                                       │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+│  Titan 定位:                                                                 │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │                                                                       │ │
+│  │  "Titan 是 OS，OS 应该能跑在任何硬件 (Solana/ETH/BTC) 上"            │ │
+│  │                                                                       │ │
+│  │  我们构建的是:                                                        │ │
+│  │  去中心化意图执行网络 (Decentralized Intent Execution Network)        │ │
+│  │                                                                       │ │
+│  │  • 底层链 (Kernel/Hardware): Solana, EVM, BTC 负责结算和确权          │ │
+│  │  • Titan 网络 (Daemons): 节点在链下负责监听意图、计算路径、撮合交易   │ │
+│  │                                                                       │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 16.14 Titan Solver Network 架构
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Titan Solver Network 架构                                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│                          ┌─────────────────────┐                            │
+│                          │   用户 / AI Agent   │                            │
+│                          │   (提交签名意图)    │                            │
+│                          └──────────┬──────────┘                            │
+│                                     │                                       │
+│                                     ▼                                       │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │                                                                       │ │
+│  │                    Titan Intent Mempool                               │ │
+│  │                    (意图内存池 / D-Bus)                               │ │
+│  │                                                                       │ │
+│  │  ┌─────────────────────────────────────────────────────────────────┐ │ │
+│  │  │  Intent #1: "100 SOL → max USDT"                                │ │ │
+│  │  │  Intent #2: "Buy NFT on Base with ETH"                          │ │ │
+│  │  │  Intent #3: "Stake 1000 USDC across best yield protocols"       │ │ │
+│  │  │  ...                                                            │ │ │
+│  │  └─────────────────────────────────────────────────────────────────┘ │ │
+│  │                                                                       │ │
+│  └────────────────────────────────┬──────────────────────────────────────┘ │
+│                                   │                                         │
+│            ┌──────────────────────┼──────────────────────┐                 │
+│            │                      │                      │                  │
+│            ▼                      ▼                      ▼                  │
+│  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐         │
+│  │   Solver Node A  │  │   Solver Node B  │  │   Solver Node C  │  ...    │
+│  │  (做市商)        │  │  (套利机器人)     │  │  (AI Agent 托管) │         │
+│  │                  │  │                  │  │                  │         │
+│  │  质押: 10K TITAN │  │  质押: 5K TITAN  │  │  质押: 20K TITAN │         │
+│  │  专长: DEX 路由  │  │  专长: 跨链桥    │  │  专长: NFT 市场  │         │
+│  └────────┬─────────┘  └────────┬─────────┘  └────────┬─────────┘         │
+│           │                     │                     │                    │
+│           │  ┌──────────────────┴──────────────────┐  │                    │
+│           │  │                                     │  │                    │
+│           ▼  ▼                                     ▼  ▼                    │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │                                                                       │ │
+│  │                    链下计算 (Off-chain Computation)                   │ │
+│  │                                                                       │ │
+│  │  • 解析意图约束条件                                                   │ │
+│  │  • 查询多链流动性                                                     │ │
+│  │  • 计算最优执行路径                                                   │ │
+│  │  • 生成交易数据                                                       │ │
+│  │  • 竞争报价                                                           │ │
+│  │                                                                       │ │
+│  └────────────────────────────────┬──────────────────────────────────────┘ │
+│                                   │                                         │
+│                                   ▼                                         │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │                                                                       │ │
+│  │                    链上执行 (On-chain Execution)                      │ │
+│  │                                                                       │ │
+│  │  ┌─────────┐    ┌─────────┐    ┌─────────┐    ┌─────────┐           │ │
+│  │  │ Solana  │    │   ETH   │    │   BTC   │    │   TON   │           │ │
+│  │  │  结算   │    │  结算   │    │  结算   │    │  结算   │           │ │
+│  │  └─────────┘    └─────────┘    └─────────┘    └─────────┘           │ │
+│  │                                                                       │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 16.15 三种实现路径分析
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Solver Network 实现路径                                   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  路径 A: 纯中心化服务器 (Web2 模式)                                         │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │  做法: Titan 官方跑一个 AWS 服务器，处理所有意图                      │ │
+│  │                                                                       │ │
+│  │  ❌ 评价: 太弱                                                        │ │
+│  │  • 这是一个 SaaS，不是 Web3 基础设施                                  │ │
+│  │  • 无法融资（没有 Token 价值捕获）                                    │ │
+│  │  • 单点故障风险                                                       │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+│  路径 B: 去中心化求解器网络 ★★★ 推荐                                       │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │  做法: 任何人都可以运行 `titan-solver` 客户端加入网络                 │ │
+│  │                                                                       │ │
+│  │  机制: 类似 Flashbots / CowSwap 的求解器网络                          │ │
+│  │                                                                       │ │
+│  │  Linux 类比: 这就是 "Systemd" —— 管理后台进程的协议，而不是硬件本身   │ │
+│  │                                                                       │ │
+│  │  ✅ 优势:                                                             │ │
+│  │  • 资产不迁移: 用户的币还在原来的链上，安全感强                       │ │
+│  │  • 轻资产: 不需要维护昂贵的共识安全 (PoS/PoW)                        │ │
+│  │  • Token 价值: Titan Token 作为质押金 + 手续费                        │ │
+│  │  • 开放生态: 任何人都可以成为 Solver                                  │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+│  路径 C: AVS (基于 EigenLayer 的主动验证服务)                               │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │  做法: 利用 EigenLayer 的安全性来构建求解器网络                       │ │
+│  │                                                                       │ │
+│  │  逻辑: 利用以太坊的安全性来保证 Solver 不作恶                         │ │
+│  │        相当于给 Linux 守护进程加了"内核级安全锁"                      │ │
+│  │                                                                       │ │
+│  │  ✅ 优势:                                                             │ │
+│  │  • 叙事性强，融资容易                                                 │ │
+│  │  • 继承以太坊安全性                                                   │ │
+│  │  • 符合当前市场热点                                                   │ │
+│  │                                                                       │ │
+│  │  ⚠️ 注意:                                                             │ │
+│  │  • 依赖 EigenLayer 生态                                               │ │
+│  │  • 复杂度较高                                                         │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+│  推荐策略: B + C 混合                                                       │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │                                                                       │ │
+│  │  Phase 1: 先用路径 B 快速上线去中心化网络                             │ │
+│  │  Phase 2: 接入 EigenLayer AVS 增强安全性和融资叙事                   │ │
+│  │                                                                       │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 16.16 Solver 节点实现
+
+```zig
+// ============================================================================
+// Titan Solver Node - 链下求解器实现
+// ============================================================================
+
+const std = @import("std");
+const titan = @import("titan");
+const network = @import("network");
+
+/// Solver 节点配置
+pub const SolverConfig = struct {
+    /// 节点身份
+    node_id: [32]u8,
+
+    /// 质押金额 (TITAN Token)
+    stake_amount: u256,
+
+    /// 支持的链
+    supported_chains: []Chain,
+
+    /// 支持的意图类型
+    supported_intents: []IntentType,
+
+    /// 专长领域 (用于路由优化)
+    specialization: Specialization,
+
+    const Specialization = enum {
+        dex_aggregation,    // DEX 聚合路由
+        cross_chain_bridge, // 跨链桥接
+        nft_marketplace,    // NFT 市场
+        yield_farming,      // 收益聚合
+        general,            // 通用
+    };
+};
+
+/// Solver 节点运行时
+pub const SolverNode = struct {
+    const Self = @This();
+
+    config: SolverConfig,
+    intent_listener: *IntentListener,
+    quote_engine: *QuoteEngine,
+    execution_engine: *ExecutionEngine,
+
+    /// 启动 Solver 节点
+    pub fn start(self: *Self) !void {
+        titan.log("Starting Titan Solver Node: {x}", .{self.config.node_id});
+
+        // 1. 连接到 Intent Mempool (类似 D-Bus)
+        try self.intent_listener.connect("wss://mempool.titan.network");
+
+        // 2. 注册节点能力
+        try self.registerCapabilities();
+
+        // 3. 开始监听意图
+        while (true) {
+            const intent = try self.intent_listener.waitForIntent();
+
+            if (self.canHandle(intent)) {
+                // 4. 计算报价
+                const quote = try self.quote_engine.generateQuote(intent);
+
+                // 5. 提交报价
+                try self.submitQuote(intent, quote);
+
+                // 6. 如果被选中，执行意图
+                if (try self.waitForSelection(intent)) {
+                    try self.executeIntent(intent, quote);
+                }
+            }
+        }
+    }
+
+    /// 检查是否能处理该意图
+    fn canHandle(self: *Self, intent: *Intent) bool {
+        // 检查链支持
+        for (self.config.supported_chains) |chain| {
+            if (chain == intent.input.chain) {
+                // 检查意图类型支持
+                for (self.config.supported_intents) |intent_type| {
+                    if (intent_type == intent.intent_type) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    /// 执行意图 (链下计算 + 链上执行)
+    fn executeIntent(self: *Self, intent: *Intent, quote: Quote) !ExecutionResult {
+        titan.log("Executing intent: {s}", .{intent.serialize()});
+
+        // 链下: 准备交易数据
+        var transactions = std.ArrayList(Transaction).init(titan.allocator);
+        defer transactions.deinit();
+
+        for (quote.route) |step| {
+            const tx = try self.execution_engine.buildTransaction(step);
+            try transactions.append(tx);
+        }
+
+        // 链上: 按顺序执行交易
+        var total_output: u256 = 0;
+        for (transactions.items) |tx| {
+            const result = try self.execution_engine.submitAndWait(tx);
+            if (!result.success) {
+                return error.ExecutionFailed;
+            }
+            total_output = result.output_amount;
+        }
+
+        // 结算: 将输出发送给用户
+        try self.settleWithUser(intent, total_output);
+
+        return ExecutionResult{
+            .success = true,
+            .actual_output = total_output,
+            .solver_name = self.config.node_id,
+            .tx_hash = transactions.items[transactions.items.len - 1].hash,
+            .gas_used_usd = quote.estimated_gas_usd,
+            .execution_time_ms = @intCast(std.time.milliTimestamp() - intent.deadline + 300000),
+        };
+    }
+
+    fn registerCapabilities(self: *Self) !void {
+        const capabilities = SolverCapabilities{
+            .node_id = self.config.node_id,
+            .stake = self.config.stake_amount,
+            .chains = self.config.supported_chains,
+            .intents = self.config.supported_intents,
+            .specialization = self.config.specialization,
+        };
+
+        try self.intent_listener.registerSolver(capabilities);
+    }
+
+    fn submitQuote(self: *Self, intent: *Intent, quote: Quote) !void {
+        _ = self;
+        const message = QuoteMessage{
+            .intent_hash = titan.hash(intent.serialize()),
+            .quote = quote,
+            .timestamp = std.time.timestamp(),
+        };
+
+        try network.broadcast("titan.quotes", message);
+    }
+
+    fn waitForSelection(self: *Self, intent: *Intent) !bool {
+        _ = self;
+        // 等待撮合结果
+        const selection = try network.waitForMessage("titan.selections", intent.deadline);
+        return std.mem.eql(u8, &selection.winner_id, &self.config.node_id);
+    }
+
+    fn settleWithUser(self: *Self, intent: *Intent, amount: u256) !void {
+        _ = self;
+        // 将资产转给用户指定地址
+        const tx = titan.buildTransfer(.{
+            .to = intent.output.recipient orelse intent.signer,
+            .amount = amount,
+            .token = intent.output.token,
+            .chain = intent.output.preferred_chain orelse intent.input.chain,
+        });
+
+        try titan.submitTransaction(tx);
+    }
+};
+
+/// Quote 引擎
+pub const QuoteEngine = struct {
+    liquidity_aggregator: *LiquidityAggregator,
+    route_optimizer: *RouteOptimizer,
+
+    pub fn generateQuote(self: *QuoteEngine, intent: *Intent) !Quote {
+        // 1. 获取多链流动性数据
+        const liquidity = try self.liquidity_aggregator.fetchAll(
+            intent.input.token,
+            intent.output.token,
+        );
+
+        // 2. 计算最优路由
+        const route = try self.route_optimizer.findBestRoute(
+            intent.input,
+            intent.output,
+            intent.constraints,
+            liquidity,
+        );
+
+        // 3. 估算输出金额
+        const estimated_output = try self.route_optimizer.estimateOutput(route);
+
+        // 4. 估算 Gas 成本
+        const gas_cost = try self.estimateGasCost(route);
+
+        return Quote{
+            .solver_id = undefined, // 由 SolverNode 填充
+            .solver_name = undefined,
+            .output_amount = estimated_output,
+            .estimated_gas_usd = gas_cost,
+            .execution_time_ms = route.len * 1000, // 估算
+            .route = route,
+            .confidence = 95, // 基于历史成功率
+        };
+    }
+
+    fn estimateGasCost(self: *QuoteEngine, route: []RouteStep) !u64 {
+        _ = self;
+        var total: u64 = 0;
+        for (route) |step| {
+            total += switch (step.chain) {
+                .solana => 5000,     // ~$0.005
+                .ethereum => 500000, // ~$5
+                .bsc => 50000,       // ~$0.05
+                .polygon => 30000,   // ~$0.03
+                else => 100000,
+            };
+        }
+        return total;
+    }
+};
+```
+
+### 16.17 Token 价值捕获机制
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    TITAN Token 经济模型                                      │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Token 用途:                                                                 │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │                                                                       │ │
+│  │  1. Solver 质押 (Staking)                                             │ │
+│  │     • 成为 Solver 节点必须质押 TITAN                                  │ │
+│  │     • 质押金额影响接单优先级                                          │ │
+│  │     • 作恶会被罚没 (Slashing)                                         │ │
+│  │                                                                       │ │
+│  │  2. 协议费用 (Protocol Fee)                                           │ │
+│  │     • 每笔意图执行收取 0.05% 协议费                                   │ │
+│  │     • 费用以 TITAN 支付（或自动兑换）                                 │ │
+│  │                                                                       │ │
+│  │  3. 治理投票 (Governance)                                             │ │
+│  │     • 参与协议升级决策                                                │ │
+│  │     • 调整费率参数                                                    │ │
+│  │     • 批准新 Solver 类型                                              │ │
+│  │                                                                       │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+│  收入预测:                                                                   │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │                                                                       │ │
+│  │  场景         │ 日均交易量  │ 协议费率  │ 日收入    │ 年化收入       │ │
+│  │  ─────────────┼─────────────┼───────────┼───────────┼────────────────│ │
+│  │  早期 (Y1)    │ $1M         │ 0.05%     │ $500      │ $180K          │ │
+│  │  成长期 (Y2)  │ $10M        │ 0.05%     │ $5,000    │ $1.8M          │ │
+│  │  成熟期 (Y3)  │ $100M       │ 0.05%     │ $50,000   │ $18M           │ │
+│  │  规模化 (Y4+) │ $1B         │ 0.03%     │ $300,000  │ $109M          │ │
+│  │                                                                       │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+│  与 x402 收入叠加:                                                           │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │                                                                       │ │
+│  │  x402 收入 (AI 支付手续费)  + Intents 收入 (交易撮合费)               │ │
+│  │          ↓                            ↓                                │ │
+│  │     AI 经济增长                  交易量增长                            │ │
+│  │          ↓                            ↓                                │ │
+│  │     ════════════════════════════════════                              │ │
+│  │                    │                                                   │ │
+│  │                    ▼                                                   │ │
+│  │           协议收入指数增长                                             │ │
+│  │                                                                       │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+> **核心洞察：不做链 (Chain)，做网络 (Network)。**
+>
+> 这不仅技术上更轻量（无需处理共识难题），
+> 而且商业上更性感（连接所有链，而不是竞争所有链）。
+>
+> **Titan = 全链操作系统的用户空间服务层。**
+>
+> 就像 Linux 如果没有 CUPS (打印服务) 和 NetworkManager (网络服务) 就没法用一样，
+> Web3 如果没有 Titan Intents (意图服务)，AI Agent 就没法生存。
+>
+> 我们不仅造了内核，我们还内置了最关键的系统服务守护进程（Solver Network），
+> 让 OS 能够"自动驾驶"。
+
 ---
 
 ## 17. 终极总结 (Conclusion)
