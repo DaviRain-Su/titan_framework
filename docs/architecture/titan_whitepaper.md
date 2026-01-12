@@ -1518,6 +1518,534 @@ await multichain.crossTransfer({
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
+### 11.12 T-RPC 技术实现：Zig Wasm 作为前端内核
+
+这是 Titan Client SDK 最核心的技术创新：**用 Zig 编译成 WebAssembly，实现前后端代码复用**。
+
+#### 11.12.1 为什么用 Zig Wasm？
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    传统方案 vs Titan 方案                                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  传统方案 (维护地狱):                                                       │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  titan-sdk-web/      → TypeScript, 重写 ABI 编码                    │   │
+│  │  titan-sdk-ios/      → Swift, 重写 ABI 编码                         │   │
+│  │  titan-sdk-android/  → Kotlin, 重写 ABI 编码                        │   │
+│  │  titan-sdk-flutter/  → Dart, 重写 ABI 编码                          │   │
+│  │                                                                     │   │
+│  │  支持新链 → 4 个仓库都要改，容易出现不一致！                         │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  Titan 方案 (Zig Wasm):                                                     │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  titan-client-core/  → Zig, 一份代码                                │   │
+│  │      │                                                              │   │
+│  │      ├── → wasm32-freestanding  (Web)                               │   │
+│  │      ├── → aarch64-apple-ios    (iOS, Swift FFI)                    │   │
+│  │      ├── → aarch64-linux-android (Android, JNI)                     │   │
+│  │      └── → wasm32-wasi          (Node.js)                           │   │
+│  │                                                                     │   │
+│  │  支持新链 → 改一处，全平台自动生效！                                 │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 11.12.2 T-RPC 架构
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    T-RPC (Titan Remote Procedure Call) 架构                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  TypeScript Shell (薄壳层)                                          │   │
+│  │  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐  │   │
+│  │  │  网络请求   │ │  钱包唤起   │ │  UI 状态    │ │  事件监听   │  │   │
+│  │  │  (Fetch)    │ │ (MetaMask)  │ │  (React)    │ │ (WebSocket) │  │   │
+│  │  └─────────────┘ └─────────────┘ └─────────────┘ └─────────────┘  │   │
+│  └────────────────────────────┬────────────────────────────────────────┘   │
+│                               │ Wasm FFI                                    │
+│  ┌────────────────────────────▼────────────────────────────────────────┐   │
+│  │  Zig Wasm Core (核心计算层)                                         │   │
+│  │  titan-client-core.wasm (~50-100KB)                                 │   │
+│  │                                                                     │   │
+│  │  ┌─────────────────────────────────────────────────────────────┐   │   │
+│  │  │                    t_rpc_encode()                            │   │   │
+│  │  │  ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌──────────┐ │   │   │
+│  │  │  │  Solana   │  │    EVM    │  │    TON    │  │ Bitcoin  │ │   │   │
+│  │  │  │   SBF     │  │   ABI     │  │   Cell    │  │Miniscript│ │   │   │
+│  │  │  │ 序列化    │  │  编码     │  │   构建    │  │  编码    │ │   │   │
+│  │  │  └───────────┘  └───────────┘  └───────────┘  └──────────┘ │   │   │
+│  │  └─────────────────────────────────────────────────────────────┘   │   │
+│  │                                                                     │   │
+│  │  关键：复用后端 Zig Kernel 的编解码逻辑！                           │   │
+│  │  后端怎么解析，前端就怎么编码。1:1 一致性。                         │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                               │                                             │
+│  ┌────────────────────────────▼────────────────────────────────────────┐   │
+│  │  Universal Wallet Adapter (钱包适配层)                              │   │
+│  │  ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌───────────┐       │   │
+│  │  │ MetaMask  │  │  Phantom  │  │ TonKeeper │  │WalletConn │       │   │
+│  │  └───────────┘  └───────────┘  └───────────┘  └───────────┘       │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 11.12.3 Zig 核心代码
+
+```zig
+// titan-client-core.zig
+// 编译命令: zig build -Dtarget=wasm32-freestanding -Doptimize=ReleaseSmall
+
+const std = @import("std");
+const core = @import("titan-core"); // 复用后端内核！
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 导出给 JavaScript 调用的函数
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// 编码 RPC 调用数据
+/// 返回编码后的字节数组指针
+export fn t_rpc_encode(
+    chain_type: u8,       // 0=Solana, 1=EVM, 2=TON, 3=Bitcoin
+    method_id: u32,       // 方法 ID (from IDL)
+    args_ptr: [*]const u8,// 参数 JSON 字符串指针
+    args_len: usize,      // 参数长度
+    out_ptr: [*]u8,       // 输出缓冲区指针
+    out_len: *usize       // 输出长度
+) i32 {
+    // 1. 解析 JSON 参数
+    const args_slice = args_ptr[0..args_len];
+    const parsed = std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        args_slice,
+        .{}
+    ) catch return -1;
+    defer parsed.deinit();
+
+    // 2. 根据目标链路由到不同的编码器
+    const result = switch (chain_type) {
+        0 => core.solana.serialize_instruction(method_id, parsed.value),
+        1 => core.evm.encode_abi(method_id, parsed.value),
+        2 => core.ton.build_cell(method_id, parsed.value),
+        3 => core.bitcoin.encode_miniscript(method_id, parsed.value),
+        else => return -2, // 不支持的链
+    } catch return -3;
+
+    // 3. 写入输出缓冲区
+    @memcpy(out_ptr[0..result.len], result);
+    out_len.* = result.len;
+
+    return 0; // 成功
+}
+
+/// 解码 RPC 返回数据
+export fn t_rpc_decode(
+    chain_type: u8,
+    data_ptr: [*]const u8,
+    data_len: usize,
+    out_ptr: [*]u8,
+    out_len: *usize
+) i32 {
+    const data_slice = data_ptr[0..data_len];
+
+    const result = switch (chain_type) {
+        0 => core.solana.deserialize_return(data_slice),
+        1 => core.evm.decode_abi(data_slice),
+        2 => core.ton.parse_cell(data_slice),
+        3 => core.bitcoin.decode_script(data_slice),
+        else => return -2,
+    } catch return -3;
+
+    // 返回 JSON 字符串
+    const json_str = std.json.stringifyAlloc(allocator, result, .{}) catch return -4;
+    @memcpy(out_ptr[0..json_str.len], json_str);
+    out_len.* = json_str.len;
+
+    return 0;
+}
+
+/// 验证签名
+export fn t_rpc_verify_signature(
+    chain_type: u8,
+    message_ptr: [*]const u8,
+    message_len: usize,
+    signature_ptr: [*]const u8,
+    signature_len: usize,
+    pubkey_ptr: [*]const u8,
+    pubkey_len: usize
+) bool {
+    return switch (chain_type) {
+        0 => core.solana.verify_ed25519(message_ptr, signature_ptr, pubkey_ptr),
+        1 => core.evm.verify_secp256k1(message_ptr, signature_ptr, pubkey_ptr),
+        2 => core.ton.verify_ed25519(message_ptr, signature_ptr, pubkey_ptr),
+        else => false,
+    };
+}
+
+/// 计算地址
+export fn t_rpc_derive_address(
+    chain_type: u8,
+    pubkey_ptr: [*]const u8,
+    pubkey_len: usize,
+    out_ptr: [*]u8,
+    out_len: *usize
+) i32 {
+    const result = switch (chain_type) {
+        0 => core.solana.pubkey_to_base58(pubkey_ptr[0..pubkey_len]),
+        1 => core.evm.pubkey_to_address(pubkey_ptr[0..pubkey_len]),
+        2 => core.ton.pubkey_to_address(pubkey_ptr[0..pubkey_len]),
+        else => return -2,
+    } catch return -3;
+
+    @memcpy(out_ptr[0..result.len], result);
+    out_len.* = result.len;
+    return 0;
+}
+```
+
+#### 11.12.4 TypeScript 胶水层
+
+```typescript
+// titan-sdk.ts
+import initWasm, {
+  t_rpc_encode,
+  t_rpc_decode,
+  t_rpc_verify_signature,
+  t_rpc_derive_address
+} from './titan_client_core.wasm';
+
+// Chain 类型枚举
+enum ChainType {
+  Solana = 0,
+  EVM = 1,
+  TON = 2,
+  Bitcoin = 3
+}
+
+// Wasm 内存管理
+class WasmMemory {
+  private memory: WebAssembly.Memory;
+  private allocator: WebAssembly.ExportValue;
+
+  constructor(wasmInstance: WebAssembly.Instance) {
+    this.memory = wasmInstance.exports.memory as WebAssembly.Memory;
+    this.allocator = wasmInstance.exports.alloc;
+  }
+
+  // 将字符串写入 Wasm 内存
+  writeString(str: string): [number, number] {
+    const encoder = new TextEncoder();
+    const bytes = encoder.encode(str);
+    const ptr = (this.allocator as Function)(bytes.length);
+    const view = new Uint8Array(this.memory.buffer, ptr, bytes.length);
+    view.set(bytes);
+    return [ptr, bytes.length];
+  }
+
+  // 从 Wasm 内存读取字符串
+  readString(ptr: number, len: number): string {
+    const decoder = new TextDecoder();
+    const view = new Uint8Array(this.memory.buffer, ptr, len);
+    return decoder.decode(view);
+  }
+}
+
+// T-RPC 客户端
+export class TRPCClient {
+  private wasmMemory: WasmMemory;
+  private chainType: ChainType;
+
+  constructor(chainType: ChainType) {
+    this.chainType = chainType;
+  }
+
+  async init() {
+    const wasmInstance = await initWasm();
+    this.wasmMemory = new WasmMemory(wasmInstance);
+  }
+
+  // 编码方法调用
+  encode(methodId: number, args: any): Uint8Array {
+    const argsJson = JSON.stringify(args);
+    const [argsPtr, argsLen] = this.wasmMemory.writeString(argsJson);
+
+    // 分配输出缓冲区
+    const outPtr = (this.wasmMemory as any).alloc(4096);
+    const outLenPtr = (this.wasmMemory as any).alloc(4);
+
+    // 调用 Zig Wasm
+    const result = t_rpc_encode(
+      this.chainType,
+      methodId,
+      argsPtr,
+      argsLen,
+      outPtr,
+      outLenPtr
+    );
+
+    if (result !== 0) {
+      throw new Error(`T-RPC encode failed: ${result}`);
+    }
+
+    // 读取输出
+    const outLen = new Uint32Array(
+      this.wasmMemory.memory.buffer,
+      outLenPtr,
+      1
+    )[0];
+    return new Uint8Array(this.wasmMemory.memory.buffer, outPtr, outLen);
+  }
+
+  // 解码返回值
+  decode(data: Uint8Array): any {
+    const [dataPtr, dataLen] = this.wasmMemory.writeBytes(data);
+    const outPtr = (this.wasmMemory as any).alloc(4096);
+    const outLenPtr = (this.wasmMemory as any).alloc(4);
+
+    const result = t_rpc_decode(
+      this.chainType,
+      dataPtr,
+      dataLen,
+      outPtr,
+      outLenPtr
+    );
+
+    if (result !== 0) {
+      throw new Error(`T-RPC decode failed: ${result}`);
+    }
+
+    const outLen = new Uint32Array(
+      this.wasmMemory.memory.buffer,
+      outLenPtr,
+      1
+    )[0];
+    const jsonStr = this.wasmMemory.readString(outPtr, outLen);
+    return JSON.parse(jsonStr);
+  }
+}
+```
+
+#### 11.12.5 Universal Wallet Adapter
+
+```typescript
+// wallet-adapter.ts
+
+interface WalletAdapter {
+  connect(): Promise<string>;  // 返回地址
+  sign(message: Uint8Array): Promise<Uint8Array>;
+  sendTransaction(to: string, data: Uint8Array): Promise<string>;
+}
+
+// EVM 钱包适配器 (MetaMask)
+class EVMWalletAdapter implements WalletAdapter {
+  async connect(): Promise<string> {
+    const accounts = await window.ethereum.request({
+      method: 'eth_requestAccounts'
+    });
+    return accounts[0];
+  }
+
+  async sign(message: Uint8Array): Promise<Uint8Array> {
+    const address = await this.connect();
+    const signature = await window.ethereum.request({
+      method: 'personal_sign',
+      params: [toHex(message), address]
+    });
+    return fromHex(signature);
+  }
+
+  async sendTransaction(to: string, data: Uint8Array): Promise<string> {
+    return await window.ethereum.request({
+      method: 'eth_sendTransaction',
+      params: [{
+        to: to,
+        data: toHex(data)
+      }]
+    });
+  }
+}
+
+// Solana 钱包适配器 (Phantom)
+class SolanaWalletAdapter implements WalletAdapter {
+  async connect(): Promise<string> {
+    const resp = await window.solana.connect();
+    return resp.publicKey.toString();
+  }
+
+  async sign(message: Uint8Array): Promise<Uint8Array> {
+    const { signature } = await window.solana.signMessage(message);
+    return signature;
+  }
+
+  async sendTransaction(to: string, data: Uint8Array): Promise<string> {
+    const { Connection, Transaction, PublicKey } = await import('@solana/web3.js');
+    const connection = new Connection('https://api.mainnet-beta.solana.com');
+
+    const tx = new Transaction().add({
+      keys: [],
+      programId: new PublicKey(to),
+      data: Buffer.from(data)
+    });
+
+    const { signature } = await window.solana.signAndSendTransaction(tx);
+    return signature;
+  }
+}
+
+// TON 钱包适配器 (TonKeeper)
+class TONWalletAdapter implements WalletAdapter {
+  private tonConnect: any;
+
+  async connect(): Promise<string> {
+    const { TonConnect } = await import('@tonconnect/sdk');
+    this.tonConnect = new TonConnect({ manifestUrl: '...' });
+    const wallet = await this.tonConnect.connect();
+    return wallet.account.address;
+  }
+
+  async sign(message: Uint8Array): Promise<Uint8Array> {
+    return await this.tonConnect.sendTransaction({
+      validUntil: Date.now() + 5 * 60 * 1000,
+      messages: [{ payload: toBase64(message) }]
+    });
+  }
+
+  async sendTransaction(to: string, data: Uint8Array): Promise<string> {
+    return await this.tonConnect.sendTransaction({
+      validUntil: Date.now() + 5 * 60 * 1000,
+      messages: [{
+        address: to,
+        payload: toBase64(data)
+      }]
+    });
+  }
+}
+
+// 统一工厂
+export function createWalletAdapter(chainType: ChainType): WalletAdapter {
+  switch (chainType) {
+    case ChainType.EVM:
+      return new EVMWalletAdapter();
+    case ChainType.Solana:
+      return new SolanaWalletAdapter();
+    case ChainType.TON:
+      return new TONWalletAdapter();
+    default:
+      throw new Error(`Unsupported chain: ${chainType}`);
+  }
+}
+```
+
+#### 11.12.6 完整调用流程
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    T-RPC 完整调用流程                                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  用户代码：                                                                  │
+│  ┌───────────────────────────────────────────────────────────────────┐     │
+│  │  await client.methods.transfer("0x123...", 100).submit();         │     │
+│  └───────────────────────────────────────────────────────────────────┘     │
+│       │                                                                     │
+│       ▼ Step 1: 查 IDL                                                      │
+│  ┌───────────────────────────────────────────────────────────────────┐     │
+│  │  methodId = idl.methods.find("transfer").id  // → 0x01            │     │
+│  └───────────────────────────────────────────────────────────────────┘     │
+│       │                                                                     │
+│       ▼ Step 2: Zig Wasm 编码                                               │
+│  ┌───────────────────────────────────────────────────────────────────┐     │
+│  │  const payload = t_rpc_encode(                                    │     │
+│  │      ChainType.EVM,         // 目标链                             │     │
+│  │      0x01,                  // methodId                           │     │
+│  │      '{"to":"0x123","amt":100}'  // 参数 JSON                     │     │
+│  │  );                                                               │     │
+│  │  // → 0xa9059cbb000000000000000000000123...                       │     │
+│  │  //   (ABI 编码的 transfer(address,uint256))                      │     │
+│  └───────────────────────────────────────────────────────────────────┘     │
+│       │                                                                     │
+│       ▼ Step 3: 钱包签名                                                    │
+│  ┌───────────────────────────────────────────────────────────────────┐     │
+│  │  const wallet = createWalletAdapter(ChainType.EVM);               │     │
+│  │  const txHash = await wallet.sendTransaction(                     │     │
+│  │      contractAddress,                                             │     │
+│  │      payload  // Zig 编码的数据                                   │     │
+│  │  );                                                               │     │
+│  └───────────────────────────────────────────────────────────────────┘     │
+│       │                                                                     │
+│       ▼ Step 4: 等待确认                                                    │
+│  ┌───────────────────────────────────────────────────────────────────┐     │
+│  │  const receipt = await waitForTransaction(txHash);                │     │
+│  │  const result = t_rpc_decode(ChainType.EVM, receipt.returnData);  │     │
+│  │  // → { success: true }                                           │     │
+│  └───────────────────────────────────────────────────────────────────┘     │
+│                                                                             │
+│  整个流程中，核心编解码逻辑由 Zig Wasm 处理                                 │
+│  TypeScript 只做"搬运工"                                                    │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 11.12.7 技术优势总结
+
+| 维度 | 传统 JS SDK | Titan Zig Wasm |
+| :--- | :--- | :--- |
+| **代码复用** | 每平台重写 | 一份代码，全平台 |
+| **一致性** | 前后端可能不一致 | 1:1 完全一致 |
+| **安全性** | JS 容易出 Bug | Zig 类型安全 |
+| **包大小** | ethers.js ~300KB | Wasm ~50-100KB |
+| **新链支持** | 改 N 个仓库 | 改一处自动生效 |
+| **性能** | JS 解释执行 | Wasm 接近原生 |
+
+#### 11.12.8 全平台编译矩阵
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Zig 全平台编译                                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  源代码: titan-client-core.zig                                              │
+│       │                                                                     │
+│       ├── zig build -Dtarget=wasm32-freestanding                           │
+│       │   └── titan-client-core.wasm (Web)                                 │
+│       │       └── import 到 JavaScript/TypeScript                          │
+│       │                                                                     │
+│       ├── zig build -Dtarget=wasm32-wasi                                   │
+│       │   └── titan-client-core.wasm (Node.js)                             │
+│       │       └── 使用 WASI runtime 加载                                   │
+│       │                                                                     │
+│       ├── zig build -Dtarget=aarch64-apple-ios                             │
+│       │   └── libtitan_client.a (iOS)                                      │
+│       │       └── Swift FFI: @_silgen_name("t_rpc_encode")                 │
+│       │                                                                     │
+│       ├── zig build -Dtarget=aarch64-linux-android                         │
+│       │   └── libtitan_client.so (Android)                                 │
+│       │       └── Kotlin JNI: System.loadLibrary("titan_client")           │
+│       │                                                                     │
+│       └── zig build -Dtarget=x86_64-linux-gnu                              │
+│           └── libtitan_client.so (Linux Server)                            │
+│               └── 用于后端服务、测试环境                                    │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+> **T-RPC 是 Titan Client SDK 的核心引擎。**
+>
+> 通过将后端 Zig Kernel 的编解码逻辑编译为 WebAssembly，
+> 我们实现了前后端代码的完全复用，保证了 1:1 的一致性。
+>
+> **这就是"全栈同构"的力量：你的操作系统内核，不仅跑在链上，也跑在用户的浏览器里。**
+
+---
+
 > **Titan Client SDK 是 Titan OS 的"桌面环境"。**
 >
 > 它把底层的复杂性包装成简单的 API，让前端开发者和 AI Agent
