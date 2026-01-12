@@ -48,6 +48,7 @@
 | **020** | [原生 EVM 适配器](020_adapter_evm_native.md) | Zig 到 Yul 的源码转译规范。 |
 | **021** | [Polkadot 适配器](021_adapter_polkadot.md) | Substrate Contracts (ink!) Seal API 与 SCALE 编码规范。 |
 | **022** | [后端注册表](022_backend_registry.md) | 所有编译后端的状态、映射与实现路线图。 |
+| **023** | [Bitcoin 生态适配器](023_adapter_bitcoin.md) | BTC L1 (Miniscript)、BTC L2 (EVM)、Stacks (Clarity) 适配规范。 |
 
 ## 高级设计 (Advanced Designs)
 

@@ -54,6 +54,14 @@ pub const TargetChain = enum {
     ckb,
     /// 原生 EVM (Zig -> Yul 转译)
     evm_native,
+
+    // ===== BTC 生态 =====
+    /// BTC L2 (EVM 兼容) - 复用 evm_native
+    btc_l2_evm,
+    /// BTC L1 (Zig -> Miniscript)
+    btc_native,
+    /// Stacks (Zig -> Clarity)
+    stacks,
 };
 ```
 
@@ -73,6 +81,9 @@ pub const TargetChain = enum {
 | `ton` | N/A (转译) | N/A | `.tact` | 011 |
 | `ckb` | `riscv64-unknown-none-elf` | `generic` | `.elf` | 019 |
 | `evm_native` | N/A (转译) | N/A | `.yul` | 020 |
+| `btc_l2_evm` | N/A (转译) | N/A | `.yul` | 023 |
+| `btc_native` | N/A (转译) | N/A | `.miniscript` | 023 |
+| `stacks` | N/A (转译) | N/A | `.clar` | 023 |
 
 ### 3.2 内核接口实现状态
 
@@ -224,7 +235,8 @@ pub const storage_write = if (@hasDecl(impl, "storage_write")) impl.storage_writ
 | Tier | 目标链 | 技术难度 | 商业价值 | 优先级原因 |
 | :--- | :--- | :--- | :--- | :--- |
 | **1** | Solana, Near, CosmWasm, Substrate | 低 | 高 | LLVM 主场，验证核心价值 |
-| **2** | Stylus, CKB | 中 | 中高 | 市场存量大，有差异化需求 |
+| **1.5** | BTC L2 (EVM), BTC L1 (Miniscript) | 低-中 | 极高 | 复用 Yul，BTC 流动性最大 |
+| **2** | Stylus, CKB, Stacks | 中 | 中高 | 市场存量大，有差异化需求 |
 | **3** | TON, EVM Native | 极高 | 极高 | 架构特殊，需专门团队攻克 |
 
 **关键决策**:
@@ -250,7 +262,11 @@ pub const storage_write = if (@hasDecl(impl, "storage_write")) impl.storage_writ
 - [x] 设计: `ton` 转译规范 (011) ⚠️ Tier 3
 - [x] 设计: `ckb` 后端规范 (019)
 - [x] 设计: `evm_native` 转译规范 (020)
+- [x] 设计: `bitcoin` 生态规范 (023) - BTC L1/L2/Stacks
 - [x] 实现: `evm_native` 参考实现 ([zig-to-yul](https://github.com/DaviRain-Su/zig-to-yul) v0.1.0) ✅
+- [ ] 实现: `btc_l2_evm` (复用 zig-to-yul) ← 零新工作
+- [ ] 实现: `btc_native` Miniscript 转译器
+- [ ] 实现: `stacks` Clarity 转译器
 - [ ] 实现: `ton` 转译器 CLI (需专门团队) ⚠️ Tier 3
 - [ ] 实现: RISC-V 后端
 

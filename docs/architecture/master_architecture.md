@@ -286,6 +286,7 @@ titan-evm compile contract.zig     # -> .bin (via Yul)
 | Solana SBF 后端设计 | ✅ | 规范 009 |
 | Near Wasm 后端设计 | ✅ | 规范 010 |
 | TON 转译器设计 | ✅ | 规范 011 (含 Fift/comptime DSL) |
+| Bitcoin 生态设计 | ✅ | 规范 023 (BTC L1/L2/Stacks) |
 
 ### 7.2 集成阶段 (下一步)
 
@@ -294,13 +295,16 @@ titan-evm compile contract.zig     # -> .bin (via Yul)
 | Solana Platform 接口实现 | P0 | 内存、IO、账户处理 |
 | Near Wasm Platform 实现 | P0 | Registers、Promises |
 | 统一 titan.* API | P1 | 抽象层对齐 |
-| zig-to-yul 集成到 Titan | P1 | 复用已有实现 |
+| zig-to-yul 集成到 Titan | P1 | 复用已有实现，覆盖 EVM + BTC L2 |
+| BTC L1 Miniscript 转译器 | P1 | 逻辑简单，复用转译架构 |
 
 ### 7.3 高级阶段 (长期)
 
 | 任务 | 优先级 | 说明 |
 | :--- | :---: | :--- |
+| Stacks Clarity 转译器 | P2 | LISP 语法适配 |
 | TON Fift 转译器实现 | P2 | Tier 3，需专门团队 |
+| BitVM 电路生成器 | P3 | 前沿研究，等协议稳定 |
 | Roc Platform 接口 | P3 | 函数式前端 |
 | 形式化验证集成 | P3 | SMT 求解器 |
 
@@ -308,8 +312,19 @@ titan-evm compile contract.zig     # -> .bin (via Yul)
 
 **一句话总结**:
 
-> **Titan OS = LLVM 原生编译 (Solana/Wasm) + Zig comptime 转译 (TON/EVM)**
+> **Titan OS = LLVM 原生编译 (Solana/Wasm) + Zig comptime 转译 (TON/EVM/BTC)**
 >
 > **降维打击，全链通吃。**
 
-这是目前市面上**唯一**能打通 Solana + Wasm + TON + EVM 四大生态的架构方案。
+这是目前市面上**唯一**能打通以下生态的架构方案：
+
+| 生态 | 规模 | Titan 支持 |
+| :--- | :--- | :---: |
+| **Bitcoin** | $1T+ 市值 | ✅ (Miniscript/Yul) |
+| **Ethereum + L2** | $100B+ TVL | ✅ (Yul) |
+| **Solana** | 1000万+ 用户 | ✅ (SBF) |
+| **TON/Telegram** | 9亿用户 | ✅ (Fift) |
+| **Cosmos** | 50+ 链 | ✅ (Wasm) |
+| **Polkadot** | 100+ 平行链 | ✅ (Wasm) |
+
+**没有任何一条有价值的链是覆盖不到的。**
