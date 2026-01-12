@@ -30,10 +30,12 @@
 | **013** | [事件与索引](013_events_indexing.md) | 统一的 Log/Event 发送与索引标准。 |
 | **014** | [合约升级机制](014_upgradability.md) | 代理升级、原生升级与状态迁移标准。 |
 | **015** | [EVM 适配器](015_adapter_evm.md) | 基于 Arbitrum Stylus 的 EVM 互操作规范。 |
+| **016** | [Cosmos 适配器](016_adapter_cosmos.md) | CosmWasm Actor 模型与入口点映射规范。 |
 | **017** | [运行时引导](017_runtime_bootstrap.md) | 定义如何从底层 entrypoint 引导至用户 main 函数。 |
 | **018** | [多链存储适配](018_multichain_storage.md) | Near/Cosmos/Polkadot 的存储层实现细节。 |
 | **019** | [Nervos 适配器](019_adapter_ckb.md) | 基于 Cell 模型的 Extended UTXO 适配规范。 |
 | **020** | [原生 EVM 适配器](020_adapter_evm_native.md) | Zig 到 Yul 的源码转译规范。 |
+| **021** | [Polkadot 适配器](021_adapter_polkadot.md) | Substrate Contracts (ink!) Seal API 与 SCALE 编码规范。 |
 
 ## 高级设计 (Advanced Designs)
 
