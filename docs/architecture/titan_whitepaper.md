@@ -8440,6 +8440,902 @@ pub const GasUrgency = enum {
 >
 > 你不需要知道链是 EVM 还是 SVM，你只需要 `titan.rpc.broadcast()`。
 
+### 17.10 Solana 单链 Linux 化：驱动插件架构
+
+> **将 Solana 视为唯一的"主板"，在其上实现 Linux 风格的驱动架构。**
+>
+> 这是在单一 L1 上构建操作系统内核的工程实践。
+> 利用 Solana 的 **CPI (Cross-Program Invocation)** 实现设备驱动的动态分发。
+
+#### 架构映射：Linux vs Solana
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Linux 架构 vs Solana 实现对照                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ══════════════════════════════════════════════════════════════════════    │
+│   Linux 组件           │ Solana 实现              │ 职责                    │
+│  ══════════════════════════════════════════════════════════════════════    │
+│                        │                          │                         │
+│   User Space App       │ User Client / AI Agent   │ 发起通用请求            │
+│   (应用程序)           │ (客户端)                 │ write_file, send_money  │
+│                        │                          │                         │
+│  ──────────────────────────────────────────────────────────────────────    │
+│                        │                          │                         │
+│   Syscall Interface    │ Titan Kernel Program     │ 统一入口                │
+│   (系统调用)           │ (内核合约)               │ 权限检查、路由分发      │
+│                        │                          │                         │
+│  ──────────────────────────────────────────────────────────────────────    │
+│                        │                          │                         │
+│   VFS / HAL Interface  │ Standard TLV Instruction │ 标准二进制指令格式      │
+│   (虚拟文件系统)       │ (标准指令协议)           │ Transfer, Read, Write   │
+│                        │                          │                         │
+│  ──────────────────────────────────────────────────────────────────────    │
+│                        │                          │                         │
+│   Device Drivers       │ Driver Programs          │ 独立 Solana 合约        │
+│   (设备驱动)           │ (驱动插件)               │ 实现标准接口            │
+│                        │                          │                         │
+│  ──────────────────────────────────────────────────────────────────────    │
+│                        │                          │                         │
+│   Hardware             │ External Resources       │ ETH, BTC, Arweave       │
+│   (硬件)               │ (外部资源)               │ GPU 网络, 预言机        │
+│                        │                          │                         │
+│  ══════════════════════════════════════════════════════════════════════    │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 完整架构图
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Solana 上的 Linux 驱动架构                                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│                         ┌─────────────────────┐                             │
+│                         │    AI Agent / User   │                             │
+│                         │                     │                             │
+│                         │  titan.write("/dev/eth0", data)                   │
+│                         └──────────┬──────────┘                             │
+│                                    │                                         │
+│  ═══════════════════════════════════════════════════════════════════════   │
+│                                    │                                         │
+│                                    ▼                                         │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │                    Titan Kernel Program                             │   │
+│  │                    (Solana 合约 - 系统调用入口)                     │   │
+│  │                                                                     │   │
+│  │  ┌─────────────────────────────────────────────────────────────┐   │   │
+│  │  │                                                             │   │   │
+│  │  │  1. 解析 Standard Instruction                               │   │   │
+│  │  │  2. 权限检查 (Signer, Owner)                                │   │   │
+│  │  │  3. 查询 Registry PDA (设备表)                              │   │   │
+│  │  │  4. CPI 转发到对应 Driver Program                           │   │   │
+│  │  │                                                             │   │   │
+│  │  └─────────────────────────────────────────────────────────────┘   │   │
+│  │                                                                     │   │
+│  │                    Registry PDA (设备注册表)                        │   │
+│  │  ┌─────────────────────────────────────────────────────────────┐   │   │
+│  │  │                                                             │   │   │
+│  │  │  AssetID 0x00 (SOL)  → Driver: System Program               │   │   │
+│  │  │  AssetID 0x01 (BTC)  → Driver: Program_BTC_xyz...           │   │   │
+│  │  │  AssetID 0x02 (ETH)  → Driver: Program_ETH_abc...           │   │   │
+│  │  │  AssetID 0x03 (AR)   → Driver: Program_Arweave_def...       │   │   │
+│  │  │  AssetID 0x04 (GPU)  → Driver: Program_Compute_ghi...       │   │   │
+│  │  │                                                             │   │   │
+│  │  └─────────────────────────────────────────────────────────────┘   │   │
+│  │                                                                     │   │
+│  └──────────────────────────────┬──────────────────────────────────────┘   │
+│                                 │                                           │
+│                    CPI (Cross-Program Invocation)                          │
+│                                 │                                           │
+│       ┌─────────────────────────┼─────────────────────────┐                │
+│       │                         │                         │                 │
+│       ▼                         ▼                         ▼                 │
+│  ┌──────────────┐        ┌──────────────┐        ┌──────────────┐         │
+│  │  SOL Driver  │        │  ETH Driver  │        │  AR Driver   │  ...    │
+│  │  (Native)    │        │  (Bridge)    │        │  (Storage)   │         │
+│  │              │        │              │        │              │         │
+│  │  Loopback    │        │  Wormhole    │        │  Arweave     │         │
+│  │  设备        │        │  Relayer     │        │  Gateway     │         │
+│  └──────┬───────┘        └──────┬───────┘        └──────┬───────┘         │
+│         │                       │                       │                  │
+│  ═══════════════════════════════════════════════════════════════════════   │
+│         │                       │                       │                  │
+│         ▼                       ▼                       ▼                  │
+│  ┌──────────────┐        ┌──────────────┐        ┌──────────────┐         │
+│  │   Solana     │        │   Ethereum   │        │   Arweave    │         │
+│  │   Mainnet    │        │   Mainnet    │        │   Network    │         │
+│  └──────────────┘        └──────────────┘        └──────────────┘         │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Step 1: 标准指令协议 (VFS Layer)
+
+定义一套通用二进制指令协议，类似 Linux 的 `file_operations`：
+
+```rust
+// ============================================================================
+// Titan Standard Instruction Protocol - 标准指令协议
+// ============================================================================
+// 类似 Linux 的 <linux/fs.h> file_operations
+
+use borsh::{BorshDeserialize, BorshSerialize};
+
+/// 所有 Driver Program 必须能解析这个 Instruction
+/// 这是 Titan OS 的 "系统调用接口"
+#[derive(BorshSerialize, BorshDeserialize, Debug)]
+pub enum TitanDriverInstruction {
+    /// 0: 初始化/连接设备
+    /// 类似 Linux 的 open()
+    Connect {
+        /// 设备配置 (JSON 或自定义格式)
+        config: Vec<u8>,
+    },
+
+    /// 1: 执行/写入
+    /// 类似 Linux 的 write() + ioctl()
+    Execute {
+        /// 金额 (对于转账类操作)
+        amount: u64,
+
+        /// 目标地址 (通用字节数组)
+        /// 20 字节 = ETH, 32 字节 = SOL, 变长 = BTC
+        target_address: Vec<u8>,
+
+        /// 附加数据 (calldata, memo 等)
+        payload: Vec<u8>,
+    },
+
+    /// 2: 读取状态
+    /// 类似 Linux 的 read()
+    ReadState {
+        /// 查询键
+        query_key: Vec<u8>,
+    },
+
+    /// 3: 断开连接
+    /// 类似 Linux 的 close()
+    Disconnect,
+
+    /// 4: 设备控制
+    /// 类似 Linux 的 ioctl()
+    Control {
+        /// 命令码
+        cmd: u32,
+        /// 参数
+        arg: Vec<u8>,
+    },
+}
+
+/// 标准返回结果
+#[derive(BorshSerialize, BorshDeserialize, Debug)]
+pub enum TitanDriverResult {
+    /// 成功
+    Success {
+        /// 返回数据
+        data: Vec<u8>,
+        /// 交易 ID (如果有)
+        tx_id: Option<[u8; 32]>,
+    },
+
+    /// 待处理 (异步操作)
+    Pending {
+        /// 操作 ID
+        operation_id: [u8; 32],
+        /// 预计完成时间 (Unix timestamp)
+        estimated_completion: u64,
+    },
+
+    /// 失败
+    Error {
+        /// 错误码
+        code: u32,
+        /// 错误信息
+        message: String,
+    },
+}
+
+/// 设备能力描述 (用于 Registry)
+#[derive(BorshSerialize, BorshDeserialize, Debug)]
+pub struct DriverCapabilities {
+    /// 驱动名称
+    pub name: String,
+
+    /// 版本
+    pub version: u32,
+
+    /// 支持的操作
+    pub supported_ops: Vec<u8>,
+
+    /// 是否支持同步执行
+    pub sync_execution: bool,
+
+    /// 是否需要链下 Relayer
+    pub requires_relayer: bool,
+
+    /// 最大 payload 大小
+    pub max_payload_size: u32,
+}
+```
+
+#### Step 2: Kernel Program (内核合约)
+
+主入口程序，负责"查表"和"CPI 转发"：
+
+```rust
+// ============================================================================
+// Titan Kernel Program - 内核合约
+// ============================================================================
+// 类似 Linux 内核的系统调用分发
+
+use anchor_lang::prelude::*;
+use solana_program::program::invoke_signed;
+
+declare_id!("TitanKernel11111111111111111111111111111");
+
+#[program]
+pub mod titan_kernel {
+    use super::*;
+
+    /// 系统调用入口 - 转账/执行
+    /// 这是用户调用的统一接口
+    pub fn sys_transfer(
+        ctx: Context<SysTransfer>,
+        asset_id: u8,
+        target: Vec<u8>,
+        amount: u64,
+        payload: Vec<u8>,
+    ) -> Result<()> {
+        // 1. 查找驱动程序地址 (相当于查找 /dev/sda)
+        let registry = &ctx.accounts.registry;
+        let driver_entry = registry.get_driver(asset_id)
+            .ok_or(TitanError::DriverNotFound)?;
+
+        msg!("Dispatching to driver: {} for asset_id: {}",
+             driver_entry.program_id, asset_id);
+
+        // 2. 构建标准指令 (VFS Interface)
+        let instruction = TitanDriverInstruction::Execute {
+            amount,
+            target_address: target,
+            payload,
+        };
+
+        let ix = solana_program::instruction::Instruction {
+            program_id: driver_entry.program_id,
+            accounts: ctx.remaining_accounts
+                .iter()
+                .map(|a| AccountMeta {
+                    pubkey: *a.key,
+                    is_signer: a.is_signer,
+                    is_writable: a.is_writable,
+                })
+                .collect(),
+            data: instruction.try_to_vec()?,
+        };
+
+        // 3. 跨程序调用 (Driver Call)
+        // 这就是 Linux 的 "callback" 机制
+        invoke_signed(
+            &ix,
+            ctx.remaining_accounts,
+            &[&[b"kernel", &[ctx.bumps.kernel_authority]]],
+        )?;
+
+        emit!(TransferEvent {
+            asset_id,
+            user: ctx.accounts.user.key(),
+            driver: driver_entry.program_id,
+            amount,
+        });
+
+        Ok(())
+    }
+
+    /// 注册新驱动 (热插拔)
+    /// 类似 Linux 的 insmod
+    pub fn register_driver(
+        ctx: Context<RegisterDriver>,
+        asset_id: u8,
+        driver_program: Pubkey,
+        capabilities: DriverCapabilities,
+    ) -> Result<()> {
+        // 权限检查：只有 DAO 或管理员可以注册
+        require!(
+            ctx.accounts.authority.key() == ctx.accounts.registry.admin,
+            TitanError::Unauthorized
+        );
+
+        let registry = &mut ctx.accounts.registry;
+
+        // 检查是否已存在
+        if registry.drivers.iter().any(|d| d.asset_id == asset_id) {
+            return Err(TitanError::DriverAlreadyExists.into());
+        }
+
+        // 注册驱动
+        registry.drivers.push(DriverEntry {
+            asset_id,
+            program_id: driver_program,
+            capabilities,
+            registered_at: Clock::get()?.unix_timestamp,
+            enabled: true,
+        });
+
+        emit!(DriverRegistered {
+            asset_id,
+            program_id: driver_program,
+        });
+
+        Ok(())
+    }
+
+    /// 注销驱动 (卸载)
+    /// 类似 Linux 的 rmmod
+    pub fn unregister_driver(
+        ctx: Context<UnregisterDriver>,
+        asset_id: u8,
+    ) -> Result<()> {
+        require!(
+            ctx.accounts.authority.key() == ctx.accounts.registry.admin,
+            TitanError::Unauthorized
+        );
+
+        let registry = &mut ctx.accounts.registry;
+        registry.drivers.retain(|d| d.asset_id != asset_id);
+
+        emit!(DriverUnregistered { asset_id });
+
+        Ok(())
+    }
+
+    /// 读取设备状态
+    pub fn sys_read(
+        ctx: Context<SysRead>,
+        asset_id: u8,
+        query_key: Vec<u8>,
+    ) -> Result<Vec<u8>> {
+        let registry = &ctx.accounts.registry;
+        let driver_entry = registry.get_driver(asset_id)
+            .ok_or(TitanError::DriverNotFound)?;
+
+        let instruction = TitanDriverInstruction::ReadState { query_key };
+
+        // CPI 调用驱动的 read 方法
+        // ... (类似 sys_transfer)
+
+        Ok(vec![]) // 返回数据
+    }
+}
+
+/// Registry 账户结构
+#[account]
+pub struct DriverRegistry {
+    /// 管理员
+    pub admin: Pubkey,
+
+    /// 已注册的驱动列表
+    pub drivers: Vec<DriverEntry>,
+
+    /// Bump seed
+    pub bump: u8,
+}
+
+/// 驱动条目
+#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
+pub struct DriverEntry {
+    /// 资产/设备 ID
+    pub asset_id: u8,
+
+    /// 驱动程序地址
+    pub program_id: Pubkey,
+
+    /// 能力描述
+    pub capabilities: DriverCapabilities,
+
+    /// 注册时间
+    pub registered_at: i64,
+
+    /// 是否启用
+    pub enabled: bool,
+}
+
+impl DriverRegistry {
+    pub fn get_driver(&self, asset_id: u8) -> Option<&DriverEntry> {
+        self.drivers.iter()
+            .find(|d| d.asset_id == asset_id && d.enabled)
+    }
+}
+
+#[error_code]
+pub enum TitanError {
+    #[msg("Driver not found")]
+    DriverNotFound,
+    #[msg("Unauthorized")]
+    Unauthorized,
+    #[msg("Driver already exists")]
+    DriverAlreadyExists,
+}
+```
+
+#### Step 3: Driver Plugin 实现
+
+##### 插件 A: Solana Native Driver (回环设备)
+
+```rust
+// ============================================================================
+// SOL Native Driver - 本地回环设备
+// ============================================================================
+// 类似 Linux 的 loopback 设备
+
+use anchor_lang::prelude::*;
+use anchor_lang::system_program::{transfer, Transfer};
+
+declare_id!("SolDriver1111111111111111111111111111111");
+
+#[program]
+pub mod sol_native_driver {
+    use super::*;
+
+    /// 处理标准指令
+    pub fn process(ctx: Context<Process>, instruction: TitanDriverInstruction) -> Result<()> {
+        match instruction {
+            TitanDriverInstruction::Execute { amount, target_address, .. } => {
+                // 解析目标地址 (32 字节 Solana Pubkey)
+                let target = Pubkey::try_from(target_address.as_slice())
+                    .map_err(|_| DriverError::InvalidAddress)?;
+
+                // 直接调用 System Program 转账
+                let cpi_context = CpiContext::new(
+                    ctx.accounts.system_program.to_account_info(),
+                    Transfer {
+                        from: ctx.accounts.from.to_account_info(),
+                        to: ctx.accounts.to.to_account_info(),
+                    },
+                );
+
+                transfer(cpi_context, amount)?;
+
+                msg!("SOL transfer complete: {} lamports to {}", amount, target);
+                Ok(())
+            }
+
+            TitanDriverInstruction::ReadState { query_key } => {
+                // 读取账户余额
+                let balance = ctx.accounts.target.lamports();
+                msg!("Balance query: {} lamports", balance);
+                Ok(())
+            }
+
+            _ => Err(DriverError::UnsupportedOperation.into()),
+        }
+    }
+}
+```
+
+##### 插件 B: Ethereum Driver (桥接设备)
+
+```rust
+// ============================================================================
+// ETH Bridge Driver - 以太坊桥接设备
+// ============================================================================
+// 这是一个 "虚拟设备"，通过链下 Relayer 执行
+
+use anchor_lang::prelude::*;
+
+declare_id!("EthDriver1111111111111111111111111111111");
+
+#[program]
+pub mod eth_bridge_driver {
+    use super::*;
+
+    /// 处理标准指令
+    pub fn process(ctx: Context<Process>, instruction: TitanDriverInstruction) -> Result<()> {
+        match instruction {
+            TitanDriverInstruction::Execute { amount, target_address, payload } => {
+                // 验证目标地址格式 (20 字节 ETH 地址)
+                require!(
+                    target_address.len() == 20,
+                    DriverError::InvalidAddress
+                );
+
+                // 不能直接转账到 ETH
+                // 而是写入 Pending Queue，等待链下 Relayer 处理
+                let pending_tx = &mut ctx.accounts.pending_tx;
+                pending_tx.id = generate_tx_id(&ctx);
+                pending_tx.target_chain = ChainId::Ethereum;
+                pending_tx.target_address = target_address;
+                pending_tx.amount = amount;
+                pending_tx.payload = payload;
+                pending_tx.status = TxStatus::Pending;
+                pending_tx.created_at = Clock::get()?.unix_timestamp;
+                pending_tx.user = ctx.accounts.user.key();
+
+                // 锁定用户资金 (USDC 或 wrapped ETH)
+                // transfer_to_escrow(ctx, amount)?;
+
+                emit!(PendingTxCreated {
+                    tx_id: pending_tx.id,
+                    target_chain: ChainId::Ethereum,
+                    target_address: pending_tx.target_address.clone(),
+                    amount,
+                });
+
+                msg!("ETH transfer queued: {} to 0x{}",
+                     amount,
+                     hex::encode(&target_address));
+
+                Ok(())
+            }
+
+            TitanDriverInstruction::ReadState { query_key } => {
+                // 查询 pending 交易状态
+                // 或查询 ETH 余额 (通过预言机)
+                Ok(())
+            }
+
+            _ => Err(DriverError::UnsupportedOperation.into()),
+        }
+    }
+
+    /// 链下 Relayer 回调 - 确认交易完成
+    pub fn confirm_execution(
+        ctx: Context<ConfirmExecution>,
+        tx_id: [u8; 32],
+        eth_tx_hash: [u8; 32],
+    ) -> Result<()> {
+        // 只有授权的 Relayer 可以调用
+        require!(
+            ctx.accounts.relayer.key() == ctx.accounts.config.authorized_relayer,
+            DriverError::Unauthorized
+        );
+
+        let pending_tx = &mut ctx.accounts.pending_tx;
+        require!(
+            pending_tx.id == tx_id && pending_tx.status == TxStatus::Pending,
+            DriverError::InvalidTx
+        );
+
+        pending_tx.status = TxStatus::Confirmed;
+        pending_tx.external_tx_hash = Some(eth_tx_hash);
+        pending_tx.confirmed_at = Some(Clock::get()?.unix_timestamp);
+
+        emit!(TxConfirmed {
+            tx_id,
+            eth_tx_hash,
+        });
+
+        Ok(())
+    }
+
+    /// 链下 Relayer 回调 - 交易失败
+    pub fn report_failure(
+        ctx: Context<ReportFailure>,
+        tx_id: [u8; 32],
+        error_code: u32,
+        error_message: String,
+    ) -> Result<()> {
+        let pending_tx = &mut ctx.accounts.pending_tx;
+        pending_tx.status = TxStatus::Failed;
+        pending_tx.error = Some(DriverError::ExternalError {
+            code: error_code,
+            message: error_message,
+        });
+
+        // 退款给用户
+        // refund_to_user(ctx)?;
+
+        Ok(())
+    }
+}
+
+/// Pending 交易账户
+#[account]
+pub struct PendingTransaction {
+    pub id: [u8; 32],
+    pub target_chain: ChainId,
+    pub target_address: Vec<u8>,
+    pub amount: u64,
+    pub payload: Vec<u8>,
+    pub status: TxStatus,
+    pub created_at: i64,
+    pub confirmed_at: Option<i64>,
+    pub user: Pubkey,
+    pub external_tx_hash: Option<[u8; 32]>,
+    pub error: Option<DriverError>,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq)]
+pub enum TxStatus {
+    Pending,
+    Confirmed,
+    Failed,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq)]
+pub enum ChainId {
+    Ethereum,
+    Bitcoin,
+    Arbitrum,
+    Base,
+}
+```
+
+##### 插件 C: Arweave Storage Driver (存储设备)
+
+```rust
+// ============================================================================
+// Arweave Storage Driver - 永久存储设备
+// ============================================================================
+// 类似 Linux 的块设备驱动
+
+declare_id!("ArDriver11111111111111111111111111111111");
+
+#[program]
+pub mod arweave_storage_driver {
+    use super::*;
+
+    /// 写入文件
+    pub fn process(ctx: Context<Process>, instruction: TitanDriverInstruction) -> Result<()> {
+        match instruction {
+            TitanDriverInstruction::Execute { payload, .. } => {
+                // payload = 文件内容的哈希 (不是文件本身，太大了)
+                let content_hash: [u8; 32] = payload.try_into()
+                    .map_err(|_| DriverError::InvalidPayload)?;
+
+                // 创建存储请求
+                let storage_request = &mut ctx.accounts.storage_request;
+                storage_request.id = generate_request_id(&ctx);
+                storage_request.content_hash = content_hash;
+                storage_request.status = StorageStatus::Pending;
+                storage_request.user = ctx.accounts.user.key();
+                storage_request.created_at = Clock::get()?.unix_timestamp;
+
+                emit!(StorageRequested {
+                    request_id: storage_request.id,
+                    content_hash,
+                });
+
+                // 链下节点监听这个事件：
+                // 1. 从 IPFS/用户服务器下载完整文件
+                // 2. 上传到 Arweave
+                // 3. 回调 confirm_storage 写入 Arweave TX ID
+
+                Ok(())
+            }
+
+            TitanDriverInstruction::ReadState { query_key } => {
+                // query_key = 存储请求 ID
+                // 返回 Arweave TX ID 或状态
+                Ok(())
+            }
+
+            _ => Err(DriverError::UnsupportedOperation.into()),
+        }
+    }
+
+    /// 链下节点回调 - 存储完成
+    pub fn confirm_storage(
+        ctx: Context<ConfirmStorage>,
+        request_id: [u8; 32],
+        arweave_tx_id: String,
+    ) -> Result<()> {
+        let storage_request = &mut ctx.accounts.storage_request;
+        storage_request.status = StorageStatus::Completed;
+        storage_request.arweave_tx_id = Some(arweave_tx_id.clone());
+
+        emit!(StorageCompleted {
+            request_id,
+            arweave_tx_id,
+        });
+
+        Ok(())
+    }
+}
+```
+
+#### Step 4: 热插拔机制
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    驱动热插拔流程                                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  新增驱动 (insmod):                                                         │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  1. 开发者部署 Driver Program 到 Solana                            │   │
+│  │     → solana program deploy kaspa_driver.so                        │   │
+│  │     → 获得 Program ID: KaspaDriver111...                           │   │
+│  │                                                                     │   │
+│  │  2. 提交 DAO 提案                                                   │   │
+│  │     → "注册 Kaspa Driver, Asset ID = 0x05"                         │   │
+│  │                                                                     │   │
+│  │  3. DAO 投票通过后，调用 Kernel.register_driver()                  │   │
+│  │     → Registry PDA 更新:                                           │   │
+│  │       AssetID 0x05 → KaspaDriver111...                             │   │
+│  │                                                                     │   │
+│  │  4. 立即生效！                                                      │   │
+│  │     → 用户可以调用 titan.write("/dev/kaspa", ...)                  │   │
+│  │     → Kernel 代码一行都不用改                                       │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  卸载驱动 (rmmod):                                                          │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  1. DAO 提案 "注销 Kaspa Driver"                                   │   │
+│  │  2. 投票通过后，调用 Kernel.unregister_driver(0x05)                │   │
+│  │  3. Registry 移除条目                                               │   │
+│  │  4. 后续调用 AssetID=0x05 会返回 DriverNotFound                    │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  升级驱动:                                                                  │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  1. 部署新版本 Driver Program (新 Program ID)                      │   │
+│  │  2. DAO 提案更新 Registry 映射                                     │   │
+│  │  3. 调用 Kernel.update_driver(asset_id, new_program_id)            │   │
+│  │  4. 平滑切换，不影响用户                                           │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 用户体验: 统一的 Linux 风格 API
+
+```python
+# ============================================================================
+# Titan OS - 用户 API (Python SDK 示例)
+# ============================================================================
+# 用户/AI 根本不知道背后是 Solana CPI 还是链下 Relayer
+# 这就是 Linux 感觉：一切皆文件 (一切皆指令)
+
+from titan import TitanOS
+
+# 初始化
+titan = TitanOS(
+    rpc_url="https://api.mainnet-beta.solana.com",
+    wallet=my_wallet
+)
+
+# 查看已注册的设备 (类似 ls /dev)
+devices = titan.list_devices()
+# Output: ['/dev/sol', '/dev/eth', '/dev/btc', '/dev/arweave', '/dev/gpu']
+
+# 挂载设备 (如果需要自定义配置)
+titan.mount(
+    driver="EthDriver111...",
+    mount_point="/dev/eth0",
+    config={"bridge": "wormhole", "slippage": 0.5}
+)
+
+# 写入设备 - SOL 转账 (本地，同步)
+result = titan.write("/dev/sol", {
+    "cmd": "transfer",
+    "to": "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+    "amount": 1_000_000_000,  # 1 SOL in lamports
+})
+print(result)  # {'status': 'success', 'tx_id': '5j2k...'}
+
+# 写入设备 - ETH 转账 (跨链，异步)
+result = titan.write("/dev/eth", {
+    "cmd": "transfer",
+    "to": "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",  # vitalik.eth
+    "amount": 100_000_000,  # 0.1 ETH in wei
+})
+print(result)  # {'status': 'pending', 'operation_id': 'abc123...'}
+
+# 等待完成
+final_result = titan.wait("/dev/eth", result['operation_id'])
+print(final_result)  # {'status': 'confirmed', 'eth_tx_hash': '0x...'}
+
+# 读取设备状态
+balance = titan.read("/dev/eth", {"query": "balance", "address": "0x..."})
+print(balance)  # {'balance': '1500000000000000000'}  # 1.5 ETH
+
+# 存储文件到 Arweave
+with open("important_data.json", "rb") as f:
+    content_hash = titan.write("/dev/arweave", {
+        "cmd": "store",
+        "data": f.read(),
+    })
+print(content_hash)  # {'arweave_tx_id': 'abc123...', 'permanent_url': 'ar://...'}
+
+# GPU 计算 (通过 x402)
+result = titan.write("/dev/gpu", {
+    "cmd": "inference",
+    "model": "llama-3-8b",
+    "prompt": "What is the meaning of life?",
+    "max_tokens": 100,
+})
+print(result)  # {'output': 'The meaning of life is...', 'cost': 0.001}
+```
+
+#### 链下 Relayer 架构
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    链下 Relayer 架构 (Off-chain Actuator)                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│                         ┌─────────────────────┐                             │
+│                         │   Titan Relayer     │                             │
+│                         │   (链下服务)        │                             │
+│                         └──────────┬──────────┘                             │
+│                                    │                                         │
+│            ┌───────────────────────┼───────────────────────┐                │
+│            │                       │                       │                 │
+│            ▼                       ▼                       ▼                 │
+│  ┌──────────────────┐   ┌──────────────────┐   ┌──────────────────┐        │
+│  │   Event Listener │   │   TX Executor    │   │   Callback Signer│        │
+│  │                  │   │                  │   │                  │        │
+│  │  监听 Solana     │   │  执行外部链      │   │  签名回调交易    │        │
+│  │  PendingTx 事件  │   │  交易            │   │  更新状态       │        │
+│  └────────┬─────────┘   └────────┬─────────┘   └────────┬─────────┘        │
+│           │                      │                      │                   │
+│  ═════════════════════════════════════════════════════════════════════════ │
+│           │                      │                      │                   │
+│           ▼                      ▼                      ▼                   │
+│  ┌──────────────────────────────────────────────────────────────────────┐  │
+│  │                                                                      │  │
+│  │                        Relayer 工作流程                              │  │
+│  │                                                                      │  │
+│  │  1. 监听 Solana 上的 PendingTxCreated 事件                          │  │
+│  │                                                                      │  │
+│  │  2. 解析事件数据:                                                    │  │
+│  │     • target_chain = Ethereum                                        │  │
+│  │     • target_address = 0xd8dA...                                     │  │
+│  │     • amount = 100_000_000 (0.1 ETH)                                 │  │
+│  │                                                                      │  │
+│  │  3. 在目标链执行:                                                    │  │
+│  │     • 连接 Ethereum RPC                                              │  │
+│  │     • 构建并签名交易                                                 │  │
+│  │     • 广播并等待确认                                                 │  │
+│  │                                                                      │  │
+│  │  4. 回调 Solana:                                                     │  │
+│  │     • 调用 eth_driver.confirm_execution(tx_id, eth_tx_hash)         │  │
+│  │     • 或 eth_driver.report_failure(tx_id, error)                    │  │
+│  │                                                                      │  │
+│  └──────────────────────────────────────────────────────────────────────┘  │
+│                                                                             │
+│  安全保障:                                                                  │
+│  ┌──────────────────────────────────────────────────────────────────────┐  │
+│  │                                                                      │  │
+│  │  • Relayer 质押 TITAN Token                                         │  │
+│  │  • 执行失败/作恶 → Slash 质押金                                     │  │
+│  │  • 多 Relayer 竞争 → 去中心化                                       │  │
+│  │  • 用户可指定信任的 Relayer                                         │  │
+│  │                                                                      │  │
+│  └──────────────────────────────────────────────────────────────────────┘  │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+> **核心洞察：**
+>
+> 通过 **CPI (Cross-Program Invocation)** 的动态分发，我们在 Solana 上构建了一个完整的 **操作系统驱动模型**：
+>
+> 1. **标准化**: Titan Interface IDL 定义了统一的指令格式（类似 Linux 的 `<sys/ioctl.h>`）
+> 2. **模块化**: 每个外部链/资源是一个独立的 `Program ID`（类似 `.ko` 内核模块）
+> 3. **抽象化**: Kernel 只负责路由，Driver 负责解释（关注点分离）
+> 4. **热插拔**: 新增/删除驱动只需更新 Registry，Kernel 代码不变
+>
+> **最终效果**：
+> ```python
+> # 用户代码完全不知道背后是什么
+> titan.write("/dev/eth0", {"to": "vitalik.eth", "amount": 100})
+> ```
+>
+> **这就是 Linux 的哲学：一切皆文件。**
+> **在 Titan OS 中：一切皆设备，一切皆 CPI。**
+
 ---
 
 ## 18. 终极总结 (Conclusion)
