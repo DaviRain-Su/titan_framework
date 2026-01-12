@@ -9336,6 +9336,822 @@ print(result)  # {'output': 'The meaning of life is...', 'cost': 0.001}
 > **这就是 Linux 的哲学：一切皆文件。**
 > **在 Titan OS 中：一切皆设备，一切皆 CPI。**
 
+### 17.11 Zig Driver Interface Specification：纯编译时驱动架构
+
+上一节描述了 Solana 链上的 CPI 驱动架构（运行时分发）。本节描述 **Titan Core 层面的 Zig 驱动架构**（编译时分发）。
+
+**核心洞察：** CPI 是 **运行时** 的设备分发（链上），而 Zig 的 **function pointer + comptime** 是 **编译时** 的设备分发（跨链）。
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    两层驱动架构                                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  层级 1: Zig 编译时驱动 (跨链抽象)                                          │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │   StorageInterface (函数指针表)                                     │   │
+│  │           │                                                         │   │
+│  │    ┌──────┼──────┐                                                  │   │
+│  │    │      │      │                                                  │   │
+│  │    ▼      ▼      ▼                                                  │   │
+│  │  Mock   Solana  Near   ←── comptime 选择，编译期确定                │   │
+│  │  Driver Driver  Driver                                              │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  层级 2: Solana CPI 运行时驱动 (单链扩展)                                   │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │   Titan Kernel Program (CPI 分发器)                                 │   │
+│  │           │                                                         │   │
+│  │    ┌──────┼──────┐                                                  │   │
+│  │    │      │      │                                                  │   │
+│  │    ▼      ▼      ▼                                                  │   │
+│  │   SOL    ETH   Arweave  ←── CPI invoke，运行时确定                  │   │
+│  │  Driver Bridge  Storage                                             │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  两者组合:                                                                  │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │   编译时选 Solana → 运行时选 ETH Bridge                             │   │
+│  │   titan.write("/dev/eth", ...) 的完整路径:                          │   │
+│  │                                                                     │   │
+│  │   Zig StorageInterface                                              │   │
+│  │           │ comptime → SolanaDriver                                 │   │
+│  │           │                                                         │   │
+│  │   Solana SolanaDriver.write()                                       │   │
+│  │           │ → invoke Titan Kernel                                   │   │
+│  │           │                                                         │   │
+│  │   Titan Kernel                                                      │   │
+│  │           │ CPI → ETH Bridge Driver                                 │   │
+│  │           │                                                         │   │
+│  │   ETH Bridge Driver                                                 │   │
+│  │           │ emit event → Relayer → Ethereum                         │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Step 1: 定义接口 (The Contract)
+
+这是 Titan OS 的 "法律条文"。所有想接入 Titan OS 的平台/存储后端都必须遵守这个协议。
+
+```zig
+// core/interface.zig
+// ============================================================================
+// Titan Storage Interface - 类似 Linux 的 file_operations
+// ============================================================================
+
+pub const StorageInterface = struct {
+    // 上下文指针 (Context Pointer)
+    // 类似于 C++ 的 'this' 指针或 Rust 的 'self'
+    // 指向具体的驱动实例（MockDriver / SolanaDriver / NearDriver）
+    context: *anyopaque,
+
+    // 函数指针表 (VTable)
+    // 每个驱动必须实现这两个操作
+    read_fn: *const fn (ctx: *anyopaque, key: []const u8) ?[]const u8,
+    write_fn: *const fn (ctx: *anyopaque, key: []const u8, value: []const u8) void,
+
+    // ============================================================================
+    // 封装调用 - 让内核使用起来像普通方法调用
+    // ============================================================================
+
+    pub fn read(self: StorageInterface, key: []const u8) ?[]const u8 {
+        return self.read_fn(self.context, key);
+    }
+
+    pub fn write(self: StorageInterface, key: []const u8, value: []const u8) void {
+        self.write_fn(self.context, key, value);
+    }
+};
+
+// ============================================================================
+// 扩展接口 - 更多操作
+// ============================================================================
+
+pub const FullStorageInterface = struct {
+    context: *anyopaque,
+
+    // 基础 CRUD
+    read_fn: *const fn (ctx: *anyopaque, key: []const u8) ?[]const u8,
+    write_fn: *const fn (ctx: *anyopaque, key: []const u8, value: []const u8) void,
+    delete_fn: *const fn (ctx: *anyopaque, key: []const u8) bool,
+    exists_fn: *const fn (ctx: *anyopaque, key: []const u8) bool,
+
+    // 批量操作
+    batch_write_fn: *const fn (ctx: *anyopaque, entries: []const KVPair) void,
+
+    // 迭代器
+    iter_fn: *const fn (ctx: *anyopaque, prefix: []const u8) Iterator,
+
+    // 事务
+    begin_tx_fn: *const fn (ctx: *anyopaque) TxHandle,
+    commit_tx_fn: *const fn (ctx: *anyopaque, handle: TxHandle) bool,
+    rollback_tx_fn: *const fn (ctx: *anyopaque, handle: TxHandle) void,
+};
+```
+
+**类比 Linux：**
+
+| Linux 概念 | Titan Zig 概念 |
+| :--- | :--- |
+| `struct file_operations` | `StorageInterface` |
+| `.read = my_read` | `.read_fn = read_impl` |
+| `.write = my_write` | `.write_fn = write_impl` |
+| `void *private_data` | `context: *anyopaque` |
+| `container_of(...)` | `@ptrCast(@alignCast(ctx))` |
+
+#### Step 2: 实现 Driver 1 - MockDriver (本地测试)
+
+用内存 HashMap 模拟区块链存储，用于本地测试和 CI/CD。
+
+```zig
+// drivers/mock_driver.zig
+// ============================================================================
+// Mock Storage Driver - 测试用，无需真实区块链
+// ============================================================================
+
+const std = @import("std");
+const StorageInterface = @import("../core/interface.zig").StorageInterface;
+
+pub const MockDriver = struct {
+    /// 实际存储数据的 HashMap
+    map: std.StringHashMap([]const u8),
+    /// 内存分配器
+    allocator: std.mem.Allocator,
+    /// 操作计数（用于测试验证）
+    read_count: usize = 0,
+    write_count: usize = 0,
+
+    // ========================================================================
+    // 初始化
+    // ========================================================================
+
+    pub fn init(allocator: std.mem.Allocator) MockDriver {
+        return MockDriver{
+            .map = std.StringHashMap([]const u8).init(allocator),
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *MockDriver) void {
+        // 释放所有存储的数据
+        var it = self.map.iterator();
+        while (it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            self.allocator.free(entry.value_ptr.*);
+        }
+        self.map.deinit();
+    }
+
+    // ========================================================================
+    // 私有实现 - 符合 StorageInterface 函数签名
+    // ========================================================================
+
+    fn read_impl(ctx: *anyopaque, key: []const u8) ?[]const u8 {
+        // 类型转换: anyopaque → *MockDriver
+        const self: *MockDriver = @ptrCast(@alignCast(ctx));
+        self.read_count += 1;
+        return self.map.get(key);
+    }
+
+    fn write_impl(ctx: *anyopaque, key: []const u8, value: []const u8) void {
+        const self: *MockDriver = @ptrCast(@alignCast(ctx));
+        self.write_count += 1;
+
+        // 复制 key 和 value（HashMap 需要拥有数据）
+        const k = self.allocator.dupe(u8, key) catch unreachable;
+        const v = self.allocator.dupe(u8, value) catch unreachable;
+
+        // 如果 key 已存在，先释放旧 value
+        if (self.map.fetchRemove(key)) |old| {
+            self.allocator.free(old.key);
+            self.allocator.free(old.value);
+        }
+
+        self.map.put(k, v) catch unreachable;
+    }
+
+    // ========================================================================
+    // 组装标准接口 - 把 "USB 插头" 做出来
+    // ========================================================================
+
+    pub fn interface(self: *MockDriver) StorageInterface {
+        return StorageInterface{
+            .context = self,
+            .read_fn = read_impl,
+            .write_fn = write_impl,
+        };
+    }
+
+    // ========================================================================
+    // 测试辅助方法
+    // ========================================================================
+
+    pub fn getStats(self: *MockDriver) struct { reads: usize, writes: usize } {
+        return .{ .reads = self.read_count, .writes = self.write_count };
+    }
+
+    pub fn clear(self: *MockDriver) void {
+        var it = self.map.iterator();
+        while (it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            self.allocator.free(entry.value_ptr.*);
+        }
+        self.map.clearRetainingCapacity();
+    }
+};
+
+// ============================================================================
+// 测试
+// ============================================================================
+
+test "MockDriver basic operations" {
+    const allocator = std.testing.allocator;
+
+    var driver = MockDriver.init(allocator);
+    defer driver.deinit();
+
+    const db = driver.interface();
+
+    // 写入
+    db.write("balance:alice", "1000");
+    db.write("balance:bob", "500");
+
+    // 读取
+    const alice_balance = db.read("balance:alice");
+    try std.testing.expectEqualStrings("1000", alice_balance.?);
+
+    const bob_balance = db.read("balance:bob");
+    try std.testing.expectEqualStrings("500", bob_balance.?);
+
+    // 不存在的 key
+    const charlie_balance = db.read("balance:charlie");
+    try std.testing.expect(charlie_balance == null);
+
+    // 验证统计
+    const stats = driver.getStats();
+    try std.testing.expectEqual(@as(usize, 3), stats.reads);
+    try std.testing.expectEqual(@as(usize, 2), stats.writes);
+}
+```
+
+#### Step 3: 实现 Driver 2 - SolanaDriver (生产环境)
+
+真实读写 Solana 账户数据。
+
+```zig
+// drivers/solana_driver.zig
+// ============================================================================
+// Solana Storage Driver - 生产环境，操作真实账户数据
+// ============================================================================
+
+const std = @import("std");
+const solana = @import("solana"); // Solana 底层绑定
+const StorageInterface = @import("../core/interface.zig").StorageInterface;
+
+pub const SolanaDriver = struct {
+    /// Solana 账户信息（包含账户数据的可变引用）
+    account_info: *solana.AccountInfo,
+    /// 数据布局版本（用于未来升级）
+    layout_version: u8 = 1,
+
+    // ========================================================================
+    // 初始化
+    // ========================================================================
+
+    pub fn init(account: *solana.AccountInfo) SolanaDriver {
+        return SolanaDriver{
+            .account_info = account,
+        };
+    }
+
+    // ========================================================================
+    // 私有实现
+    // ========================================================================
+
+    fn read_impl(ctx: *anyopaque, key: []const u8) ?[]const u8 {
+        const self: *SolanaDriver = @ptrCast(@alignCast(ctx));
+
+        // 从账户数据中查找 key
+        // 假设数据格式: [key_len:u32][key:bytes][value_len:u32][value:bytes]...
+        const data = self.account_info.data();
+        return find_value_in_account_data(data, key);
+    }
+
+    fn write_impl(ctx: *anyopaque, key: []const u8, value: []const u8) void {
+        const self: *SolanaDriver = @ptrCast(@alignCast(ctx));
+
+        // 获取可变数据引用
+        var data = self.account_info.data_mut();
+
+        // 写入 key-value 到账户数据
+        // 这里需要处理：
+        // 1. 查找现有 key 的位置
+        // 2. 如果存在，原地更新（如果新值更短则需要压缩）
+        // 3. 如果不存在，追加到末尾
+        write_to_account_data(data, key, value);
+    }
+
+    // ========================================================================
+    // 辅助函数 - 账户数据解析
+    // ========================================================================
+
+    fn find_value_in_account_data(data: []const u8, key: []const u8) ?[]const u8 {
+        var offset: usize = 0;
+
+        while (offset < data.len) {
+            // 读取 key 长度
+            if (offset + 4 > data.len) return null;
+            const key_len = std.mem.readInt(u32, data[offset..][0..4], .little);
+            offset += 4;
+
+            // 读取 key
+            if (offset + key_len > data.len) return null;
+            const stored_key = data[offset .. offset + key_len];
+            offset += key_len;
+
+            // 读取 value 长度
+            if (offset + 4 > data.len) return null;
+            const value_len = std.mem.readInt(u32, data[offset..][0..4], .little);
+            offset += 4;
+
+            // 检查是否匹配
+            if (std.mem.eql(u8, stored_key, key)) {
+                if (offset + value_len > data.len) return null;
+                return data[offset .. offset + value_len];
+            }
+
+            offset += value_len;
+        }
+
+        return null;
+    }
+
+    fn write_to_account_data(data: []u8, key: []const u8, value: []const u8) void {
+        // 简化实现：追加到数据末尾
+        // 实际实现需要处理更新/删除/压缩
+        var offset = find_end_offset(data);
+
+        // 写入 key 长度
+        std.mem.writeInt(u32, data[offset..][0..4], @intCast(key.len), .little);
+        offset += 4;
+
+        // 写入 key
+        @memcpy(data[offset .. offset + key.len], key);
+        offset += key.len;
+
+        // 写入 value 长度
+        std.mem.writeInt(u32, data[offset..][0..4], @intCast(value.len), .little);
+        offset += 4;
+
+        // 写入 value
+        @memcpy(data[offset .. offset + value.len], value);
+    }
+
+    fn find_end_offset(data: []const u8) usize {
+        // 找到数据末尾（第一个全零位置或数据结尾）
+        var offset: usize = 0;
+        while (offset < data.len) {
+            if (offset + 4 > data.len) break;
+            const key_len = std.mem.readInt(u32, data[offset..][0..4], .little);
+            if (key_len == 0) break;
+            offset += 4 + key_len;
+            if (offset + 4 > data.len) break;
+            const value_len = std.mem.readInt(u32, data[offset..][0..4], .little);
+            offset += 4 + value_len;
+        }
+        return offset;
+    }
+
+    // ========================================================================
+    // 组装标准接口
+    // ========================================================================
+
+    pub fn interface(self: *SolanaDriver) StorageInterface {
+        return StorageInterface{
+            .context = self,
+            .read_fn = read_impl,
+            .write_fn = write_impl,
+        };
+    }
+};
+```
+
+#### Step 4: 实现 Driver 3 - NearDriver (另一条链)
+
+展示跨链一致性 - Near 的存储 API 不同，但接口相同。
+
+```zig
+// drivers/near_driver.zig
+// ============================================================================
+// Near Storage Driver - Near Protocol 存储后端
+// ============================================================================
+
+const std = @import("std");
+const near = @import("near"); // Near 底层绑定
+const StorageInterface = @import("../core/interface.zig").StorageInterface;
+
+pub const NearDriver = struct {
+    /// Near 使用 host function 直接读写，不需要本地状态
+    prefix: []const u8 = "titan:",
+
+    // ========================================================================
+    // 私有实现 - 调用 Near Host Functions
+    // ========================================================================
+
+    fn read_impl(ctx: *anyopaque, key: []const u8) ?[]const u8 {
+        const self: *NearDriver = @ptrCast(@alignCast(ctx));
+        _ = self;
+
+        // Near 的 storage_read 是 host function
+        // 返回值写入 register，再从 register 读出
+        if (near.storage_read(key.ptr, key.len)) {
+            const len = near.register_len(0);
+            var buffer: [4096]u8 = undefined;
+            near.read_register(0, &buffer);
+            return buffer[0..len];
+        }
+        return null;
+    }
+
+    fn write_impl(ctx: *anyopaque, key: []const u8, value: []const u8) void {
+        const self: *NearDriver = @ptrCast(@alignCast(ctx));
+        _ = self;
+
+        // Near 的 storage_write 直接调用 host function
+        near.storage_write(key.ptr, key.len, value.ptr, value.len);
+    }
+
+    // ========================================================================
+    // 组装标准接口
+    // ========================================================================
+
+    pub fn interface(self: *NearDriver) StorageInterface {
+        return StorageInterface{
+            .context = self,
+            .read_fn = read_impl,
+            .write_fn = write_impl,
+        };
+    }
+};
+```
+
+#### Step 5: 内核层 - 完全与驱动无关
+
+这是最美妙的部分。Titan 内核的业务逻辑 **完全不知道** 上面那些 Driver 的存在。
+
+```zig
+// kernel/transfer.zig
+// ============================================================================
+// Titan Kernel - 转账逻辑（与驱动完全解耦）
+// ============================================================================
+
+const std = @import("std");
+const StorageInterface = @import("../core/interface.zig").StorageInterface;
+
+/// 通用转账处理器
+/// 注意：这个函数接收 StorageInterface，不知道也不关心底层是什么
+pub fn process_transfer(
+    db: StorageInterface,
+    from: []const u8,
+    to: []const u8,
+    amount: u64,
+) !void {
+    // 1. 读取发送者余额
+    const from_key = try make_balance_key(from);
+    const from_balance_bytes = db.read(from_key) orelse {
+        return error.AccountNotFound;
+    };
+    const from_balance = parse_u64(from_balance_bytes);
+
+    // 2. 检查余额
+    if (from_balance < amount) {
+        return error.InsufficientFunds;
+    }
+
+    // 3. 读取接收者余额
+    const to_key = try make_balance_key(to);
+    const to_balance_bytes = db.read(to_key) orelse &[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0 };
+    const to_balance = parse_u64(to_balance_bytes);
+
+    // 4. 计算新余额
+    const new_from_balance = from_balance - amount;
+    const new_to_balance = to_balance + amount;
+
+    // 5. 写入新余额
+    var from_buf: [8]u8 = undefined;
+    var to_buf: [8]u8 = undefined;
+    std.mem.writeInt(u64, &from_buf, new_from_balance, .little);
+    std.mem.writeInt(u64, &to_buf, new_to_balance, .little);
+
+    db.write(from_key, &from_buf);
+    db.write(to_key, &to_buf);
+}
+
+/// 更复杂的业务逻辑 - 同样与驱动无关
+pub fn process_swap(
+    db: StorageInterface,
+    user: []const u8,
+    token_in: []const u8,
+    token_out: []const u8,
+    amount_in: u64,
+    min_amount_out: u64,
+) !u64 {
+    // 1. 读取用户的 token_in 余额
+    const user_in_key = try make_token_balance_key(user, token_in);
+    const user_in_balance = parse_u64(db.read(user_in_key) orelse return error.NoBalance);
+
+    // 2. 读取池子状态
+    const pool_key = try make_pool_key(token_in, token_out);
+    const pool_data = db.read(pool_key) orelse return error.PoolNotFound;
+    const pool = parse_pool(pool_data);
+
+    // 3. 计算输出数量 (AMM 公式)
+    const amount_out = calculate_output(pool, amount_in);
+    if (amount_out < min_amount_out) {
+        return error.SlippageExceeded;
+    }
+
+    // 4. 更新状态
+    // ... 省略具体实现
+
+    return amount_out;
+}
+
+// ============================================================================
+// 辅助函数
+// ============================================================================
+
+fn make_balance_key(address: []const u8) ![]const u8 {
+    // 实际实现会用 buffer 拼接
+    _ = address;
+    return "balance:...";
+}
+
+fn make_token_balance_key(user: []const u8, token: []const u8) ![]const u8 {
+    _ = user;
+    _ = token;
+    return "token_balance:...";
+}
+
+fn make_pool_key(token_a: []const u8, token_b: []const u8) ![]const u8 {
+    _ = token_a;
+    _ = token_b;
+    return "pool:...";
+}
+
+fn parse_u64(bytes: []const u8) u64 {
+    if (bytes.len < 8) return 0;
+    return std.mem.readInt(u64, bytes[0..8], .little);
+}
+
+fn parse_pool(data: []const u8) Pool {
+    _ = data;
+    return Pool{};
+}
+
+fn calculate_output(pool: Pool, amount_in: u64) u64 {
+    _ = pool;
+    _ = amount_in;
+    return 0; // AMM 公式
+}
+
+const Pool = struct {};
+```
+
+#### Step 6: 主入口 - 编译时选择驱动
+
+这是 **上帝视角** 的组装点。根据编译目标，注入不同的驱动。
+
+```zig
+// main.zig
+// ============================================================================
+// Titan 入口点 - 编译时选择驱动
+// ============================================================================
+
+const std = @import("std");
+const builtin = @import("builtin");
+const kernel = @import("kernel/transfer.zig");
+const StorageInterface = @import("core/interface.zig").StorageInterface;
+
+// 条件导入 - 编译时确定
+const Driver = switch (builtin.target.os.tag) {
+    .freestanding => switch (builtin.target.cpu.arch) {
+        .sbf => @import("drivers/solana_driver.zig").SolanaDriver,
+        .wasm32 => @import("drivers/near_driver.zig").NearDriver,
+        else => @compileError("Unsupported target"),
+    },
+    else => @import("drivers/mock_driver.zig").MockDriver, // 本地测试
+};
+
+// ============================================================================
+// Solana 入口点
+// ============================================================================
+
+export fn entrypoint(input: [*]u8) u64 {
+    // 解析 Solana 输入
+    const accounts = solana.parse_accounts(input);
+    const instruction = solana.parse_instruction(input);
+
+    // 创建 Solana 驱动
+    var driver = Driver.init(&accounts[0]);
+    const db = driver.interface();
+
+    // 调用内核逻辑
+    switch (instruction.tag) {
+        .Transfer => {
+            const data = instruction.data;
+            kernel.process_transfer(db, data.from, data.to, data.amount) catch |err| {
+                return error_to_code(err);
+            };
+        },
+        .Swap => {
+            // ...
+        },
+    }
+
+    return 0; // 成功
+}
+
+// ============================================================================
+// Near 入口点
+// ============================================================================
+
+export fn transfer() void {
+    // Near 从 input register 读取参数
+    const input = near.input();
+    const params = parse_transfer_params(input);
+
+    // 创建 Near 驱动
+    var driver = Driver{};
+    const db = driver.interface();
+
+    // 调用相同的内核逻辑！
+    kernel.process_transfer(db, params.from, params.to, params.amount) catch |err| {
+        near.panic(error_message(err));
+    };
+}
+
+// ============================================================================
+// 测试入口点
+// ============================================================================
+
+pub fn main() !void {
+    if (builtin.is_test) {
+        var driver = Driver.init(std.testing.allocator);
+        defer driver.deinit();
+
+        const db = driver.interface();
+
+        // 初始化测试数据
+        db.write("balance:alice", &std.mem.toBytes(@as(u64, 1000)));
+        db.write("balance:bob", &std.mem.toBytes(@as(u64, 500)));
+
+        // 执行转账
+        try kernel.process_transfer(db, "alice", "bob", 100);
+
+        // 验证结果
+        const alice_balance = std.mem.bytesToValue(u64, db.read("balance:alice").?[0..8]);
+        const bob_balance = std.mem.bytesToValue(u64, db.read("balance:bob").?[0..8]);
+
+        std.debug.print("Alice: {}, Bob: {}\n", .{ alice_balance, bob_balance });
+        // Output: Alice: 900, Bob: 600
+    }
+}
+```
+
+#### 完整架构图
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Titan OS Zig Driver Architecture                          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                        APPLICATION LAYER                            │   │
+│  │  ┌─────────────────────────────────────────────────────────────┐   │   │
+│  │  │  DeFi Protocol / Game Logic / Social App                    │   │   │
+│  │  │  (纯业务逻辑，与链无关)                                     │   │   │
+│  │  └─────────────────────────────────────────────────────────────┘   │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                   │                                         │
+│                                   │ 调用                                    │
+│                                   ▼                                         │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                        KERNEL LAYER                                 │   │
+│  │  ┌─────────────────────────────────────────────────────────────┐   │   │
+│  │  │  kernel/transfer.zig                                        │   │   │
+│  │  │  kernel/swap.zig                                            │   │   │
+│  │  │  kernel/stake.zig                                           │   │   │
+│  │  │                                                             │   │   │
+│  │  │  fn process_transfer(db: StorageInterface, ...) !void       │   │   │
+│  │  │  fn process_swap(db: StorageInterface, ...) !u64            │   │   │
+│  │  │                                                             │   │   │
+│  │  │  ← 只依赖 StorageInterface，不知道具体驱动                  │   │   │
+│  │  └─────────────────────────────────────────────────────────────┘   │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                   │                                         │
+│                                   │ 接口调用                                │
+│                                   ▼                                         │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                        INTERFACE LAYER                              │   │
+│  │  ┌─────────────────────────────────────────────────────────────┐   │   │
+│  │  │  core/interface.zig                                         │   │   │
+│  │  │                                                             │   │   │
+│  │  │  pub const StorageInterface = struct {                      │   │   │
+│  │  │      context: *anyopaque,                                   │   │   │
+│  │  │      read_fn: *const fn(...) ?[]const u8,                   │   │   │
+│  │  │      write_fn: *const fn(...) void,                         │   │   │
+│  │  │  };                                                         │   │   │
+│  │  │                                                             │   │   │
+│  │  │  ← USB 插口标准，定义函数签名                               │   │   │
+│  │  └─────────────────────────────────────────────────────────────┘   │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                   │                                         │
+│                         ┌─────────┴─────────┐                               │
+│                         │   comptime 选择   │                               │
+│                         └─────────┬─────────┘                               │
+│              ┌──────────────────┬──┴───────────────┬──────────────────┐     │
+│              ▼                  ▼                  ▼                  ▼     │
+│  ┌────────────────┐ ┌────────────────┐ ┌────────────────┐ ┌────────────┐   │
+│  │  MockDriver    │ │ SolanaDriver   │ │  NearDriver    │ │ EVMDriver  │   │
+│  │                │ │                │ │                │ │            │   │
+│  │  HashMap       │ │ AccountInfo    │ │ Host Functions │ │ Storage    │   │
+│  │  (测试用)      │ │ .data()        │ │ storage_read() │ │ SLOAD/     │   │
+│  │                │ │ .data_mut()    │ │ storage_write()│ │ SSTORE     │   │
+│  └────────────────┘ └────────────────┘ └────────────────┘ └────────────┘   │
+│        │                   │                   │                   │        │
+│        ▼                   ▼                   ▼                   ▼        │
+│  ┌────────────────┐ ┌────────────────┐ ┌────────────────┐ ┌────────────┐   │
+│  │   Unit Test    │ │   Solana VM    │ │   Near VM      │ │  EVM       │   │
+│  │   CI/CD        │ │   Mainnet      │ │   Mainnet      │ │  Stylus    │   │
+│  └────────────────┘ └────────────────┘ └────────────────┘ └────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 核心价值总结
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    为什么这个设计是"操作系统级"的                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  1. 关注点分离 (Separation of Concerns)                                     │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  • 业务逻辑 (Kernel) 完全不知道运行在哪条链上                       │   │
+│  │  • 驱动开发者只需实现接口，不需要理解业务                           │   │
+│  │  • 测试可以用 Mock，上线只需换驱动                                  │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  2. 零运行时开销 (Zero Runtime Overhead)                                    │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  • 函数指针调用 = 1 条间接跳转指令                                  │   │
+│  │  • 无 vtable 查找、无类型检查、无 GC                                │   │
+│  │  • 编译后的代码与手写一样高效                                       │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  3. 编译时多态 (Compile-Time Polymorphism)                                  │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  • comptime 选择驱动 → 编译出不同二进制                             │   │
+│  │  • Solana 版本不包含 Near 代码，反之亦然                            │   │
+│  │  • 最小化部署体积，满足链上限制                                     │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  4. 可测试性 (Testability)                                                  │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  • 单元测试用 MockDriver，无需启动区块链节点                        │   │
+│  │  • CI/CD 速度从分钟级降到毫秒级                                     │   │
+│  │  • 可以注入任意状态进行边界测试                                     │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  类比:                                                                      │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  Linux 定义了 file_operations → ext4/ntfs/xfs 实现它               │   │
+│  │  Titan 定义了 StorageInterface → Solana/Near/EVM 实现它            │   │
+│  │                                                                     │   │
+│  │  这就是构建"操作系统"而非"DApp"的区别。                             │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
 ---
 
 ## 18. 终极总结 (Conclusion)
