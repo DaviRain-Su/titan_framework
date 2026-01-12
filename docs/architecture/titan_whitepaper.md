@@ -11485,6 +11485,721 @@ Titan 的做法是利用 Zig 的 **零成本抽象 (Zero-Cost Abstraction)** 能
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
+### 17.13 Titan Virtual Storage System (T-VSS)：虚拟存储系统
+
+**核心问题：** 在传统 OS 中，每个进程都有自己的私有虚拟地址空间。进程 A 写 `0x1000` 绝不会覆盖进程 B 的 `0x1000`。Titan OS 如何实现类似的隔离和抽象？
+
+**答案：** 在 Titan OS 中，"物理内存"实际上是 **区块链的状态存储 (State Storage)**：
+
+| 链 | "物理内存" |
+|:---|:---|
+| Solana | Account Data (字节数组) |
+| EVM | Storage Trie (Key-Value Slot) |
+| Bitcoin | UTXO Set (无状态脚本) |
+| Near | Contract State (Trie) |
+
+要实现类似 Linux 的"私有虚拟地址空间"，我们设计了 **T-MMU (Titan Memory Management Unit)** - 一个软件定义的内存管理单元。
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Linux MMU vs Titan T-MMU                                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Linux 虚拟内存:                                                            │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  进程                    MMU (硬件)               物理内存          │   │
+│  │  ┌─────────┐            ┌─────────┐            ┌─────────┐         │   │
+│  │  │ VA      │ ─────────► │ Page    │ ─────────► │ PA      │         │   │
+│  │  │ 0x1000  │            │ Table   │            │ 0x7F000 │         │   │
+│  │  └─────────┘            └─────────┘            └─────────┘         │   │
+│  │                                                                     │   │
+│  │  • CR3 寄存器指向页目录                                            │   │
+│  │  • TLB 缓存加速翻译                                                │   │
+│  │  • 缺页中断从硬盘加载                                              │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  Titan 虚拟存储:                                                            │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  Titan Program          T-MMU (编译器)           链上存储          │   │
+│  │  ┌─────────┐            ┌─────────┐            ┌─────────┐         │   │
+│  │  │ VA      │ ─────────► │ Hash/   │ ─────────► │ PA      │         │   │
+│  │  │ state.  │            │ Offset  │            │ Slot[3] │         │   │
+│  │  │ balance │            │ Calc    │            │ or      │         │   │
+│  │  └─────────┘            └─────────┘            │ Data[32]│         │   │
+│  │                                                 └─────────┘         │   │
+│  │  • Program ID 作为命名空间根                                       │   │
+│  │  • Zig comptime 计算偏移                                           │   │
+│  │  • Cold Load 从链上读取状态                                        │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Linux vs Titan 概念映射
+
+| 概念 | Linux 实现 | Titan OS 实现 |
+|:---|:---|:---|
+| **私有空间基址** | CR3 寄存器 (页目录指针) | **Program ID / Contract Address** |
+| **虚拟地址 (VA)** | `0x00400000` (线性指针) | **Path / Key** (如 `state.balance`) |
+| **物理地址 (PA)** | RAM 物理帧号 | **Storage Slot / Account Offset** |
+| **地址翻译 (MMU)** | 硬件电路查询 TLB/页表 | **Zig comptime 计算 Hash 或 Offset** |
+| **缺页中断** | 从硬盘加载到 RAM | **Storage Cold Load (链上读取)** |
+| **进程隔离** | 不同 CR3 = 不同页表 | **不同 ProgramID = 不同命名空间** |
+| **共享内存** | mmap MAP_SHARED | **CPI 跨合约调用** |
+
+#### T-MMU 核心架构
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    T-MMU 三层翻译架构                                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Layer 1: 虚拟布局层 (Virtual Layout)                                       │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  用户在 Zig 中定义的 struct 就是虚拟地址空间:                       │   │
+│  │                                                                     │   │
+│  │  const MyAppState = struct {                                        │   │
+│  │      admin: Address,        // VA: 0x00                             │   │
+│  │      total_supply: u64,     // VA: 0x20 (Address 32字节后)          │   │
+│  │      paused: bool,          // VA: 0x28                             │   │
+│  │      users: Map(Address, UserInfo),  // VA: 0x29 (动态 Map)         │   │
+│  │  };                                                                 │   │
+│  │                                                                     │   │
+│  │  这是用户看到的"连续虚拟内存"                                       │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                              │                                              │
+│                              │ T-MMU 翻译                                   │
+│                              ▼                                              │
+│  Layer 2: 翻译层 (Translation Layer)                                        │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  T-MMU 根据目标链进行不同的地址翻译:                                │   │
+│  │                                                                     │   │
+│  │  ┌─────────────────────────────────────────────────────────────┐   │   │
+│  │  │  EVM 翻译 (Slot Model):                                     │   │   │
+│  │  │  ┌───────────────────────────────────────────────────────┐ │   │   │
+│  │  │  │  admin        → Storage[Slot 0]                       │ │   │   │
+│  │  │  │  total_supply → Storage[Slot 1]                       │ │   │   │
+│  │  │  │  paused       → Storage[Slot 2]                       │ │   │   │
+│  │  │  │  users[addr]  → Storage[keccak256(addr . Slot 3)]     │ │   │   │
+│  │  │  └───────────────────────────────────────────────────────┘ │   │   │
+│  │  └─────────────────────────────────────────────────────────────┘   │   │
+│  │                                                                     │   │
+│  │  ┌─────────────────────────────────────────────────────────────┐   │   │
+│  │  │  Solana 翻译 (Offset Model):                                │   │   │
+│  │  │  ┌───────────────────────────────────────────────────────┐ │   │   │
+│  │  │  │  admin        → AccountData[0..32]                    │ │   │   │
+│  │  │  │  total_supply → AccountData[32..40]                   │ │   │   │
+│  │  │  │  paused       → AccountData[40..41]                   │ │   │   │
+│  │  │  │  users[addr]  → 派生 PDA(seed=addr) → PDA.Data[...]   │ │   │   │
+│  │  │  └───────────────────────────────────────────────────────┘ │   │   │
+│  │  └─────────────────────────────────────────────────────────────┘   │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                              │                                              │
+│                              │ 物理访问                                     │
+│                              ▼                                              │
+│  Layer 3: 物理存储层 (Physical Storage)                                     │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  EVM:                      Solana:                                  │   │
+│  │  ┌─────────────────────┐   ┌─────────────────────────────────────┐ │   │
+│  │  │ Storage Trie        │   │ Account Data                        │ │   │
+│  │  │ ┌───────┬─────────┐ │   │ ┌────────────────────────────────┐ │ │   │
+│  │  │ │Slot 0 │ 0xABC...│ │   │ │ [admin][supply][paused][...]   │ │ │   │
+│  │  │ │Slot 1 │ 1000000 │ │   │ │  32B    8B      1B              │ │ │   │
+│  │  │ │Slot 2 │ 0x00    │ │   │ └────────────────────────────────┘ │ │   │
+│  │  │ │...    │ ...     │ │   │                                     │ │   │
+│  │  │ └───────┴─────────┘ │   │ + Child PDAs for Map entries        │ │   │
+│  │  └─────────────────────┘   └─────────────────────────────────────┘ │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### T-MMU 实现代码
+
+```zig
+// kernel/vss.zig
+// ============================================================================
+// Titan Virtual Storage System - 虚拟存储系统
+// ============================================================================
+
+const std = @import("std");
+const builtin = @import("builtin");
+
+/// 链类型
+pub const ChainType = enum {
+    Solana,
+    EVM,
+    Near,
+    Mock,
+};
+
+/// T-MMU - Titan Memory Management Unit
+/// 负责虚拟地址到物理地址的翻译
+pub fn T_MMU(comptime TargetChain: ChainType) type {
+    return struct {
+        const Self = @This();
+
+        /// 基地址 - 类似于 CR3 寄存器
+        /// 在 EVM 上是合约地址，在 Solana 上是主账户
+        base: switch (TargetChain) {
+            .EVM => [20]u8,      // Contract Address
+            .Solana => [32]u8,  // Main Account Pubkey
+            .Near => []const u8, // Account ID
+            .Mock => *std.StringHashMap([]u8),
+        },
+
+        // ====================================================================
+        // 读操作：虚拟地址 → 物理地址 → 值
+        // ====================================================================
+
+        /// 加载固定偏移的数据（静态字段）
+        pub fn load(
+            self: Self,
+            comptime field_offset: usize,
+            comptime size: usize,
+        ) [size]u8 {
+            return switch (TargetChain) {
+                .Solana => blk: {
+                    // Solana: 直接读取 Account Data 的偏移位置
+                    // 类似于 Linux: phys_mem[base + offset]
+                    const account_data = solana.get_account_data(self.base);
+                    break :blk account_data[field_offset..][0..size].*;
+                },
+
+                .EVM => blk: {
+                    // EVM: 计算 Slot 索引，调用 SLOAD
+                    // 类似于: sload(slot_index)
+                    const slot_index = field_offset / 32;
+                    const slot_offset = field_offset % 32;
+                    const slot_data = evm.sload(slot_index);
+                    break :blk slot_data[slot_offset..][0..size].*;
+                },
+
+                .Near => blk: {
+                    // Near: 使用 storage_read host function
+                    const key = std.fmt.comptimePrint("field:{d}", .{field_offset});
+                    break :blk near.storage_read(key)[0..size].*;
+                },
+
+                .Mock => blk: {
+                    // Mock: 从 HashMap 读取
+                    const key = std.fmt.comptimePrint("{d}", .{field_offset});
+                    const data = self.base.get(key) orelse &[_]u8{0} ** size;
+                    break :blk data[0..size].*;
+                },
+            };
+        }
+
+        /// 存储固定偏移的数据（静态字段）
+        pub fn store(
+            self: Self,
+            comptime field_offset: usize,
+            data: []const u8,
+        ) void {
+            switch (TargetChain) {
+                .Solana => {
+                    // Solana: 直接写入 Account Data
+                    var account_data = solana.get_account_data_mut(self.base);
+                    @memcpy(account_data[field_offset..][0..data.len], data);
+                },
+
+                .EVM => {
+                    // EVM: 计算 Slot 并 SSTORE
+                    const slot_index = field_offset / 32;
+                    var slot_data: [32]u8 = evm.sload(slot_index);
+                    const slot_offset = field_offset % 32;
+                    @memcpy(slot_data[slot_offset..][0..data.len], data);
+                    evm.sstore(slot_index, slot_data);
+                },
+
+                .Near => {
+                    const key = std.fmt.comptimePrint("field:{d}", .{field_offset});
+                    near.storage_write(key, data);
+                },
+
+                .Mock => {
+                    const key = std.fmt.comptimePrint("{d}", .{field_offset});
+                    self.base.put(key, data) catch unreachable;
+                },
+            }
+        }
+
+        // ====================================================================
+        // Map 访问：动态键 → 派生物理地址
+        // ====================================================================
+
+        /// 加载 Map 中的值
+        pub fn load_map(
+            self: Self,
+            comptime map_slot: usize,
+            key: []const u8,
+            comptime value_size: usize,
+        ) ?[value_size]u8 {
+            return switch (TargetChain) {
+                .Solana => blk: {
+                    // Solana: 派生 PDA 作为子账户
+                    // PDA = derive(program_id, [map_slot, key])
+                    const seeds = &[_][]const u8{
+                        std.mem.asBytes(&map_slot),
+                        key,
+                    };
+                    const pda = solana.find_program_address(seeds, self.base);
+                    const pda_data = solana.get_account_data(pda.address) orelse
+                        break :blk null;
+                    break :blk pda_data[0..value_size].*;
+                },
+
+                .EVM => blk: {
+                    // EVM: keccak256(key . slot) 作为存储位置
+                    var hasher = std.crypto.hash.sha3.Keccak256.init(.{});
+                    hasher.update(key);
+                    hasher.update(std.mem.asBytes(&map_slot));
+                    var derived_slot: [32]u8 = undefined;
+                    hasher.final(&derived_slot);
+
+                    const slot_index = std.mem.readInt(u256, &derived_slot, .big);
+                    break :blk evm.sload(slot_index)[0..value_size].*;
+                },
+
+                .Near => blk: {
+                    const prefix = std.fmt.comptimePrint("map:{d}:", .{map_slot});
+                    var full_key: [256]u8 = undefined;
+                    @memcpy(full_key[0..prefix.len], prefix);
+                    @memcpy(full_key[prefix.len..][0..key.len], key);
+                    break :blk near.storage_read(full_key[0 .. prefix.len + key.len]);
+                },
+
+                .Mock => blk: {
+                    const prefix = std.fmt.comptimePrint("map:{d}:", .{map_slot});
+                    var full_key: [256]u8 = undefined;
+                    @memcpy(full_key[0..prefix.len], prefix);
+                    @memcpy(full_key[prefix.len..][0..key.len], key);
+                    const data = self.base.get(full_key[0 .. prefix.len + key.len]) orelse
+                        break :blk null;
+                    break :blk data[0..value_size].*;
+                },
+            };
+        }
+
+        /// 存储 Map 中的值
+        pub fn store_map(
+            self: Self,
+            comptime map_slot: usize,
+            key: []const u8,
+            value: []const u8,
+        ) void {
+            switch (TargetChain) {
+                .Solana => {
+                    // 派生 PDA 并写入
+                    const seeds = &[_][]const u8{
+                        std.mem.asBytes(&map_slot),
+                        key,
+                    };
+                    const pda = solana.find_program_address(seeds, self.base);
+
+                    // 如果 PDA 不存在，需要创建
+                    if (!solana.account_exists(pda.address)) {
+                        solana.create_pda_account(pda, value.len);
+                    }
+
+                    var pda_data = solana.get_account_data_mut(pda.address);
+                    @memcpy(pda_data[0..value.len], value);
+                },
+
+                .EVM => {
+                    var hasher = std.crypto.hash.sha3.Keccak256.init(.{});
+                    hasher.update(key);
+                    hasher.update(std.mem.asBytes(&map_slot));
+                    var derived_slot: [32]u8 = undefined;
+                    hasher.final(&derived_slot);
+
+                    const slot_index = std.mem.readInt(u256, &derived_slot, .big);
+                    var slot_data: [32]u8 = [_]u8{0} ** 32;
+                    @memcpy(slot_data[0..value.len], value);
+                    evm.sstore(slot_index, slot_data);
+                },
+
+                .Near => {
+                    const prefix = std.fmt.comptimePrint("map:{d}:", .{map_slot});
+                    var full_key: [256]u8 = undefined;
+                    @memcpy(full_key[0..prefix.len], prefix);
+                    @memcpy(full_key[prefix.len..][0..key.len], key);
+                    near.storage_write(full_key[0 .. prefix.len + key.len], value);
+                },
+
+                .Mock => {
+                    const prefix = std.fmt.comptimePrint("map:{d}:", .{map_slot});
+                    var full_key: [256]u8 = undefined;
+                    @memcpy(full_key[0..prefix.len], prefix);
+                    @memcpy(full_key[prefix.len..][0..key.len], key);
+                    self.base.put(full_key[0 .. prefix.len + key.len], value) catch unreachable;
+                },
+            }
+        }
+    };
+}
+
+// ============================================================================
+// 占位符 - 链特定实现
+// ============================================================================
+
+const solana = struct {
+    fn get_account_data(pubkey: [32]u8) []const u8 {
+        _ = pubkey;
+        return &[_]u8{};
+    }
+    fn get_account_data_mut(pubkey: [32]u8) []u8 {
+        _ = pubkey;
+        return &[_]u8{};
+    }
+    fn find_program_address(seeds: []const []const u8, program_id: [32]u8) struct { address: [32]u8, bump: u8 } {
+        _ = seeds;
+        _ = program_id;
+        return .{ .address = [_]u8{0} ** 32, .bump = 255 };
+    }
+    fn account_exists(pubkey: [32]u8) bool {
+        _ = pubkey;
+        return false;
+    }
+    fn create_pda_account(pda: anytype, size: usize) void {
+        _ = pda;
+        _ = size;
+    }
+};
+
+const evm = struct {
+    fn sload(slot: anytype) [32]u8 {
+        _ = slot;
+        return [_]u8{0} ** 32;
+    }
+    fn sstore(slot: anytype, data: [32]u8) void {
+        _ = slot;
+        _ = data;
+    }
+};
+
+const near = struct {
+    fn storage_read(key: []const u8) []const u8 {
+        _ = key;
+        return &[_]u8{};
+    }
+    fn storage_write(key: []const u8, value: []const u8) void {
+        _ = key;
+        _ = value;
+    }
+};
+```
+
+#### 状态结构体自动映射
+
+```zig
+// kernel/state_mapper.zig
+// ============================================================================
+// 自动将 Zig 结构体映射到虚拟地址空间
+// ============================================================================
+
+const std = @import("std");
+const T_MMU = @import("vss.zig").T_MMU;
+
+/// 自动生成状态访问器
+pub fn StateAccessor(comptime State: type, comptime TargetChain: anytype) type {
+    return struct {
+        mmu: T_MMU(TargetChain),
+
+        const Self = @This();
+
+        /// 编译时计算每个字段的偏移
+        const field_offsets = comptime blk: {
+            const fields = std.meta.fields(State);
+            var offsets: [fields.len]usize = undefined;
+            var current_offset: usize = 0;
+
+            for (fields, 0..) |field, i| {
+                // 对齐
+                const alignment = @alignOf(field.type);
+                current_offset = std.mem.alignForward(usize, current_offset, alignment);
+                offsets[i] = current_offset;
+                current_offset += @sizeOf(field.type);
+            }
+
+            break :blk offsets;
+        };
+
+        /// 读取字段
+        pub fn get(self: Self, comptime field_name: []const u8) FieldType(field_name) {
+            const field_index = std.meta.fieldIndex(State, field_name).?;
+            const offset = field_offsets[field_index];
+            const size = @sizeOf(FieldType(field_name));
+
+            const bytes = self.mmu.load(offset, size);
+            return std.mem.bytesToValue(FieldType(field_name), &bytes);
+        }
+
+        /// 写入字段
+        pub fn set(self: Self, comptime field_name: []const u8, value: FieldType(field_name)) void {
+            const field_index = std.meta.fieldIndex(State, field_name).?;
+            const offset = field_offsets[field_index];
+
+            const bytes = std.mem.toBytes(value);
+            self.mmu.store(offset, &bytes);
+        }
+
+        fn FieldType(comptime field_name: []const u8) type {
+            return @TypeOf(@field(@as(State, undefined), field_name));
+        }
+    };
+}
+
+// ============================================================================
+// 使用示例
+// ============================================================================
+
+const TokenState = struct {
+    admin: [32]u8,
+    total_supply: u64,
+    decimals: u8,
+    paused: bool,
+};
+
+test "StateAccessor" {
+    const Accessor = StateAccessor(TokenState, .Mock);
+
+    var mock_storage = std.StringHashMap([]u8).init(std.testing.allocator);
+    defer mock_storage.deinit();
+
+    var accessor = Accessor{ .mmu = .{ .base = &mock_storage } };
+
+    // 写入
+    accessor.set("total_supply", 1_000_000);
+    accessor.set("decimals", 18);
+    accessor.set("paused", false);
+
+    // 读取
+    const supply = accessor.get("total_supply");
+    try std.testing.expectEqual(@as(u64, 1_000_000), supply);
+
+    const decimals = accessor.get("decimals");
+    try std.testing.expectEqual(@as(u8, 18), decimals);
+}
+```
+
+#### 进程隔离机制
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Titan 进程隔离机制                                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Linux 进程隔离:                                                            │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  进程 A (CR3=0x1000)         进程 B (CR3=0x2000)                    │   │
+│  │  ┌─────────────────┐         ┌─────────────────┐                   │   │
+│  │  │ VA 0x1000       │         │ VA 0x1000       │                   │   │
+│  │  │      │          │         │      │          │                   │   │
+│  │  │      ▼          │         │      ▼          │                   │   │
+│  │  │ PageTable A     │         │ PageTable B     │                   │   │
+│  │  │      │          │         │      │          │                   │   │
+│  │  │      ▼          │         │      ▼          │                   │   │
+│  │  │ PA 0x7F000      │         │ PA 0x8F000      │ ← 不同物理地址    │   │
+│  │  └─────────────────┘         └─────────────────┘                   │   │
+│  │                                                                     │   │
+│  │  进程 A 写 0x1000 不会影响进程 B 的 0x1000                          │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  Titan 程序隔离:                                                            │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  Program A (PID=0xAAA...)    Program B (PID=0xBBB...)               │   │
+│  │  ┌─────────────────┐         ┌─────────────────┐                   │   │
+│  │  │ state.balance   │         │ state.balance   │                   │   │
+│  │  │      │          │         │      │          │                   │   │
+│  │  │      ▼          │         │      ▼          │                   │   │
+│  │  │ T-MMU(PID=A)    │         │ T-MMU(PID=B)    │                   │   │
+│  │  │      │          │         │      │          │                   │   │
+│  │  │      ▼          │         │      ▼          │                   │   │
+│  │  │ Slot[A:0]       │         │ Slot[B:0]       │ ← 不同命名空间    │   │
+│  │  └─────────────────┘         └─────────────────┘                   │   │
+│  │                                                                     │   │
+│  │  Program A 写 state.balance 不会影响 Program B                      │   │
+│  │                                                                     │   │
+│  │  EVM 实现:                                                          │   │
+│  │  ┌─────────────────────────────────────────────────────────────┐   │   │
+│  │  │  Contract A (0xAAA): SSTORE(0, value)                       │   │   │
+│  │  │  Contract B (0xBBB): SSTORE(0, value)                       │   │   │
+│  │  │  → 写入不同的合约存储空间，天然隔离                          │   │   │
+│  │  └─────────────────────────────────────────────────────────────┘   │   │
+│  │                                                                     │   │
+│  │  Solana 实现:                                                       │   │
+│  │  ┌─────────────────────────────────────────────────────────────┐   │   │
+│  │  │  Program A: 只能写 owner=A 的账户                           │   │   │
+│  │  │  Program B: 只能写 owner=B 的账户                           │   │   │
+│  │  │  → 所有权检查实现隔离                                        │   │   │
+│  │  └─────────────────────────────────────────────────────────────┘   │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  跨程序通信 (IPC):                                                          │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  Linux: IPC (Pipe, Socket, Shared Memory)                          │   │
+│  │  Titan: CPI (Cross-Program Invocation)                             │   │
+│  │                                                                     │   │
+│  │  Program A 想访问 Program B 的状态？                                │   │
+│  │  → 必须通过 CPI 调用 Program B 的公开接口                          │   │
+│  │  → Program B 决定是否允许读取/修改                                 │   │
+│  │  → 就像 Linux 进程通过 syscall 请求内核服务一样                    │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 堆内存管理
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Titan 堆内存设计                                           │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Linux 进程内存布局:                                                        │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  高地址  ┌─────────────────┐                                       │   │
+│  │          │ Stack           │ ← 自动管理，向下增长                   │   │
+│  │          ├─────────────────┤                                       │   │
+│  │          │ (未映射)        │                                       │   │
+│  │          ├─────────────────┤                                       │   │
+│  │          │ Heap            │ ← malloc/free 管理，向上增长           │   │
+│  │          ├─────────────────┤                                       │   │
+│  │          │ BSS (未初始化)  │                                       │   │
+│  │          ├─────────────────┤                                       │   │
+│  │          │ Data (已初始化) │                                       │   │
+│  │          ├─────────────────┤                                       │   │
+│  │  低地址  │ Text (代码)     │                                       │   │
+│  │          └─────────────────┘                                       │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  Titan Program 内存布局:                                                    │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  ┌─────────────────────────────────────────────────────────────┐   │   │
+│  │  │  Transient Heap (临时堆)                                    │   │   │
+│  │  │  ┌───────────────────────────────────────────────────────┐ │   │   │
+│  │  │  │  • 运行时动态分配（字符串处理、临时缓冲区）            │ │   │   │
+│  │  │  │  • 使用 Zig GeneralPurposeAllocator                   │ │   │   │
+│  │  │  │  • 交易结束后立即销毁，不持久化                        │ │   │   │
+│  │  │  │  • 类似于 Linux 进程退出后释放内存                     │ │   │   │
+│  │  │  └───────────────────────────────────────────────────────┘ │   │   │
+│  │  └─────────────────────────────────────────────────────────────┘   │   │
+│  │                                                                     │   │
+│  │  ┌─────────────────────────────────────────────────────────────┐   │   │
+│  │  │  Persistent Heap (持久化堆)                                 │   │   │
+│  │  │  ┌───────────────────────────────────────────────────────┐ │   │   │
+│  │  │  │  • 需要跨交易持久化的数据（Map、List、用户数据）       │ │   │   │
+│  │  │  │  • 映射到链上存储                                      │ │   │   │
+│  │  │  │  • T-MMU 负责地址翻译                                  │ │   │   │
+│  │  │  │  • 类似于 Linux 的 mmap 持久化文件                     │ │   │   │
+│  │  │  └───────────────────────────────────────────────────────┘ │   │   │
+│  │  └─────────────────────────────────────────────────────────────┘   │   │
+│  │                                                                     │   │
+│  │  ┌─────────────────────────────────────────────────────────────┐   │   │
+│  │  │  VM Stack (虚拟机栈)                                        │   │   │
+│  │  │  ┌───────────────────────────────────────────────────────┐ │   │   │
+│  │  │  │  • EVM/Wasm/SVM 自动管理                              │ │   │   │
+│  │  │  │  • Titan 不需要干预                                    │ │   │   │
+│  │  │  │  • 函数调用、局部变量                                  │ │   │   │
+│  │  │  └───────────────────────────────────────────────────────┘ │   │   │
+│  │  └─────────────────────────────────────────────────────────────┘   │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  堆分配示例:                                                                │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  // 临时堆 - 交易结束后消失                                         │   │
+│  │  var allocator = std.heap.GeneralPurposeAllocator(.{}){};           │   │
+│  │  const temp_string = try allocator.alloc(u8, 100);                  │   │
+│  │  defer allocator.free(temp_string);                                 │   │
+│  │                                                                     │   │
+│  │  // 持久化堆 - Map 自动映射到链上存储                               │   │
+│  │  const users: titan.Map(Address, u64) = .{};                        │   │
+│  │  users.set(user_address, balance);  // T-MMU 处理持久化             │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### T-VSS 核心价值总结
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    T-VSS 的本质                                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  一句话总结:                                                                │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  Titan 的"私有虚拟地址空间"不是 RAM 的地址空间，                    │   │
+│  │  而是 结构化数据的命名空间 (Structured Data Namespace)              │   │
+│  │                                                                     │   │
+│  │  T-MMU 是一个负责将 Zig 结构体 序列化/映射 到                       │   │
+│  │  链上特定存储槽位的 编译器插件                                      │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  与 Linux 的对应关系:                                                       │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  Linux 组件           Titan 组件          功能                      │   │
+│  │  ──────────────────────────────────────────────────────────────     │   │
+│  │  CR3 寄存器           Program ID          地址空间根标识            │   │
+│  │  Page Table           T-MMU               地址翻译                  │   │
+│  │  Physical RAM         Chain Storage       物理存储                  │   │
+│  │  Page Fault           Cold Load           数据加载                  │   │
+│  │  fork()               Deploy              创建新空间                │   │
+│  │  mmap()               Map<K,V>            动态内存映射              │   │
+│  │  IPC                  CPI                 进程间通信                │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  为什么这是操作系统级别的抽象:                                              │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  1. 用户透明                                                        │   │
+│  │     • 开发者定义 struct，不需要知道底层如何存储                     │   │
+│  │     • 就像 Linux 进程不需要知道页表如何工作                         │   │
+│  │                                                                     │   │
+│  │  2. 强制隔离                                                        │   │
+│  │     • Program A 永远无法直接访问 Program B 的状态                   │   │
+│  │     • 必须通过 CPI (就像 syscall)                                   │   │
+│  │                                                                     │   │
+│  │  3. 统一抽象                                                        │   │
+│  │     • 同样的 Zig struct 可以映射到 EVM/Solana/Near                  │   │
+│  │     • 用户代码不需要修改                                            │   │
+│  │                                                                     │   │
+│  │  4. 零运行时开销                                                    │   │
+│  │     • 地址计算在编译时完成                                          │   │
+│  │     • 运行时只有最小的存储访问                                      │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
 ---
 
 ## 18. 终极总结 (Conclusion)
