@@ -10152,6 +10152,1086 @@ pub fn main() !void {
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
+### 17.12 Titan Universal Addressing Protocol (TUAP)：通用地址协议
+
+**核心问题：** 不同区块链的地址格式完全不同：
+
+| 链 | 地址长度 | 格式 | 示例 |
+|:---|:---|:---|:---|
+| Ethereum | 20 bytes | hex | `0x71C7656EC7ab88b098defB751B7401B5f6d8976F` |
+| Solana | 32 bytes | base58 | `Dn3mPhKRsVKqddvuT7VFJn7BDY7NLdLSZGzKLrKCvGkp` |
+| Bitcoin | 20-32 bytes | bech32 | `bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq` |
+| Cosmos | 20 bytes | bech32 | `cosmos1...` |
+| Aptos/Sui | 32 bytes | hex | `0x1::aptos_coin::AptosCoin` |
+
+如果不解决地址抽象，Titan OS 就会变成一个"缝合怪"，内核里到处都是：
+```zig
+if (is_solana) {
+    // Solana 地址处理
+} else if (is_eth) {
+    // EVM 地址处理
+} else if (is_btc) {
+    // Bitcoin 地址处理
+}
+```
+
+**解决方案：** 借鉴 Linux 网络栈的 `struct sockaddr` 设计。
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Linux sockaddr vs Titan Address                           │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Linux 网络栈:                                                              │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  struct sockaddr {                                                  │   │
+│  │      sa_family_t sa_family;  // AF_INET, AF_INET6, AF_UNIX         │   │
+│  │      char sa_data[14];       // 地址数据                           │   │
+│  │  };                                                                 │   │
+│  │                                                                     │   │
+│  │  • IPv4 (32 bit)  → sockaddr_in                                    │   │
+│  │  • IPv6 (128 bit) → sockaddr_in6                                   │   │
+│  │  • Unix Socket    → sockaddr_un (文件路径)                         │   │
+│  │                                                                     │   │
+│  │  内核只认 sockaddr，不关心具体是哪种地址                            │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  Titan OS:                                                                  │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  struct TitanAddress {                                              │   │
+│  │      chain_id: ChainType,  // Ethereum, Solana, Bitcoin...         │   │
+│  │      len: u8,              // 地址长度                              │   │
+│  │      bytes: [32]u8,        // 地址数据                              │   │
+│  │  };                                                                 │   │
+│  │                                                                     │   │
+│  │  • EVM (20 bytes)     → bytes[0..20]                               │   │
+│  │  • Solana (32 bytes)  → bytes[0..32]                               │   │
+│  │  • Bitcoin (variable) → bytes[0..len]                              │   │
+│  │                                                                     │   │
+│  │  内核只认 TitanAddress，不关心具体是哪条链                          │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### TUAP 三层架构
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    TUAP 三层架构                                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Layer 3: 表现层 (Presentation Layer)                                       │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  人类可读格式:                                                      │   │
+│  │  • URI: titan://eth/0x71C...3A9                                    │   │
+│  │  • DID: did:titan:bob                                              │   │
+│  │  • ENS: vitalik.eth → 自动解析                                     │   │
+│  │  • SNS: toly.sol → 自动解析                                        │   │
+│  │                                                                     │   │
+│  │  AI/用户只需要说: "转账给 bob"                                      │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                              │                                              │
+│                              │ TNS 解析                                     │
+│                              ▼                                              │
+│  Layer 2: 身份层 (Identity Layer)                                           │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  Titan Identity (TID) - 类似 Linux UID                              │   │
+│  │                                                                     │   │
+│  │  ┌─────────────┬───────────┬────────────────────────────────┐      │   │
+│  │  │ Titan ID    │ Chain     │ Local Address                  │      │   │
+│  │  ├─────────────┼───────────┼────────────────────────────────┤      │   │
+│  │  │ User_Bob    │ Ethereum  │ 0xAb5801a7D398351b8bE11C439e99 │      │   │
+│  │  │ User_Bob    │ Solana    │ Dn3mPhKRsVKqddvuT7VFJn7BDY7N   │      │   │
+│  │  │ User_Bob    │ Bitcoin   │ bc1qar0srrr7xfkvy5l643lydnw9   │      │   │
+│  │  └─────────────┴───────────┴────────────────────────────────┘      │   │
+│  │                                                                     │   │
+│  │  一个身份 → 多条链地址 (1:N 映射)                                   │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                              │                                              │
+│                              │ 查表转换                                     │
+│                              ▼                                              │
+│  Layer 1: 内核层 (Kernel Layer)                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  TitanAddress - 统一二进制结构                                      │   │
+│  │                                                                     │   │
+│  │  ┌──────────┬─────┬────────────────────────────────────────────┐   │   │
+│  │  │ chain_id │ len │ bytes[32]                                  │   │   │
+│  │  │ (2 bytes)│(1B) │ (地址数据，定长 32 字节)                   │   │   │
+│  │  ├──────────┼─────┼────────────────────────────────────────────┤   │   │
+│  │  │ 60 (ETH) │ 20  │ 0x71C7656EC7ab88b098defB751B7401B5f6d89...│   │   │
+│  │  │ 501 (SOL)│ 32  │ Dn3mPhKRsVKqddvuT7VFJn7BDY7NLdLSZGzKLr...│   │   │
+│  │  │ 0 (BTC)  │ 32  │ bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf...│   │   │
+│  │  └──────────┴─────┴────────────────────────────────────────────┘   │   │
+│  │                                                                     │   │
+│  │  内核只操作字节，零字符串处理                                       │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Layer 1: 内核层 - TitanAddress 结构体
+
+```zig
+// core/address.zig
+// ============================================================================
+// Titan Universal Addressing Protocol - Kernel Layer
+// ============================================================================
+
+const std = @import("std");
+
+/// Chain ID 定义 (参考 SLIP-0044 / CAIP-2)
+/// https://github.com/satoshilabs/slips/blob/master/slip-0044.md
+pub const ChainType = enum(u16) {
+    // 主流链
+    Bitcoin = 0,
+    Ethereum = 60,
+    Solana = 501,
+    Cosmos = 118,
+    Polkadot = 354,
+    Near = 397,
+    Aptos = 637,
+    Sui = 784,
+
+    // Layer 2
+    Arbitrum = 42161,
+    Optimism = 10,
+    Base = 8453,
+
+    // 特殊类型
+    TitanInternal = 0xFFFF, // Titan 内部地址
+
+    pub fn addressLength(self: ChainType) u8 {
+        return switch (self) {
+            .Ethereum, .Arbitrum, .Optimism, .Base => 20,
+            .Solana, .Bitcoin, .Aptos, .Sui, .Near => 32,
+            .Cosmos, .Polkadot => 32,
+            .TitanInternal => 32,
+        };
+    }
+
+    pub fn isEVMCompatible(self: ChainType) bool {
+        return switch (self) {
+            .Ethereum, .Arbitrum, .Optimism, .Base => true,
+            else => false,
+        };
+    }
+};
+
+/// Titan 通用地址结构体 - 内核中的"身份证"
+/// 类似于 Linux 的 struct sockaddr
+pub const TitanAddress = struct {
+    /// 链类型标识 (2 bytes)
+    chain_id: ChainType,
+
+    /// 地址实际长度 (1 byte)
+    /// EVM = 20, Solana = 32, Bitcoin = variable
+    len: u8,
+
+    /// 地址字节数据 (32 bytes, 定长)
+    /// 短地址左对齐，右侧补零
+    bytes: [32]u8,
+
+    // ========================================================================
+    // 构造函数
+    // ========================================================================
+
+    /// 从原始字节创建地址
+    pub fn fromBytes(chain: ChainType, data: []const u8) !TitanAddress {
+        if (data.len > 32) return error.AddressTooLong;
+        if (data.len < chain.addressLength()) return error.AddressTooShort;
+
+        var addr = TitanAddress{
+            .chain_id = chain,
+            .len = @intCast(data.len),
+            .bytes = [_]u8{0} ** 32,
+        };
+
+        @memcpy(addr.bytes[0..data.len], data);
+        return addr;
+    }
+
+    /// 从 hex 字符串创建 (用于 EVM 地址)
+    pub fn fromHex(chain: ChainType, hex_str: []const u8) !TitanAddress {
+        // 跳过 "0x" 前缀
+        const hex = if (hex_str.len > 2 and hex_str[0] == '0' and hex_str[1] == 'x')
+            hex_str[2..]
+        else
+            hex_str;
+
+        if (hex.len > 64) return error.AddressTooLong;
+
+        var bytes: [32]u8 = [_]u8{0} ** 32;
+        const byte_len = hex.len / 2;
+
+        for (0..byte_len) |i| {
+            bytes[i] = std.fmt.parseInt(u8, hex[i * 2 .. i * 2 + 2], 16) catch
+                return error.InvalidHex;
+        }
+
+        return TitanAddress{
+            .chain_id = chain,
+            .len = @intCast(byte_len),
+            .bytes = bytes,
+        };
+    }
+
+    /// 从 Base58 字符串创建 (用于 Solana 地址)
+    pub fn fromBase58(chain: ChainType, b58_str: []const u8) !TitanAddress {
+        var bytes: [32]u8 = [_]u8{0} ** 32;
+        const decoded_len = base58Decode(b58_str, &bytes) catch
+            return error.InvalidBase58;
+
+        return TitanAddress{
+            .chain_id = chain,
+            .len = @intCast(decoded_len),
+            .bytes = bytes,
+        };
+    }
+
+    // ========================================================================
+    // 类型转换 - 给驱动层使用
+    // ========================================================================
+
+    /// 转换为 EVM 地址 (20 bytes)
+    pub fn toEVM(self: TitanAddress) ![20]u8 {
+        if (!self.chain_id.isEVMCompatible()) return error.InvalidChain;
+        if (self.len != 20) return error.InvalidLength;
+        return self.bytes[0..20].*;
+    }
+
+    /// 转换为 Solana Pubkey (32 bytes)
+    pub fn toSolana(self: TitanAddress) ![32]u8 {
+        if (self.chain_id != .Solana) return error.InvalidChain;
+        if (self.len != 32) return error.InvalidLength;
+        return self.bytes;
+    }
+
+    /// 获取原始字节切片
+    pub fn toSlice(self: *const TitanAddress) []const u8 {
+        return self.bytes[0..self.len];
+    }
+
+    // ========================================================================
+    // 比较与哈希
+    // ========================================================================
+
+    /// 地址相等比较
+    pub fn eql(self: TitanAddress, other: TitanAddress) bool {
+        if (self.chain_id != other.chain_id) return false;
+        if (self.len != other.len) return false;
+        return std.mem.eql(u8, self.bytes[0..self.len], other.bytes[0..other.len]);
+    }
+
+    /// 计算地址哈希 (用于 HashMap 等)
+    pub fn hash(self: TitanAddress) u64 {
+        var hasher = std.hash.Wyhash.init(0);
+        hasher.update(std.mem.asBytes(&self.chain_id));
+        hasher.update(self.bytes[0..self.len]);
+        return hasher.final();
+    }
+
+    // ========================================================================
+    // 格式化输出
+    // ========================================================================
+
+    /// 转换为人类可读格式
+    pub fn format(
+        self: TitanAddress,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = fmt;
+        _ = options;
+
+        try writer.print("titan://{s}/", .{@tagName(self.chain_id)});
+
+        if (self.chain_id.isEVMCompatible()) {
+            try writer.writeAll("0x");
+            for (self.bytes[0..self.len]) |byte| {
+                try writer.print("{x:0>2}", .{byte});
+            }
+        } else {
+            // Base58 或其他格式
+            for (self.bytes[0..self.len]) |byte| {
+                try writer.print("{x:0>2}", .{byte});
+            }
+        }
+    }
+};
+
+// ============================================================================
+// 特殊地址常量
+// ============================================================================
+
+pub const ZERO_ADDRESS = TitanAddress{
+    .chain_id = .TitanInternal,
+    .len = 32,
+    .bytes = [_]u8{0} ** 32,
+};
+
+pub const BURN_ADDRESS = TitanAddress{
+    .chain_id = .TitanInternal,
+    .len = 32,
+    .bytes = [_]u8{0xFF} ** 32,
+};
+
+// ============================================================================
+// Base58 解码 (简化版)
+// ============================================================================
+
+fn base58Decode(encoded: []const u8, out: *[32]u8) !usize {
+    // 实际实现需要完整的 Base58 解码算法
+    // 这里简化为示意
+    _ = encoded;
+    _ = out;
+    return 32;
+}
+
+// ============================================================================
+// 测试
+// ============================================================================
+
+test "TitanAddress EVM" {
+    const addr = try TitanAddress.fromHex(.Ethereum, "0x71C7656EC7ab88b098defB751B7401B5f6d8976F");
+
+    try std.testing.expectEqual(ChainType.Ethereum, addr.chain_id);
+    try std.testing.expectEqual(@as(u8, 20), addr.len);
+
+    const evm_bytes = try addr.toEVM();
+    try std.testing.expectEqual(@as(u8, 0x71), evm_bytes[0]);
+}
+
+test "TitanAddress comparison" {
+    const addr1 = try TitanAddress.fromHex(.Ethereum, "0x71C7656EC7ab88b098defB751B7401B5f6d8976F");
+    const addr2 = try TitanAddress.fromHex(.Ethereum, "0x71C7656EC7ab88b098defB751B7401B5f6d8976F");
+    const addr3 = try TitanAddress.fromHex(.Ethereum, "0x0000000000000000000000000000000000000000");
+
+    try std.testing.expect(addr1.eql(addr2));
+    try std.testing.expect(!addr1.eql(addr3));
+}
+```
+
+#### Layer 2: 身份层 - Titan Identity (TID)
+
+```zig
+// core/identity.zig
+// ============================================================================
+// Titan Identity Layer - 1:N Address Mapping
+// ============================================================================
+
+const std = @import("std");
+const TitanAddress = @import("address.zig").TitanAddress;
+const ChainType = @import("address.zig").ChainType;
+
+/// Titan Identity - 类似 Linux 的 UID
+/// 一个 TID 可以关联多条链上的地址
+pub const TitanIdentity = struct {
+    /// 主身份标识 (32 bytes hash)
+    /// 通常是主公钥的 hash
+    id: [32]u8,
+
+    /// 创建时间戳
+    created_at: u64,
+
+    /// 身份状态
+    status: IdentityStatus,
+
+    pub const IdentityStatus = enum(u8) {
+        Active = 0,
+        Suspended = 1,
+        Revoked = 2,
+    };
+};
+
+/// 身份注册表 - 存储 TID → 地址映射
+pub const IdentityRegistry = struct {
+    /// TID → (ChainType → TitanAddress) 的双层映射
+    mappings: std.AutoHashMap([32]u8, ChainAddressMap),
+    allocator: std.mem.Allocator,
+
+    const ChainAddressMap = std.AutoHashMap(ChainType, TitanAddress);
+
+    pub fn init(allocator: std.mem.Allocator) IdentityRegistry {
+        return IdentityRegistry{
+            .mappings = std.AutoHashMap([32]u8, ChainAddressMap).init(allocator),
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *IdentityRegistry) void {
+        var it = self.mappings.valueIterator();
+        while (it.next()) |chain_map| {
+            chain_map.deinit();
+        }
+        self.mappings.deinit();
+    }
+
+    // ========================================================================
+    // 注册与查询
+    // ========================================================================
+
+    /// 注册身份的链地址
+    pub fn registerAddress(
+        self: *IdentityRegistry,
+        tid: [32]u8,
+        address: TitanAddress,
+    ) !void {
+        const chain_map = self.mappings.getPtr(tid) orelse {
+            // 新身份，创建映射
+            var new_map = ChainAddressMap.init(self.allocator);
+            try new_map.put(address.chain_id, address);
+            try self.mappings.put(tid, new_map);
+            return;
+        };
+
+        // 已有身份，添加新链地址
+        try chain_map.put(address.chain_id, address);
+    }
+
+    /// 根据 TID 和链类型查找地址
+    pub fn resolveAddress(
+        self: *IdentityRegistry,
+        tid: [32]u8,
+        chain: ChainType,
+    ) ?TitanAddress {
+        const chain_map = self.mappings.get(tid) orelse return null;
+        return chain_map.get(chain);
+    }
+
+    /// 获取身份的所有地址
+    pub fn getAllAddresses(
+        self: *IdentityRegistry,
+        tid: [32]u8,
+    ) ?*const ChainAddressMap {
+        return self.mappings.getPtr(tid);
+    }
+};
+
+/// 身份解析器 - 处理各种格式的身份输入
+pub const IdentityResolver = struct {
+    registry: *IdentityRegistry,
+    ens_resolver: ?*ENSResolver = null,
+    sns_resolver: ?*SNSResolver = null,
+
+    /// 解析任意格式的身份标识
+    pub fn resolve(
+        self: *IdentityResolver,
+        identifier: []const u8,
+        target_chain: ChainType,
+    ) !TitanAddress {
+        // 1. 检查是否是原始地址
+        if (isRawAddress(identifier)) {
+            return parseRawAddress(identifier, target_chain);
+        }
+
+        // 2. 检查是否是 ENS 名称 (.eth)
+        if (std.mem.endsWith(u8, identifier, ".eth")) {
+            if (self.ens_resolver) |ens| {
+                return ens.resolve(identifier);
+            }
+            return error.ENSNotAvailable;
+        }
+
+        // 3. 检查是否是 SNS 名称 (.sol)
+        if (std.mem.endsWith(u8, identifier, ".sol")) {
+            if (self.sns_resolver) |sns| {
+                return sns.resolve(identifier);
+            }
+            return error.SNSNotAvailable;
+        }
+
+        // 4. 检查是否是 Titan DID (did:titan:xxx)
+        if (std.mem.startsWith(u8, identifier, "did:titan:")) {
+            const name = identifier[10..];
+            const tid = hashIdentityName(name);
+            return self.registry.resolveAddress(tid, target_chain) orelse
+                error.IdentityNotFound;
+        }
+
+        // 5. 检查是否是 Titan URI (titan://chain/address)
+        if (std.mem.startsWith(u8, identifier, "titan://")) {
+            return parseTitanURI(identifier);
+        }
+
+        // 6. 尝试作为 TID 直接查询
+        var tid: [32]u8 = undefined;
+        if (hexToBytes(identifier, &tid)) {
+            return self.registry.resolveAddress(tid, target_chain) orelse
+                error.IdentityNotFound;
+        }
+
+        return error.UnrecognizedIdentifier;
+    }
+
+    fn isRawAddress(s: []const u8) bool {
+        // 0x 开头的 hex 或 Base58 格式
+        if (s.len >= 2 and s[0] == '0' and s[1] == 'x') return true;
+        if (s.len >= 32 and s.len <= 44) return true; // Base58 范围
+        return false;
+    }
+
+    fn parseRawAddress(s: []const u8, chain: ChainType) !TitanAddress {
+        if (chain.isEVMCompatible()) {
+            return TitanAddress.fromHex(chain, s);
+        } else {
+            return TitanAddress.fromBase58(chain, s);
+        }
+    }
+
+    fn parseTitanURI(uri: []const u8) !TitanAddress {
+        // 解析 titan://eth/0x71C...
+        // 简化实现
+        _ = uri;
+        return error.NotImplemented;
+    }
+
+    fn hashIdentityName(name: []const u8) [32]u8 {
+        var hasher = std.crypto.hash.sha3.Keccak256.init(.{});
+        hasher.update("titan:identity:");
+        hasher.update(name);
+        var result: [32]u8 = undefined;
+        hasher.final(&result);
+        return result;
+    }
+
+    fn hexToBytes(hex: []const u8, out: *[32]u8) bool {
+        if (hex.len != 64) return false;
+        for (0..32) |i| {
+            out[i] = std.fmt.parseInt(u8, hex[i * 2 .. i * 2 + 2], 16) catch return false;
+        }
+        return true;
+    }
+};
+
+// Placeholder types
+const ENSResolver = struct {
+    fn resolve(self: *ENSResolver, name: []const u8) !TitanAddress {
+        _ = self;
+        _ = name;
+        return error.NotImplemented;
+    }
+};
+
+const SNSResolver = struct {
+    fn resolve(self: *SNSResolver, name: []const u8) !TitanAddress {
+        _ = self;
+        _ = name;
+        return error.NotImplemented;
+    }
+};
+```
+
+#### Layer 3: 表现层 - Titan Name Service (TNS)
+
+```zig
+// core/tns.zig
+// ============================================================================
+// Titan Name Service - Human Readable Addresses
+// ============================================================================
+
+const std = @import("std");
+const TitanAddress = @import("address.zig").TitanAddress;
+const ChainType = @import("address.zig").ChainType;
+
+/// Titan URI 格式
+/// titan://<chain>/<address>
+///
+/// 示例:
+/// - titan://eth/0x71C7656EC7ab88b098defB751B7401B5f6d8976F
+/// - titan://sol/Dn3mPhKRsVKqddvuT7VFJn7BDY7NLdLSZGzKLrKCvGkp
+/// - titan://btc/bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq
+pub const TitanURI = struct {
+    chain: ChainType,
+    address: TitanAddress,
+
+    pub fn parse(uri: []const u8) !TitanURI {
+        // 验证前缀
+        if (!std.mem.startsWith(u8, uri, "titan://")) {
+            return error.InvalidURIScheme;
+        }
+
+        const rest = uri[8..]; // 跳过 "titan://"
+
+        // 找到链和地址的分隔符
+        const slash_idx = std.mem.indexOf(u8, rest, "/") orelse
+            return error.InvalidURIFormat;
+
+        const chain_str = rest[0..slash_idx];
+        const addr_str = rest[slash_idx + 1 ..];
+
+        // 解析链类型
+        const chain = parseChainName(chain_str) orelse
+            return error.UnknownChain;
+
+        // 解析地址
+        const address = if (chain.isEVMCompatible())
+            try TitanAddress.fromHex(chain, addr_str)
+        else
+            try TitanAddress.fromBase58(chain, addr_str);
+
+        return TitanURI{
+            .chain = chain,
+            .address = address,
+        };
+    }
+
+    pub fn format(self: TitanURI, writer: anytype) !void {
+        try writer.print("titan://{s}/", .{chainToName(self.chain)});
+        // 格式化地址
+        if (self.chain.isEVMCompatible()) {
+            try writer.writeAll("0x");
+            for (self.address.bytes[0..self.address.len]) |byte| {
+                try writer.print("{x:0>2}", .{byte});
+            }
+        } else {
+            // Base58 编码
+            try formatBase58(self.address.bytes[0..self.address.len], writer);
+        }
+    }
+
+    fn parseChainName(name: []const u8) ?ChainType {
+        const map = std.ComptimeStringMap(ChainType, .{
+            .{ "eth", .Ethereum },
+            .{ "ethereum", .Ethereum },
+            .{ "sol", .Solana },
+            .{ "solana", .Solana },
+            .{ "btc", .Bitcoin },
+            .{ "bitcoin", .Bitcoin },
+            .{ "arb", .Arbitrum },
+            .{ "arbitrum", .Arbitrum },
+            .{ "op", .Optimism },
+            .{ "optimism", .Optimism },
+            .{ "base", .Base },
+            .{ "near", .Near },
+            .{ "cosmos", .Cosmos },
+            .{ "dot", .Polkadot },
+            .{ "polkadot", .Polkadot },
+            .{ "aptos", .Aptos },
+            .{ "sui", .Sui },
+        });
+        return map.get(name);
+    }
+
+    fn chainToName(chain: ChainType) []const u8 {
+        return switch (chain) {
+            .Ethereum => "eth",
+            .Solana => "sol",
+            .Bitcoin => "btc",
+            .Arbitrum => "arb",
+            .Optimism => "op",
+            .Base => "base",
+            .Near => "near",
+            .Cosmos => "cosmos",
+            .Polkadot => "dot",
+            .Aptos => "aptos",
+            .Sui => "sui",
+            else => "unknown",
+        };
+    }
+
+    fn formatBase58(bytes: []const u8, writer: anytype) !void {
+        // 简化实现，实际需要完整的 Base58 编码
+        for (bytes) |byte| {
+            try writer.print("{x:0>2}", .{byte});
+        }
+    }
+};
+
+/// Titan DID 格式
+/// did:titan:<name>
+///
+/// 示例:
+/// - did:titan:alice
+/// - did:titan:bob.agent
+/// - did:titan:defi.protocol.uniswap
+pub const TitanDID = struct {
+    name: []const u8,
+    tid: [32]u8, // 计算得出的身份哈希
+
+    pub fn parse(did: []const u8) !TitanDID {
+        if (!std.mem.startsWith(u8, did, "did:titan:")) {
+            return error.InvalidDIDScheme;
+        }
+
+        const name = did[10..];
+        if (name.len == 0) return error.EmptyDIDName;
+
+        // 计算 TID
+        var hasher = std.crypto.hash.sha3.Keccak256.init(.{});
+        hasher.update("titan:identity:");
+        hasher.update(name);
+        var tid: [32]u8 = undefined;
+        hasher.final(&tid);
+
+        return TitanDID{
+            .name = name,
+            .tid = tid,
+        };
+    }
+
+    pub fn format(self: TitanDID, writer: anytype) !void {
+        try writer.print("did:titan:{s}", .{self.name});
+    }
+};
+```
+
+#### 完整地址流转图
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    地址从输入到执行的完整流程                                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Step 1: 用户输入 (User Space)                                              │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  AI/用户可以使用任何格式:                                           │   │
+│  │                                                                     │   │
+│  │  • "0x71C7656EC7ab88b098defB751B7401B5f6d8976F"  (原始 EVM)        │   │
+│  │  • "vitalik.eth"                                  (ENS 名称)        │   │
+│  │  • "toly.sol"                                     (SNS 名称)        │   │
+│  │  • "did:titan:bob"                                (Titan DID)       │   │
+│  │  • "titan://eth/0x71C..."                         (Titan URI)       │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                              │                                              │
+│                              │ SDK 解析                                     │
+│                              ▼                                              │
+│  Step 2: SDK 解析层 (Syscall Shim)                                          │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  IdentityResolver.resolve(input, target_chain)                      │   │
+│  │                                                                     │   │
+│  │  1. 检测输入格式 (hex? base58? .eth? .sol? did:?)                   │   │
+│  │  2. 如果是名称 → 调用 ENS/SNS/TNS 解析                              │   │
+│  │  3. 如果是 DID → 查询 IdentityRegistry                              │   │
+│  │  4. 转换为 TitanAddress 二进制结构                                  │   │
+│  │                                                                     │   │
+│  │  输出: TitanAddress {                                               │   │
+│  │      chain_id: .Ethereum,                                           │   │
+│  │      len: 20,                                                       │   │
+│  │      bytes: [0x71, 0xC7, 0x65, ...]                                 │   │
+│  │  }                                                                  │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                              │                                              │
+│                              │ 传递二进制                                   │
+│                              ▼                                              │
+│  Step 3: 内核处理 (Zig Kernel)                                              │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  内核只操作 TitanAddress 结构体                                     │   │
+│  │  完全不关心这是什么链，什么格式                                     │   │
+│  │                                                                     │   │
+│  │  fn process_transfer(                                               │   │
+│  │      db: StorageInterface,                                          │   │
+│  │      from: TitanAddress,  // ← 统一类型                             │   │
+│  │      to: TitanAddress,    // ← 统一类型                             │   │
+│  │      amount: u64,                                                   │   │
+│  │  ) !void {                                                          │   │
+│  │      // 内核逻辑...                                                 │   │
+│  │  }                                                                  │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                              │                                              │
+│                              │ 路由到驱动                                   │
+│                              ▼                                              │
+│  Step 4: 驱动路由 (Driver Dispatch)                                         │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  根据 TitanAddress.chain_id 选择驱动:                               │   │
+│  │                                                                     │   │
+│  │  switch (address.chain_id) {                                        │   │
+│  │      .Ethereum => evm_driver.transfer(address.toEVM(), amount),     │   │
+│  │      .Solana => sol_driver.transfer(address.toSolana(), amount),    │   │
+│  │      .Bitcoin => btc_driver.transfer(address.toSlice(), amount),    │   │
+│  │  }                                                                  │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                              │                                              │
+│                              │ 执行交易                                     │
+│                              ▼                                              │
+│  Step 5: 物理层执行 (Physical Chain)                                        │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  驱动将 TitanAddress.bytes 转换为链原生格式:                        │   │
+│  │                                                                     │   │
+│  │  EVM Driver:                                                        │   │
+│  │  ┌─────────────────────────────────────────────────────────────┐   │   │
+│  │  │  bytes[0..20] → eth_abi.encode_address()                    │   │   │
+│  │  │  → 0x71C7656EC7ab88b098defB751B7401B5f6d8976F               │   │   │
+│  │  └─────────────────────────────────────────────────────────────┘   │   │
+│  │                                                                     │   │
+│  │  Solana Driver:                                                     │   │
+│  │  ┌─────────────────────────────────────────────────────────────┐   │   │
+│  │  │  bytes[0..32] → solana.Pubkey.fromBytes()                   │   │   │
+│  │  │  → Dn3mPhKRsVKqddvuT7VFJn7BDY7NLdLSZGzKLrKCvGkp             │   │   │
+│  │  └─────────────────────────────────────────────────────────────┘   │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 与 Linux 网络栈的类比
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Linux 网络栈 vs Titan 地址栈                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Linux 网络栈:                                                              │
+│                                                                             │
+│  ┌─────────────────┐   ┌─────────────────┐   ┌─────────────────┐           │
+│  │ User Space      │   │ Kernel          │   │ Hardware        │           │
+│  │                 │   │                 │   │                 │           │
+│  │ www.google.com  │   │ struct sockaddr │   │ MAC Address     │           │
+│  │ (DNS 名称)      │   │ (通用结构体)    │   │ (物理地址)      │           │
+│  │       │         │   │       │         │   │       │         │           │
+│  │       ▼         │   │       ▼         │   │       ▼         │           │
+│  │ gethostbyname() │   │ sockaddr_in     │   │ ARP 解析        │           │
+│  │       │         │   │ sockaddr_in6    │   │       │         │           │
+│  │       ▼         │   │ sockaddr_un     │   │       ▼         │           │
+│  │ 142.250.80.46   │   │ (具体类型)      │   │ 00:1A:2B:3C:4D  │           │
+│  │                 │   │                 │   │                 │           │
+│  └─────────────────┘   └─────────────────┘   └─────────────────┘           │
+│                                                                             │
+│  Titan 地址栈:                                                              │
+│                                                                             │
+│  ┌─────────────────┐   ┌─────────────────┐   ┌─────────────────┐           │
+│  │ User Space      │   │ Kernel          │   │ Chain           │           │
+│  │                 │   │                 │   │                 │           │
+│  │ vitalik.eth     │   │ TitanAddress    │   │ Chain Address   │           │
+│  │ did:titan:bob   │   │ (通用结构体)    │   │ (链原生格式)    │           │
+│  │ titan://eth/... │   │       │         │   │       │         │           │
+│  │       │         │   │       ▼         │   │       ▼         │           │
+│  │       ▼         │   │ chain_id: u16   │   │ EVM: 0x71C...   │           │
+│  │ TNS/ENS/SNS     │   │ len: u8         │   │ SOL: Dn3m...    │           │
+│  │ 解析            │   │ bytes: [32]u8   │   │ BTC: bc1q...    │           │
+│  │       │         │   │                 │   │                 │           │
+│  │       ▼         │   │ (具体类型)      │   │ (Driver 转换)   │           │
+│  │ 0x71C7656E...   │   │                 │   │                 │           │
+│  │                 │   │                 │   │                 │           │
+│  └─────────────────┘   └─────────────────┘   └─────────────────┘           │
+│                                                                             │
+│  核心设计原则:                                                              │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  "在内核里只认字节，在边缘处才认字符串"                             │   │
+│  │                                                                     │   │
+│  │  • User Space: 各种人类可读格式 (字符串)                            │   │
+│  │  • Kernel: 统一的 TitanAddress (二进制结构体)                       │   │
+│  │  • Driver: 链原生格式 (字节数组)                                    │   │
+│  │                                                                     │   │
+│  │  这保证了:                                                          │   │
+│  │  1. 内核代码简洁 - 不需要字符串处理                                 │   │
+│  │  2. 高效 - 二进制操作，零拷贝                                       │   │
+│  │  3. 可扩展 - 新链只需新增 ChainType 枚举                            │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### AI Agent 使用示例
+
+```python
+# ============================================================================
+# Titan SDK - 地址抽象使用示例
+# ============================================================================
+
+from titan import TitanOS, Address
+
+titan = TitanOS()
+
+# ============================================================================
+# 1. 直接使用原始地址
+# ============================================================================
+
+# EVM 地址
+titan.transfer(
+    to="0x71C7656EC7ab88b098defB751B7401B5f6d8976F",
+    amount=1.0,
+    asset="ETH"
+)
+
+# Solana 地址
+titan.transfer(
+    to="Dn3mPhKRsVKqddvuT7VFJn7BDY7NLdLSZGzKLrKCvGkp",
+    amount=1.0,
+    asset="SOL"
+)
+
+# ============================================================================
+# 2. 使用名称服务
+# ============================================================================
+
+# ENS 名称 - 自动解析到 EVM 地址
+titan.transfer(to="vitalik.eth", amount=1.0, asset="ETH")
+
+# SNS 名称 - 自动解析到 Solana 地址
+titan.transfer(to="toly.sol", amount=1.0, asset="SOL")
+
+# ============================================================================
+# 3. 使用 Titan URI
+# ============================================================================
+
+# 显式指定链
+titan.transfer(to="titan://eth/0x71C...", amount=1.0)
+titan.transfer(to="titan://sol/Dn3m...", amount=1.0)
+titan.transfer(to="titan://arb/0x71C...", amount=1.0)  # Arbitrum
+
+# ============================================================================
+# 4. 使用 Titan DID (去中心化身份)
+# ============================================================================
+
+# 注册身份
+titan.identity.register("alice", {
+    "eth": "0x71C7656EC7ab88b098defB751B7401B5f6d8976F",
+    "sol": "Dn3mPhKRsVKqddvuT7VFJn7BDY7NLdLSZGzKLrKCvGkp",
+    "btc": "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
+})
+
+# 使用 DID 转账 - 自动路由到正确的链
+titan.transfer(to="did:titan:alice", amount=1.0, asset="ETH")  # → ETH 地址
+titan.transfer(to="did:titan:alice", amount=1.0, asset="SOL")  # → SOL 地址
+
+# ============================================================================
+# 5. AI Agent 视角 - 最简化
+# ============================================================================
+
+# AI 只需要知道"给谁"和"给多少"
+# 不需要关心底层地址格式
+def ai_agent_transfer(recipient: str, amount: float, asset: str):
+    """
+    AI Agent 执行转账
+    recipient 可以是任何格式:
+    - 原始地址
+    - ENS/SNS 名称
+    - Titan DID
+    - Titan URI
+    """
+    return titan.transfer(to=recipient, amount=amount, asset=asset)
+
+# AI 调用
+ai_agent_transfer("bob", 100, "USDC")  # 自动解析 bob 的身份
+
+# ============================================================================
+# 6. 跨链场景
+# ============================================================================
+
+# 同一个身份，不同链的操作
+alice = "did:titan:alice"
+
+# Alice 在 ETH 上有 1000 USDC
+# Alice 在 SOL 上有 500 SOL
+
+# 跨链转账 - Titan OS 自动处理路由
+titan.cross_chain_transfer(
+    from_identity=alice,
+    from_chain="eth",
+    to_identity="did:titan:bob",
+    to_chain="sol",
+    amount=100,
+    asset="USDC"
+)
+# Titan OS 内部流程:
+# 1. 解析 alice 的 ETH 地址
+# 2. 解析 bob 的 SOL 地址
+# 3. 在 ETH 上锁定 USDC
+# 4. 在 SOL 上 mint wrapped USDC
+# 5. 转给 bob
+```
+
+#### TUAP 核心价值总结
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    TUAP 解决的核心问题                                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Without TUAP (缝合怪代码):                                                 │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  fn transfer(to: []const u8, chain: ChainType) void {               │   │
+│  │      if (chain == .Ethereum) {                                      │   │
+│  │          // 解析 hex 字符串                                         │   │
+│  │          // 验证 20 字节                                            │   │
+│  │          // 调用 EVM 驱动                                           │   │
+│  │      } else if (chain == .Solana) {                                 │   │
+│  │          // 解析 Base58 字符串                                      │   │
+│  │          // 验证 32 字节                                            │   │
+│  │          // 调用 Solana 驱动                                        │   │
+│  │      } else if (chain == .Bitcoin) {                                │   │
+│  │          // 解析 Bech32 字符串                                      │   │
+│  │          // 验证 20-32 字节                                         │   │
+│  │          // 调用 Bitcoin 驱动                                       │   │
+│  │      }                                                              │   │
+│  │      // 每增加一条链，这里就要加一个 else if...                     │   │
+│  │  }                                                                  │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  With TUAP (优雅的内核代码):                                                │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  fn transfer(to: TitanAddress, amount: u64) void {                  │   │
+│  │      // 内核只操作 TitanAddress 结构体                              │   │
+│  │      // 不关心是什么链，什么格式                                    │   │
+│  │      const driver = getDriver(to.chain_id);                         │   │
+│  │      driver.execute(.Transfer, to.toSlice(), amount);               │   │
+│  │  }                                                                  │   │
+│  │                                                                     │   │
+│  │  // 增加新链？只需:                                                 │   │
+│  │  // 1. 在 ChainType 枚举加一项                                      │   │
+│  │  // 2. 实现对应的 Driver                                            │   │
+│  │  // 内核代码一行不改！                                              │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  TUAP 的三层设计保证了:                                                     │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  1. 用户友好 (Layer 3)                                              │   │
+│  │     • 支持人类可读格式: ENS, SNS, DID, URI                          │   │
+│  │     • AI 可以用自然语言描述目标: "转给 bob"                         │   │
+│  │                                                                     │   │
+│  │  2. 身份统一 (Layer 2)                                              │   │
+│  │     • 一个身份 → 多链地址                                           │   │
+│  │     • 解决用户身份碎片化问题                                        │   │
+│  │                                                                     │   │
+│  │  3. 内核高效 (Layer 1)                                              │   │
+│  │     • 纯二进制操作，无字符串处理                                    │   │
+│  │     • 35 字节定长结构，内存友好                                     │   │
+│  │     • 零拷贝传递给驱动                                              │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  这就是 Linux 网络栈的智慧:                                                 │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  Linux: struct sockaddr 统一 IPv4/IPv6/Unix Socket                  │   │
+│  │  Titan: TitanAddress 统一 EVM/Solana/Bitcoin/...                    │   │
+│  │                                                                     │   │
+│  │  "在内核里只认字节，在边缘处才认字符串"                             │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
 ---
 
 ## 18. 终极总结 (Conclusion)
