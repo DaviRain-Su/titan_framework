@@ -13169,6 +13169,659 @@ pub const TONMessageOrdering = struct {
 
 ---
 
+### 17.15 Titan Client Core (TCC) - 全栈同构架构
+
+> **核心洞察**: 如果链上 Kernel 用 Zig 实现，但链下 SDK 还是一团乱麻的 JS，那 Titan 只是一个合约库，不是一个完整的 OS。
+
+#### 17.15.1 问题：RPC 碎片化
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│               当前 Web3 开发的分裂状态                                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  链上 (On-Chain):                                                           │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  Rust/Solidity/Zig                                                  │   │
+│  │  • 处理二进制                                                       │   │
+│  │  • 状态管理                                                         │   │
+│  │  • 权限验证                                                         │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                           ↕ 巨大的鸿沟 ↕                                    │
+│  链下 (Off-Chain):                                                          │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  JavaScript/TypeScript                                              │   │
+│  │  • 重写一遍序列化逻辑 (ABI Coder / Borsh)                           │   │
+│  │  • 重写一遍 Transaction 构建                                        │   │
+│  │  • 重写一遍 PDA 计算                                                │   │
+│  │  • 重写一遍 RLP/Base64 编码                                         │   │
+│  │                                                                     │   │
+│  │  结果: 容易出错，维护成本高，类型不安全                             │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  每条链的 SDK:                                                              │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  Ethereum: ethers.js / viem / web3.js (多个竞争标准)                │   │
+│  │  Solana:   @solana/web3.js (Borsh 手写)                             │   │
+│  │  Near:     near-api-js                                              │   │
+│  │  TON:      ton-core / ton-client                                    │   │
+│  │                                                                     │   │
+│  │  开发者需要学习 N 套完全不同的 API！                                │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 17.15.2 解决方案：Zig → Wasm 全栈同构
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│               Titan Client Core (TCC) 架构                                   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  核心思想: 把复杂逻辑从 JS 剥离，用 Zig 实现，编译为 Wasm                   │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │                    ┌─────────────────────────┐                      │   │
+│  │                    │   titan_client.zig      │                      │   │
+│  │                    │   (共享核心逻辑)        │                      │   │
+│  │                    └───────────┬─────────────┘                      │   │
+│  │                                │                                    │   │
+│  │              ┌─────────────────┼─────────────────┐                  │   │
+│  │              │                 │                 │                  │   │
+│  │              ▼                 ▼                 ▼                  │   │
+│  │   ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐      │   │
+│  │   │ SBF (链上)      │ │ Wasm (浏览器)   │ │ Native (CLI)    │      │   │
+│  │   │ Solana Program  │ │ JS SDK 核心     │ │ Rust/Python FFI │      │   │
+│  │   └─────────────────┘ └─────────────────┘ └─────────────────┘      │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  同一套 Zig 代码:                                                           │
+│  • 编译到 SBF → 链上 Program                                               │
+│  • 编译到 Wasm → 浏览器 SDK                                                │
+│  • 编译到 Native → CLI 工具 / 服务端                                       │
+│                                                                             │
+│  保证: 链上链下序列化逻辑 100% 一致，零偏差                                │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 17.15.3 传统模式 vs Titan 模式对比
+
+| 步骤 | 传统模式 (ethers.js / web3.js) | Titan 模式 (Zig Wasm) |
+|:-----|:-------------------------------|:----------------------|
+| **参数编码** | JS 手写 ABI Coder / Borsh (容易错) | **Zig Wasm 直接生成** (与链上 100% 一致) |
+| **交易构建** | JS 拼凑 JSON-RPC 结构体 | **Zig Wasm** 生成 Raw Transaction Bytes |
+| **签名** | JS 调用钱包 | JS 调用钱包对 Wasm 给出的 Hash 签名 |
+| **发送** | JS 通过 HTTP 发送 | JS 只是搬运工，发送 Wasm 给的数据 |
+| **类型安全** | TypeScript 尽力而为 | **编译时保证** (Zig comptime) |
+| **依赖大小** | ethers.js ~500KB, web3.js ~1MB | **titan.wasm ~50KB** |
+
+#### 17.15.4 RPCDriver 统一抽象
+
+```zig
+// ========================================================================
+// Titan RPC Driver - 统一 RPC 抽象层
+// ========================================================================
+pub const RPCDriver = struct {
+    const Self = @This();
+
+    chain: ChainType,
+    endpoint: []const u8,
+
+    // VTable: 不同链的 RPC 实现
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        /// 构建 RPC 请求体
+        /// 输入: Titan 通用参数
+        /// 输出: 目标链需要的 HTTP Body (JSON 或二进制)
+        build_request: *const fn (
+            method: []const u8,
+            params: []const u8,  // Titan 标准格式
+        ) []u8,
+
+        /// 解析 RPC 响应
+        /// 输入: 目标链返回的乱七八糟 JSON
+        /// 输出: Titan 标准结果
+        parse_response: *const fn (response: []const u8) TitanResult,
+
+        /// 构建签名消息
+        build_sign_message: *const fn (tx: *const Transaction) [32]u8,
+
+        /// 构建最终交易
+        build_final_tx: *const fn (tx: *const Transaction, sig: []const u8) []u8,
+    };
+
+    // ====================================================================
+    // 具体链的实现
+    // ====================================================================
+
+    pub const ethereum_driver = VTable{
+        .build_request = ethereumBuildRequest,
+        .parse_response = ethereumParseResponse,
+        .build_sign_message = ethereumBuildSignMessage,
+        .build_final_tx = ethereumBuildFinalTx,
+    };
+
+    pub const solana_driver = VTable{
+        .build_request = solanaBuildRequest,
+        .parse_response = solanaParseResponse,
+        .build_sign_message = solanaBuildSignMessage,
+        .build_final_tx = solanaBuildFinalTx,
+    };
+
+    pub const ton_driver = VTable{
+        .build_request = tonBuildRequest,
+        .parse_response = tonParseResponse,
+        .build_sign_message = tonBuildSignMessage,
+        .build_final_tx = tonBuildFinalTx,
+    };
+};
+
+// ========================================================================
+// Ethereum RPC 实现
+// ========================================================================
+fn ethereumBuildRequest(method: []const u8, params: []const u8) []u8 {
+    // 生成 JSON-RPC 格式
+    // {"jsonrpc":"2.0","method":"eth_sendRawTransaction","params":["0x...RLP..."],"id":1}
+    var buf: [4096]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    const writer = stream.writer();
+
+    try writer.print(
+        \\{{"jsonrpc":"2.0","method":"{s}","params":["{s}"],"id":1}}
+    , .{ method, encodeRLP(params) });
+
+    return stream.getWritten();
+}
+
+// ========================================================================
+// Solana RPC 实现
+// ========================================================================
+fn solanaBuildRequest(method: []const u8, params: []const u8) []u8 {
+    // 生成 Solana JSON-RPC 格式
+    // {"jsonrpc":"2.0","method":"sendTransaction","params":["Base64..."],"id":1}
+    var buf: [4096]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    const writer = stream.writer();
+
+    try writer.print(
+        \\{{"jsonrpc":"2.0","method":"{s}","params":["{s}"],"id":1}}
+    , .{ method, base64Encode(params) });
+
+    return stream.getWritten();
+}
+```
+
+#### 17.15.5 Comptime IDL 自动生成
+
+```zig
+// ========================================================================
+// 编译时自动生成客户端代码
+// ========================================================================
+
+/// 从 Kernel 指令定义自动生成客户端序列化器
+pub fn generateClientSerializer(comptime Instruction: type) type {
+    return struct {
+        const Self = @This();
+
+        /// 序列化为链上格式
+        pub fn serialize(instruction: Instruction) []u8 {
+            var buf: [1024]u8 = undefined;
+            var offset: usize = 0;
+
+            // 使用 comptime 反射遍历所有字段
+            inline for (std.meta.fields(Instruction)) |field| {
+                const value = @field(instruction, field.name);
+                const bytes = serializeField(field.type, value);
+                @memcpy(buf[offset..][0..bytes.len], bytes);
+                offset += bytes.len;
+            }
+
+            return buf[0..offset];
+        }
+
+        /// 从 JS 参数反序列化
+        pub fn fromJS(js_params: *JSObject) !Instruction {
+            var result: Instruction = undefined;
+
+            inline for (std.meta.fields(Instruction)) |field| {
+                const js_value = js_params.get(field.name) orelse
+                    return error.MissingField;
+                @field(result, field.name) = try jsToZig(field.type, js_value);
+            }
+
+            return result;
+        }
+    };
+}
+
+// 使用示例
+pub const TransferInstruction = struct {
+    recipient: [32]u8,
+    amount: u64,
+    memo: ?[]const u8,
+};
+
+// 编译时自动生成
+pub const TransferSerializer = generateClientSerializer(TransferInstruction);
+
+// 现在 TransferSerializer 自动拥有:
+// - serialize(): 序列化为链上格式
+// - fromJS(): 从 JS 参数构建
+// - toJS(): 转换为 JS 可读格式
+```
+
+#### 17.15.6 JS Bridge 与类型安全
+
+```zig
+// ========================================================================
+// Wasm 导出接口 - JS 调用入口
+// ========================================================================
+
+/// Wasm 内存分配器 (给 JS 用)
+var wasm_allocator: std.heap.WasmAllocator = .{};
+
+/// 导出: 分配内存
+export fn alloc(len: usize) [*]u8 {
+    return wasm_allocator.alloc(u8, len) catch null;
+}
+
+/// 导出: 释放内存
+export fn dealloc(ptr: [*]u8, len: usize) void {
+    wasm_allocator.free(ptr[0..len]);
+}
+
+// ========================================================================
+// 类型边界转换
+// ========================================================================
+pub const JSBridge = struct {
+    /// JS BigInt → Zig u128
+    /// JS 传入小端序字节数组
+    pub fn fromJSBigInt(ptr: [*]const u8, len: usize) !u128 {
+        if (len > 16) return error.Overflow;
+
+        var result: u128 = 0;
+        for (ptr[0..len], 0..) |byte, i| {
+            result |= @as(u128, byte) << @intCast(i * 8);
+        }
+        return result;
+    }
+
+    /// Zig u128 → JS BigInt 字节数组
+    pub fn toJSBigInt(value: u128, out: [*]u8) usize {
+        var v = value;
+        var len: usize = 0;
+        while (v > 0) : (len += 1) {
+            out[len] = @truncate(v & 0xFF);
+            v >>= 8;
+        }
+        return if (len == 0) 1 else len;  // 至少 1 字节
+    }
+
+    /// JS Hex String → Zig [N]u8
+    pub fn fromJSHexString(ptr: [*]const u8, len: usize, comptime N: usize) ![N]u8 {
+        if (len != N * 2 and len != N * 2 + 2) return error.InvalidLength;
+
+        var result: [N]u8 = undefined;
+        const start: usize = if (ptr[0] == '0' and ptr[1] == 'x') 2 else 0;
+
+        for (0..N) |i| {
+            result[i] = try parseHexByte(ptr[start + i * 2 .. start + i * 2 + 2]);
+        }
+        return result;
+    }
+
+    /// Zig [N]u8 → JS Hex String
+    pub fn toJSHexString(bytes: []const u8, out: [*]u8) usize {
+        out[0] = '0';
+        out[1] = 'x';
+        for (bytes, 0..) |byte, i| {
+            out[2 + i * 2] = hexChar(byte >> 4);
+            out[2 + i * 2 + 1] = hexChar(byte & 0xF);
+        }
+        return 2 + bytes.len * 2;
+    }
+};
+
+// ========================================================================
+// 错误传播机制
+// ========================================================================
+pub const TitanError = extern struct {
+    code: i32,
+    message_ptr: [*]const u8,
+    message_len: usize,
+
+    pub const Code = enum(i32) {
+        Success = 0,
+        InvalidParams = 1,
+        NetworkError = 2,
+        SignatureError = 3,
+        VersionConflict = 4,
+        InsufficientFunds = 5,
+        RPCError = 6,
+        _,
+    };
+};
+
+/// 导出: 获取最后一个错误
+var last_error: ?TitanError = null;
+
+export fn get_last_error() ?*const TitanError {
+    return if (last_error) |*err| err else null;
+}
+```
+
+#### 17.15.7 Titan Client 完整实现
+
+```zig
+// ========================================================================
+// Titan Client - 统一客户端
+// ========================================================================
+pub const TitanClient = struct {
+    const Self = @This();
+
+    chain: ChainType,
+    driver: RPCDriver,
+    endpoint: []const u8,
+
+    /// 创建客户端
+    pub fn init(chain: ChainType, endpoint: []const u8) Self {
+        const driver = switch (chain) {
+            .Ethereum => RPCDriver.ethereum_driver,
+            .Solana => RPCDriver.solana_driver,
+            .TON => RPCDriver.ton_driver,
+            .Near => RPCDriver.near_driver,
+        };
+
+        return .{
+            .chain = chain,
+            .driver = driver,
+            .endpoint = endpoint,
+        };
+    }
+
+    /// 构建交易 (返回待签名的数据)
+    pub fn buildTransaction(
+        self: *Self,
+        comptime Instruction: type,
+        instruction: Instruction,
+        options: TxOptions,
+    ) !TransactionPayload {
+        // 1. 序列化指令
+        const serializer = generateClientSerializer(Instruction);
+        const instruction_data = serializer.serialize(instruction);
+
+        // 2. 构建交易
+        const tx = Transaction{
+            .chain = self.chain,
+            .instructions = &[_][]const u8{instruction_data},
+            .payer = options.payer,
+            .recent_blockhash = options.recent_blockhash,
+        };
+
+        // 3. 计算签名消息
+        const sign_message = self.driver.vtable.build_sign_message(&tx);
+
+        return .{
+            .tx = tx,
+            .sign_message = sign_message,
+            .serialized = self.driver.vtable.build_request("sendTransaction", instruction_data),
+        };
+    }
+
+    /// 附加签名并广播
+    pub fn broadcastSigned(
+        self: *Self,
+        payload: *TransactionPayload,
+        signature: []const u8,
+    ) !TxHash {
+        // 构建最终交易
+        const final_tx = self.driver.vtable.build_final_tx(&payload.tx, signature);
+
+        // 构建 RPC 请求
+        const rpc_body = self.driver.vtable.build_request("sendTransaction", final_tx);
+
+        // 返回给 JS 发送
+        return .{
+            .rpc_body = rpc_body,
+            .tx_hash = computeTxHash(final_tx),
+        };
+    }
+};
+
+// ========================================================================
+// Wasm 导出接口
+// ========================================================================
+
+var global_client: ?TitanClient = null;
+
+/// 导出: 初始化客户端
+export fn titan_init(
+    chain_id: u32,
+    endpoint_ptr: [*]const u8,
+    endpoint_len: usize,
+) i32 {
+    const chain = std.meta.intToEnum(ChainType, chain_id) catch return -1;
+    global_client = TitanClient.init(chain, endpoint_ptr[0..endpoint_len]);
+    return 0;
+}
+
+/// 导出: 构建交易
+export fn titan_build_tx(
+    method_ptr: [*]const u8,
+    method_len: usize,
+    params_ptr: [*]const u8,
+    params_len: usize,
+    out_ptr: [*]u8,
+    out_max_len: usize,
+) i32 {
+    const client = global_client orelse return -1;
+
+    // 解析方法和参数，构建交易
+    const result = client.buildTransactionFromJSON(
+        method_ptr[0..method_len],
+        params_ptr[0..params_len],
+    ) catch |err| {
+        last_error = .{
+            .code = @intFromEnum(errorToCode(err)),
+            .message_ptr = @errorName(err).ptr,
+            .message_len = @errorName(err).len,
+        };
+        return -1;
+    };
+
+    // 复制结果到输出缓冲区
+    if (result.len > out_max_len) return -2;
+    @memcpy(out_ptr[0..result.len], result);
+    return @intCast(result.len);
+}
+```
+
+#### 17.15.8 前端开发者体验
+
+```javascript
+// ========================================================================
+// 前端代码 - 开发者感受不到 Zig 的存在
+// ========================================================================
+
+import initTitan, { TitanClient } from 'titan-sdk-wasm';
+
+async function main() {
+    // 1. 初始化 Wasm 核心 (只需一次)
+    await initTitan();
+
+    // 2. 创建客户端 (自动选择正确的 RPC Driver)
+    const client = new TitanClient("solana", "https://api.mainnet-beta.solana.com");
+
+    // 3. 构建交易 (Zig Wasm 在内存里完成所有序列化)
+    const txPayload = client.buildTx("transfer", {
+        recipient: "Bob1111111111111111111111111111111111111111",
+        amount: 1000000000n,  // 1 SOL in lamports (BigInt)
+        memo: "Hello from Titan!"
+    });
+
+    // 4. 签名 (这是 JS 唯一需要做的核心事，因为私钥在钱包里)
+    const signedTx = await window.phantom.signTransaction(txPayload.signMessage);
+
+    // 5. 广播 (JS 只是个搬运工)
+    const txHash = await client.broadcast(signedTx);
+
+    console.log("Success:", txHash);
+}
+
+// ========================================================================
+// 多链支持 - 相同的 API
+// ========================================================================
+
+async function multiChainExample() {
+    await initTitan();
+
+    // Solana
+    const solClient = new TitanClient("solana", "https://api.mainnet-beta.solana.com");
+    const solTx = solClient.buildTx("transfer", { recipient: "...", amount: 1000000000n });
+
+    // Ethereum - 相同的 API！
+    const ethClient = new TitanClient("ethereum", "https://mainnet.infura.io/v3/...");
+    const ethTx = ethClient.buildTx("transfer", { recipient: "0x...", amount: 1000000000000000000n });
+
+    // TON - 相同的 API！
+    const tonClient = new TitanClient("ton", "https://toncenter.com/api/v2/jsonRPC");
+    const tonTx = tonClient.buildTx("transfer", { recipient: "EQ...", amount: 1000000000n });
+
+    // 开发者不需要知道:
+    // - Solana 用 Borsh 序列化
+    // - Ethereum 用 RLP 编码
+    // - TON 用 Cell 序列化
+    // 全部由 Zig Wasm 内部处理！
+}
+```
+
+#### 17.15.9 离线签名 / 硬件钱包支持
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│               离线签名工作流                                                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  在线设备 (联网):                                                           │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  1. client.buildTx(...) → 获得 txPayload                            │   │
+│  │  2. 导出 txPayload.signMessage 为 QR 码或文件                       │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                           ↓ 物理传输 (QR/USB)                               │
+│  离线设备 (硬件钱包):                                                       │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  3. 硬件钱包签名 signMessage                                        │   │
+│  │  4. 导出签名为 QR 码或文件                                          │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                           ↓ 物理传输 (QR/USB)                               │
+│  在线设备 (联网):                                                           │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  5. client.broadcastSigned(txPayload, signature) → 广播             │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+```zig
+// 离线签名支持
+pub const OfflineSigningFlow = struct {
+    /// 步骤 1: 导出待签名消息
+    pub fn exportForSigning(payload: *TransactionPayload) ExportedMessage {
+        return .{
+            .chain = payload.tx.chain,
+            .message = payload.sign_message,
+            .metadata = .{
+                .tx_hash_preview = computeTxHash(payload.tx)[0..8],
+                .human_readable = payload.tx.toHumanReadable(),
+            },
+        };
+    }
+
+    /// 步骤 2: 导入签名并广播
+    pub fn importSignatureAndBroadcast(
+        client: *TitanClient,
+        payload: *TransactionPayload,
+        signature: []const u8,
+    ) !TxHash {
+        // 验证签名长度
+        const expected_len = switch (payload.tx.chain) {
+            .Ethereum => 65,  // r + s + v
+            .Solana => 64,    // Ed25519
+            .TON => 64,       // Ed25519
+        };
+        if (signature.len != expected_len) return error.InvalidSignature;
+
+        return client.broadcastSigned(payload, signature);
+    }
+};
+```
+
+#### 17.15.10 TCC 架构总结
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│               Titan Client Core (TCC) - 设计哲学                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  核心原则: "不要在 JS 里解决问题，在 Zig 里解决，然后导出给 JS 用"          │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  传统模式:                                                          │   │
+│  │  ┌───────────────┐     ┌───────────────┐     ┌───────────────┐     │   │
+│  │  │ Solidity      │     │ ethers.js     │     │ 手动同步      │     │   │
+│  │  │ (链上)        │ ←─→ │ (链下)        │ ←─→ │ (容易出错)    │     │   │
+│  │  └───────────────┘     └───────────────┘     └───────────────┘     │   │
+│  │                                                                     │   │
+│  │  Titan 模式:                                                        │   │
+│  │  ┌───────────────────────────────────────────────────────────┐     │   │
+│  │  │                  titan_core.zig                           │     │   │
+│  │  │                  (单一真相源)                              │     │   │
+│  │  └─────────────────────────┬─────────────────────────────────┘     │   │
+│  │                            │                                       │   │
+│  │              ┌─────────────┼─────────────┐                         │   │
+│  │              ▼             ▼             ▼                         │   │
+│  │         ┌────────┐   ┌────────┐   ┌────────┐                      │   │
+│  │         │  SBF   │   │  Wasm  │   │ Native │                      │   │
+│  │         │ (链上) │   │ (浏览器)│   │ (CLI)  │                      │   │
+│  │         └────────┘   └────────┘   └────────┘                      │   │
+│  │                                                                     │   │
+│  │  保证: 链上链下逻辑 100% 一致                                       │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  JS 的新角色:                                                               │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  不再是: 复杂的业务逻辑 + 序列化 + 编码 + RPC 构建                  │   │
+│  │                                                                     │   │
+│  │  现在是: 纯粹的 IO 通道                                             │   │
+│  │          • HTTP 请求发送                                            │   │
+│  │          • 浏览器钱包调用                                           │   │
+│  │          • UI 渲染                                                  │   │
+│  │                                                                     │   │
+│  │  结果: JS 代码量减少 90%，bug 减少 99%                              │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  给投资人的一句话:                                                          │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  "Titan 的链上 Kernel 和链下 SDK 共享同一套 Zig 源码。               │   │
+│  │   这种一致性是任何用 JS 手写 SDK 的项目都无法比拟的。"               │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
 ## 18. 终极总结 (Conclusion)
 
 ### Titan Framework 是什么？
