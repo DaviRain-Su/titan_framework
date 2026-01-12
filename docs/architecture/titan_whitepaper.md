@@ -19,7 +19,12 @@
 9. [实现路线图](#9-实现路线图-roadmap)
 10. [商业模式](#10-商业模式-business-model)
 11. [Titan Client SDK：前端统一抽象](#11-titan-client-sdk前端统一抽象-frontend-unification)
-12. [终极总结](#12-终极总结-conclusion)
+12. [Gas 抽象层](#12-gas-抽象层-gas-abstraction-layer)
+13. [Titan Studio：AI 无代码开发工厂](#13-titan-studioai-无代码开发工厂-ai-no-code-factory)
+14. [升级机制](#14-升级机制-upgrade-mechanism)
+15. [Titan x402 协议：AI Agent 的经济操作系统](#15-titan-x402-协议ai-agent-的经济操作系统-ai-economic-os)
+16. [Titan Intents：意图驱动的智能执行层](#16-titan-intents意图驱动的智能执行层-intent-driven-execution)
+17. [终极总结](#17-终极总结-conclusion)
 
 ---
 
@@ -4128,7 +4133,945 @@ print(result)
 
 ---
 
-## 16. 终极总结 (Conclusion)
+## 16. Titan Intents：意图驱动的智能执行层 (Intent-Driven Execution)
+
+### 16.1 从命令式到声明式：交易范式的革命
+
+传统区块链交互是**命令式 (Imperative)** 的：用户必须精确指定每一步操作。
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    命令式 vs 意图式：思维模式对比                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  传统命令式 (How):                                                          │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  用户: "在 Solana 上调用 Jupiter DEX，                              │   │
+│  │        用 account_A 中的 100 SOL，                                  │   │
+│  │        通过 SOL→USDC→USDT 路径，                                    │   │
+│  │        滑点设置 0.5%，                                              │   │
+│  │        期望获得至少 9800 USDT"                                      │   │
+│  │                                                                     │   │
+│  │  问题:                                                              │   │
+│  │  - 用户需要知道最佳 DEX                                             │   │
+│  │  - 用户需要知道最优路径                                             │   │
+│  │  - 用户需要理解滑点、Gas 等复杂概念                                 │   │
+│  │  - 用户需要处理失败重试                                             │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  Titan 意图式 (What):                                                       │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  用户: "我想用 100 SOL 换到最多的 USDT"                             │   │
+│  │                                                                     │   │
+│  │  Titan Intents 自动处理:                                            │   │
+│  │  - Solver 网络竞争最优执行                                          │   │
+│  │  - 自动选择最佳链和 DEX                                             │   │
+│  │  - 自动处理跨链桥接                                                 │   │
+│  │  - 自动优化 Gas 和滑点                                              │   │
+│  │  - 失败自动切换 Solver                                              │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  类比:                                                                      │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  命令式 = 自己开车去目的地 (需要知道路线)                           │   │
+│  │  意图式 = 打 Uber (只说目的地，司机竞争接单)                        │   │
+│  │                                                                     │   │
+│  │  Titan Intents = The Uber for Transactions                          │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 16.2 Titan Intents 架构
+
+Titan Intents 将 **意图层 (Intent Layer)** 深度集成到操作系统内核中。
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Titan Intents 系统架构                                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│                        ┌───────────────────────┐                            │
+│                        │   用户/AI Agent       │                            │
+│                        │   "换 100 SOL → USDT" │                            │
+│                        └───────────┬───────────┘                            │
+│                                    │                                        │
+│                                    ▼                                        │
+│                        ┌───────────────────────┐                            │
+│                        │   Intent Parser       │  ← 解析自然语言/结构化意图│
+│                        │   (titan.intent)      │                            │
+│                        └───────────┬───────────┘                            │
+│                                    │                                        │
+│                                    ▼                                        │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                      Solver Bus (内核层)                             │   │
+│  │  ┌─────────────────────────────────────────────────────────────┐   │   │
+│  │  │                   Intent 广播                                │   │   │
+│  │  └───────────┬───────────────┬───────────────┬─────────────────┘   │   │
+│  │              │               │               │                      │   │
+│  │              ▼               ▼               ▼                      │   │
+│  │  ┌───────────────┐ ┌───────────────┐ ┌───────────────┐             │   │
+│  │  │   Solver A    │ │   Solver B    │ │   Solver C    │  ...        │   │
+│  │  │  (Jupiter)    │ │   (1inch)     │ │  (自营做市商) │             │   │
+│  │  │               │ │               │ │               │             │   │
+│  │  │ 报价: 9850    │ │ 报价: 9820    │ │ 报价: 9880    │ ← 竞争报价   │   │
+│  │  │ USDT          │ │ USDT          │ │ USDT          │             │   │
+│  │  └───────────────┘ └───────────────┘ └───────────────┘             │   │
+│  │              │               │               │                      │   │
+│  │              └───────────────┴───────────────┘                      │   │
+│  │                              │                                      │   │
+│  │                              ▼                                      │   │
+│  │              ┌───────────────────────────────────┐                 │   │
+│  │              │   Best Quote Selector             │ ← 选最优报价    │   │
+│  │              │   Winner: Solver C (9880 USDT)    │                 │   │
+│  │              └───────────────┬───────────────────┘                 │   │
+│  │                              │                                      │   │
+│  └──────────────────────────────┼──────────────────────────────────────┘   │
+│                                 │                                           │
+│                                 ▼                                           │
+│                   ┌───────────────────────────────────┐                    │
+│                   │   Settlement Layer                │                    │
+│                   │   (链上验证 + 结算)               │                    │
+│                   └───────────────────────────────────┘                    │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 16.3 MPC Chain Signatures：统一身份层
+
+**问题**: 用户在不同链上有不同的私钥和账户，管理复杂。
+
+**解决方案**: Titan 集成 **MPC (多方计算) 链签名**，实现一个身份控制所有链。
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    MPC Chain Signatures 架构                                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│                        ┌───────────────────────┐                            │
+│                        │   Titan 主账户        │                            │
+│                        │   (单一助记词)        │                            │
+│                        └───────────┬───────────┘                            │
+│                                    │                                        │
+│                        ┌───────────▼───────────┐                            │
+│                        │   MPC 签名服务        │                            │
+│                        │   (分布式密钥碎片)    │                            │
+│                        │                       │                            │
+│                        │  ┌─────┐ ┌─────┐     │                            │
+│                        │  │Node1│ │Node2│ ... │  ← 多个节点共同签名        │
+│                        │  └─────┘ └─────┘     │    没有单点故障            │
+│                        └───────────┬───────────┘                            │
+│                                    │                                        │
+│         ┌──────────────────────────┼──────────────────────────┐            │
+│         │                          │                          │            │
+│         ▼                          ▼                          ▼            │
+│  ┌─────────────┐           ┌─────────────┐           ┌─────────────┐       │
+│  │ Solana 地址 │           │ EVM 地址    │           │ TON 地址    │       │
+│  │ (Ed25519)   │           │ (Secp256k1) │           │ (Ed25519)   │       │
+│  │             │           │             │           │             │       │
+│  │ 派生路径:   │           │ 派生路径:   │           │ 派生路径:   │       │
+│  │ "solana-1"  │           │ "ethereum-1"│           │ "ton-1"     │       │
+│  └─────────────┘           └─────────────┘           └─────────────┘       │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  特性:                                                              │   │
+│  │  • 确定性派生: NEAR 账户 + 路径 → 任意链地址                       │   │
+│  │  • 支持 Secp256k1 (BTC/ETH) 和 Ed25519 (Solana/TON)                │   │
+│  │  • 节点可安全加入/退出，无需重新生成主密钥                         │   │
+│  │  • 用户只需保管一个助记词，控制所有链资产                          │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 16.4 Zig 实现：Intent 核心结构
+
+```zig
+// ============================================================================
+// Titan Intents - 内核级意图抽象
+// ============================================================================
+
+const std = @import("std");
+const titan = @import("titan");
+
+/// Intent 类型枚举
+pub const IntentType = enum {
+    swap,           // 代币兑换
+    transfer,       // 跨链转账
+    bridge,         // 资产桥接
+    stake,          // 质押
+    unstake,        // 解质押
+    nft_buy,        // NFT 购买
+    nft_sell,       // NFT 出售
+    custom,         // 自定义意图
+};
+
+/// 用户意图结构
+pub const Intent = struct {
+    /// 意图类型
+    intent_type: IntentType,
+
+    /// 输入资产
+    input: Asset,
+
+    /// 期望输出 (可以是精确值或最小值)
+    output: OutputSpec,
+
+    /// 约束条件
+    constraints: Constraints,
+
+    /// 截止时间 (Unix timestamp)
+    deadline: u64,
+
+    /// 用户签名
+    signature: [64]u8,
+
+    /// 创建 Swap 意图
+    pub fn swap(
+        input_token: Token,
+        input_amount: u256,
+        output_token: Token,
+        min_output: ?u256,
+    ) Intent {
+        return .{
+            .intent_type = .swap,
+            .input = .{
+                .token = input_token,
+                .amount = input_amount,
+                .chain = input_token.native_chain,
+            },
+            .output = .{
+                .token = output_token,
+                .min_amount = min_output,
+                .max_amount = null,  // 越多越好
+            },
+            .constraints = Constraints.default(),
+            .deadline = std.time.timestamp() + 300,  // 5 分钟有效期
+            .signature = undefined,
+        };
+    }
+
+    /// 签名意图
+    pub fn sign(self: *Intent, wallet: *titan.Wallet) !void {
+        const payload = self.serialize();
+        self.signature = try wallet.sign(payload);
+    }
+
+    /// 序列化为可传输格式
+    pub fn serialize(self: *const Intent) []const u8 {
+        return std.json.stringifyAlloc(titan.allocator, self) catch unreachable;
+    }
+};
+
+/// 输出规格
+pub const OutputSpec = struct {
+    token: Token,
+    min_amount: ?u256,      // 最小接受数量
+    max_amount: ?u256,      // 最大数量 (用于购买场景)
+    preferred_chain: ?Chain, // 首选链
+};
+
+/// 约束条件
+pub const Constraints = struct {
+    max_slippage_bps: u16,      // 最大滑点 (基点, 100 = 1%)
+    max_gas_usd: ?u64,          // 最大 Gas 花费 (美元)
+    allowed_chains: ?[]Chain,   // 允许的链
+    blocked_protocols: ?[][]const u8,  // 黑名单协议
+    require_audit: bool,         // 是否要求协议经过审计
+
+    pub fn default() Constraints {
+        return .{
+            .max_slippage_bps = 100,  // 1%
+            .max_gas_usd = null,
+            .allowed_chains = null,
+            .blocked_protocols = null,
+            .require_audit = false,
+        };
+    }
+
+    /// 严格模式 (适合大额交易)
+    pub fn strict() Constraints {
+        return .{
+            .max_slippage_bps = 50,   // 0.5%
+            .max_gas_usd = 10,        // 最多 $10 Gas
+            .allowed_chains = null,
+            .blocked_protocols = null,
+            .require_audit = true,    // 必须审计
+        };
+    }
+};
+
+/// 资产定义
+pub const Asset = struct {
+    token: Token,
+    amount: u256,
+    chain: Chain,
+};
+
+/// Solver 报价
+pub const Quote = struct {
+    solver_id: [32]u8,
+    solver_name: []const u8,
+    output_amount: u256,
+    estimated_gas_usd: u64,
+    execution_time_ms: u64,
+    route: []RouteStep,
+    confidence: u8,         // 0-100 执行信心度
+
+    /// 计算综合得分 (用于排序)
+    pub fn score(self: *const Quote) u64 {
+        // 输出金额权重 70%，Gas 权重 20%，速度权重 10%
+        const output_score = self.output_amount / 1e18;
+        const gas_penalty = self.estimated_gas_usd * 100;
+        const speed_penalty = self.execution_time_ms / 100;
+
+        return output_score * 70 - gas_penalty * 20 - speed_penalty * 10;
+    }
+};
+
+/// 路由步骤
+pub const RouteStep = struct {
+    action: enum { swap, bridge, wrap, unwrap },
+    chain: Chain,
+    protocol: []const u8,
+    input_token: Token,
+    output_token: Token,
+};
+```
+
+### 16.5 Solver Bus：内核级意图总线
+
+```zig
+// ============================================================================
+// Solver Bus - 意图分发与竞价系统
+// ============================================================================
+
+/// Solver Bus - 连接用户意图与 Solver 网络
+pub const SolverBus = struct {
+    const Self = @This();
+
+    solvers: std.ArrayList(*Solver),
+    pending_intents: std.AutoHashMap([32]u8, *Intent),
+    quote_cache: std.AutoHashMap([32]u8, []Quote),
+
+    /// 初始化
+    pub fn init(allocator: std.mem.Allocator) Self {
+        return .{
+            .solvers = std.ArrayList(*Solver).init(allocator),
+            .pending_intents = std.AutoHashMap([32]u8, *Intent).init(allocator),
+            .quote_cache = std.AutoHashMap([32]u8, []Quote).init(allocator),
+        };
+    }
+
+    /// 注册 Solver
+    pub fn registerSolver(self: *Self, solver: *Solver) !void {
+        try self.solvers.append(solver);
+        titan.log("Solver registered: {s}", .{solver.name});
+    }
+
+    /// 提交意图并获取最佳报价
+    pub fn submitIntent(self: *Self, intent: *Intent) !ExecutionResult {
+        const intent_hash = titan.hash(intent.serialize());
+
+        // 1. 广播给所有 Solver，收集报价
+        var quotes = std.ArrayList(Quote).init(titan.allocator);
+        defer quotes.deinit();
+
+        for (self.solvers.items) |solver| {
+            if (solver.canHandle(intent)) {
+                if (solver.getQuote(intent)) |quote| {
+                    try quotes.append(quote);
+                } else |_| {
+                    // Solver 无法报价，跳过
+                }
+            }
+        }
+
+        if (quotes.items.len == 0) {
+            return error.NoSolverAvailable;
+        }
+
+        // 2. 选择最佳报价
+        const best_quote = self.selectBestQuote(quotes.items, intent);
+
+        titan.log("Best quote: {s} offers {} output", .{
+            best_quote.solver_name,
+            best_quote.output_amount,
+        });
+
+        // 3. 执行意图
+        const solver = self.getSolverById(best_quote.solver_id) orelse
+            return error.SolverNotFound;
+
+        return solver.execute(intent, best_quote);
+    }
+
+    /// 选择最佳报价
+    fn selectBestQuote(self: *Self, quotes: []Quote, intent: *Intent) Quote {
+        _ = self;
+
+        var best: ?Quote = null;
+        var best_score: u64 = 0;
+
+        for (quotes) |quote| {
+            // 检查是否满足约束
+            if (intent.constraints.max_slippage_bps) |max_slip| {
+                // 计算实际滑点...
+                _ = max_slip;
+            }
+
+            const score = quote.score();
+            if (best == null or score > best_score) {
+                best = quote;
+                best_score = score;
+            }
+        }
+
+        return best.?;
+    }
+
+    fn getSolverById(self: *Self, id: [32]u8) ?*Solver {
+        for (self.solvers.items) |solver| {
+            if (std.mem.eql(u8, &solver.id, &id)) {
+                return solver;
+            }
+        }
+        return null;
+    }
+};
+
+/// Solver 接口
+pub const Solver = struct {
+    id: [32]u8,
+    name: []const u8,
+    supported_chains: []Chain,
+    supported_intents: []IntentType,
+
+    // 虚函数表
+    vtable: *const VTable,
+
+    const VTable = struct {
+        canHandle: *const fn (*Solver, *Intent) bool,
+        getQuote: *const fn (*Solver, *Intent) !Quote,
+        execute: *const fn (*Solver, *Intent, Quote) !ExecutionResult,
+    };
+
+    pub fn canHandle(self: *Solver, intent: *Intent) bool {
+        return self.vtable.canHandle(self, intent);
+    }
+
+    pub fn getQuote(self: *Solver, intent: *Intent) !Quote {
+        return self.vtable.getQuote(self, intent);
+    }
+
+    pub fn execute(self: *Solver, intent: *Intent, quote: Quote) !ExecutionResult {
+        return self.vtable.execute(self, intent, quote);
+    }
+};
+
+/// 执行结果
+pub const ExecutionResult = struct {
+    success: bool,
+    tx_hash: ?[32]u8,
+    actual_output: u256,
+    gas_used_usd: u64,
+    execution_time_ms: u64,
+    solver_name: []const u8,
+};
+```
+
+### 16.6 MPC Identity：统一身份模块
+
+```zig
+// ============================================================================
+// Titan Identity - MPC 链签名实现
+// ============================================================================
+
+/// MPC 身份管理器
+pub const MPCIdentity = struct {
+    const Self = @This();
+
+    /// 主账户 (NEAR 风格的确定性派生)
+    master_account: [32]u8,
+
+    /// MPC 签名服务端点
+    mpc_endpoints: [][]const u8,
+
+    /// 已派生的地址缓存
+    derived_addresses: std.AutoHashMap(DerivationKey, Address),
+
+    const DerivationKey = struct {
+        chain: Chain,
+        path: []const u8,
+    };
+
+    /// 初始化 MPC 身份
+    pub fn init(seed: [32]u8) !Self {
+        return .{
+            .master_account = seed,
+            .mpc_endpoints = &[_][]const u8{
+                "https://mpc1.titan.network",
+                "https://mpc2.titan.network",
+                "https://mpc3.titan.network",
+            },
+            .derived_addresses = std.AutoHashMap(DerivationKey, Address).init(titan.allocator),
+        };
+    }
+
+    /// 获取指定链的地址
+    pub fn getAddress(self: *Self, chain: Chain, path: ?[]const u8) !Address {
+        const derivation_path = path orelse chain.defaultPath();
+
+        const key = DerivationKey{
+            .chain = chain,
+            .path = derivation_path,
+        };
+
+        // 检查缓存
+        if (self.derived_addresses.get(key)) |cached| {
+            return cached;
+        }
+
+        // 派生新地址
+        const address = try self.deriveAddress(chain, derivation_path);
+        try self.derived_addresses.put(key, address);
+
+        return address;
+    }
+
+    /// 使用 MPC 签名交易
+    pub fn signTransaction(
+        self: *Self,
+        chain: Chain,
+        tx_payload: []const u8,
+        path: ?[]const u8,
+    ) ![]const u8 {
+        const derivation_path = path orelse chain.defaultPath();
+
+        // 确定签名方案
+        const scheme: SignatureScheme = switch (chain) {
+            .solana, .ton, .stellar => .ed25519,
+            .ethereum, .bsc, .polygon, .bitcoin => .secp256k1,
+            else => .secp256k1,
+        };
+
+        // 构建 MPC 签名请求
+        const sign_request = MPCSignRequest{
+            .master_account = self.master_account,
+            .derivation_path = derivation_path,
+            .payload = tx_payload,
+            .scheme = scheme,
+        };
+
+        // 向 MPC 网络请求签名
+        return self.requestMPCSignature(sign_request);
+    }
+
+    /// 派生地址 (确定性)
+    fn deriveAddress(self: *Self, chain: Chain, path: []const u8) !Address {
+        // 使用 Additive Key Derivation
+        // 公式: derived_pubkey = master_pubkey + hash(master_pubkey, path, mpc_pubkey)
+        const master_pubkey = self.getMasterPublicKey();
+        const mpc_pubkey = try self.getMPCPublicKey();
+
+        const derivation_input = titan.hash(&[_][]const u8{
+            &master_pubkey,
+            path,
+            &mpc_pubkey,
+        });
+
+        // 根据链类型生成地址
+        return switch (chain) {
+            .solana => Address.fromEd25519(derivation_input),
+            .ethereum, .bsc, .polygon => Address.fromSecp256k1(derivation_input),
+            .bitcoin => Address.fromBitcoin(derivation_input),
+            .ton => Address.fromTON(derivation_input),
+            else => Address.fromSecp256k1(derivation_input),
+        };
+    }
+
+    /// 请求 MPC 签名
+    fn requestMPCSignature(self: *Self, request: MPCSignRequest) ![]const u8 {
+        // 使用多数节点共识
+        var signatures = std.ArrayList([]const u8).init(titan.allocator);
+        defer signatures.deinit();
+
+        for (self.mpc_endpoints) |endpoint| {
+            if (self.requestSignatureFromNode(endpoint, request)) |sig| {
+                try signatures.append(sig);
+            } else |_| {
+                // 节点失败，继续尝试其他节点
+            }
+        }
+
+        // 需要 2/3 以上节点响应
+        const threshold = (self.mpc_endpoints.len * 2 + 2) / 3;
+        if (signatures.items.len < threshold) {
+            return error.InsufficientMPCNodes;
+        }
+
+        // 聚合签名碎片
+        return self.aggregateSignatures(signatures.items);
+    }
+
+    fn getMasterPublicKey(self: *Self) [32]u8 {
+        return titan.ed25519.publicKeyFromSeed(self.master_account);
+    }
+
+    fn getMPCPublicKey(self: *Self) ![32]u8 {
+        _ = self;
+        // 从 MPC 网络获取聚合公钥
+        return titan.http.get("https://mpc.titan.network/pubkey");
+    }
+
+    fn requestSignatureFromNode(
+        self: *Self,
+        endpoint: []const u8,
+        request: MPCSignRequest,
+    ) ![]const u8 {
+        _ = self;
+        return titan.http.post(endpoint, request);
+    }
+
+    fn aggregateSignatures(self: *Self, sigs: [][]const u8) []const u8 {
+        _ = self;
+        // Threshold signature aggregation
+        return titan.crypto.aggregateThresholdSigs(sigs);
+    }
+};
+
+const MPCSignRequest = struct {
+    master_account: [32]u8,
+    derivation_path: []const u8,
+    payload: []const u8,
+    scheme: SignatureScheme,
+};
+
+const SignatureScheme = enum {
+    secp256k1,  // BTC, ETH, BSC...
+    ed25519,    // Solana, TON, Stellar...
+};
+```
+
+### 16.7 用户体验：从 CLI 到 Siri
+
+Titan Intents 将用户体验从"Linux 命令行"升级到"语音助手"级别。
+
+```python
+# ============================================================================
+# Python 开发者体验 - 意图式编程
+# ============================================================================
+
+import titan
+
+# 初始化 (一次性)
+titan.init(seed="your_seed_phrase")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 传统命令式 (复杂)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 旧方式: 需要指定每个细节
+result = titan.solana.jupiter.swap(
+    input_token="SOL",
+    input_amount=100,
+    output_token="USDT",
+    slippage=0.5,
+    route=["SOL", "USDC", "USDT"],
+    priority_fee=0.0001
+)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Titan 意图式 (简单)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 新方式: 只说你想要什么
+result = titan.intent.swap(
+    give="100 SOL",
+    want="max USDT"
+)
+
+# 或者更自然的语法
+result = titan.intent.execute("用 100 SOL 换尽可能多的 USDT")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 复杂意图示例
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 1. 跨链转账 (自动处理桥接)
+result = titan.intent.transfer(
+    to="0x1234...abcd",       # EVM 地址
+    amount="50 USDC",
+    from_chain="solana",       # 可选，不填自动选择
+    to_chain="ethereum"
+)
+
+# 2. 组合意图 (DeFi 策略)
+result = titan.intent.execute("""
+    用 1000 USDC 购买 ETH，
+    然后将 ETH 质押到 Lido，
+    最终把 stETH 转到我的 Arbitrum 地址
+""")
+
+# 3. 条件意图 (限价单)
+result = titan.intent.when(
+    condition="ETH price < 2000 USD",
+    then_do="用 5000 USDC 购买 ETH"
+)
+
+# 4. AI Agent 意图
+class TradingAgent:
+    def analyze_and_trade(self, market_data):
+        # AI 分析后直接表达意图
+        if market_data.bullish:
+            return titan.intent.execute(f"""
+                从我所有链的稳定币中，
+                提取 {market_data.suggested_amount} USDC，
+                购买 {market_data.recommended_asset}，
+                最大滑点 0.5%
+            """)
+```
+
+### 16.8 Swift/iOS 体验
+
+```swift
+// ============================================================================
+// Swift 开发者体验 - iOS/macOS 原生支持
+// ============================================================================
+
+import Titan
+
+// 初始化
+let titan = try Titan(seed: ProcessInfo.processInfo.environment["SEED"]!)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 意图式 API
+// ─────────────────────────────────────────────────────────────────────────────
+
+// 简单兑换
+let result = try await titan.intent.swap(
+    give: "100 SOL",
+    want: "max USDT"
+)
+
+print("获得 \(result.output) USDT, 使用 Solver: \(result.solver)")
+
+// 跨链转账
+let transfer = try await titan.intent.transfer(
+    to: "0x1234...abcd",
+    amount: "50 USDC",
+    toChain: .ethereum
+)
+
+// 自然语言意图 (适合 Siri 集成)
+let nlResult = try await titan.intent.execute(
+    "把我 Solana 上的所有 SOL 换成 USDC 存到 Ethereum"
+)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Siri Shortcuts 集成
+// ─────────────────────────────────────────────────────────────────────────────
+
+// 在 Siri Shortcut 中:
+// 用户: "Hey Siri, 用 Titan 把 100 美元换成比特币"
+// Siri -> Titan Intent -> Solver 网络 -> 执行
+
+@available(iOS 16.0, *)
+struct SwapIntent: AppIntent {
+    static var title: LocalizedStringResource = "Swap Crypto"
+
+    @Parameter(title: "Amount")
+    var amount: String
+
+    @Parameter(title: "From Token")
+    var fromToken: String
+
+    @Parameter(title: "To Token")
+    var toToken: String
+
+    func perform() async throws -> some IntentResult {
+        let result = try await Titan.shared.intent.swap(
+            give: "\(amount) \(fromToken)",
+            want: "max \(toToken)"
+        )
+        return .result(dialog: "已换得 \(result.output) \(toToken)")
+    }
+}
+```
+
+### 16.9 Titan Intents vs 竞品对比
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    意图协议生态对比                                           │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  维度           │ NEAR Intents  │ CoW Protocol  │ Titan Intents            │
+│  ───────────────┼───────────────┼───────────────┼────────────────────────────│
+│  覆盖链数       │ NEAR 为主     │ EVM 为主      │ 25+ 链 (全覆盖)           │
+│  Solver 网络    │ ✅            │ ✅            │ ✅ (兼容 NEAR Solver)     │
+│  MPC 签名       │ ✅            │ ❌            │ ✅ (Titan.Identity.MPC)   │
+│  跨链执行       │ 有限          │ ❌            │ ✅ (TICP 原生)            │
+│  x402 集成      │ ❌            │ ❌            │ ✅ (AI 经济支付)          │
+│  自然语言支持   │ ❌            │ ❌            │ ✅ (AI 解析)              │
+│  移动端集成     │ 弱            │ 弱            │ ✅ (Swift/Kotlin SDK)     │
+│  Gas 抽象       │ 部分          │ ✅            │ ✅ (完整)                 │
+│                                                                             │
+│  ─────────────────────────────────────────────────────────────────────────  │
+│                                                                             │
+│  Titan Intents 独特优势:                                                    │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  1. 内核级集成                                                      │   │
+│  │     • Intent 是操作系统原语，不是应用层协议                         │   │
+│  │     • 零额外依赖，零集成成本                                        │   │
+│  │                                                                     │   │
+│  │  2. 全链覆盖                                                        │   │
+│  │     • SBF (Solana) + Wasm (Near/Cosmos) + EVM + TVM (TON)          │   │
+│  │     • 一个意图，任意链执行                                          │   │
+│  │                                                                     │   │
+│  │  3. x402 + Intents 协同                                             │   │
+│  │     • x402: AI 自主支付                                             │   │
+│  │     • Intents: AI 自主决策                                          │   │
+│  │     • 组合 = 完全自主的 AI Agent                                    │   │
+│  │                                                                     │   │
+│  │  4. MPC 统一身份                                                    │   │
+│  │     • 一个种子，控制所有链                                          │   │
+│  │     • 用户体验: "我只有一个钱包"                                    │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 16.10 Solver 经济模型
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Solver 网络激励机制                                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  角色分工:                                                                  │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  用户                                                               │   │
+│  │  ├── 提交 Intent                                                    │   │
+│  │  └── 支付执行费 (从输出金额扣除)                                    │   │
+│  │                                                                     │   │
+│  │  Solver                                                             │   │
+│  │  ├── 报价竞争 (报价越好，获胜概率越高)                              │   │
+│  │  ├── 执行交易 (承担 Gas 费用)                                       │   │
+│  │  └── 赚取价差 (报价 - 实际成本)                                     │   │
+│  │                                                                     │   │
+│  │  Titan 协议                                                         │   │
+│  │  ├── 提供基础设施 (Solver Bus)                                      │   │
+│  │  ├── 验证执行结果                                                   │   │
+│  │  └── 收取协议费 (0.05% 交易额)                                      │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  收入流:                                                                    │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  假设日均 Intent 交易量: $10M                                       │   │
+│  │                                                                     │   │
+│  │  协议收入:                                                          │   │
+│  │  • 0.05% × $10M/day = $5,000/day                                   │   │
+│  │  • 年化: $1.8M                                                      │   │
+│  │                                                                     │   │
+│  │  规模化后 ($100M/day):                                              │   │
+│  │  • 年化: $18M 协议收入                                              │   │
+│  │                                                                     │   │
+│  │  配合 x402 (AI Agent 支付):                                         │   │
+│  │  • AI 经济 × Intent 执行 = 指数增长                                 │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 16.11 与 x402 的协同效应
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    x402 + Intents: AI Agent 的双引擎                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│                           ┌─────────────────┐                               │
+│                           │    AI Agent     │                               │
+│                           │   (自主体)      │                               │
+│                           └────────┬────────┘                               │
+│                                    │                                        │
+│                    ┌───────────────┴───────────────┐                       │
+│                    │                               │                        │
+│                    ▼                               ▼                        │
+│           ┌───────────────┐               ┌───────────────┐                │
+│           │   Titan x402  │               │ Titan Intents │                │
+│           │   (支付引擎)  │               │   (决策引擎)  │                │
+│           │               │               │               │                │
+│           │ "我能付钱"    │               │ "帮我做事"    │                │
+│           └───────────────┘               └───────────────┘                │
+│                    │                               │                        │
+│                    └───────────────┬───────────────┘                       │
+│                                    │                                        │
+│                                    ▼                                        │
+│                        ┌─────────────────────┐                             │
+│                        │  完全自主的 AI      │                             │
+│                        │                     │                             │
+│                        │  • 自主访问 API     │                             │
+│                        │  • 自主支付费用     │                             │
+│                        │  • 自主执行交易     │                             │
+│                        │  • 自主管理资产     │                             │
+│                        └─────────────────────┘                             │
+│                                                                             │
+│  ─────────────────────────────────────────────────────────────────────────  │
+│                                                                             │
+│  示例场景: AI 投资顾问                                                      │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  1. AI 调用付费市场数据 API                                         │   │
+│  │     → x402 自动支付 $0.01 (Base USDC)                              │   │
+│  │                                                                     │   │
+│  │  2. AI 分析后决定买入 ETH                                           │   │
+│  │     → Intent: "用 1000 USDC 买 ETH"                                │   │
+│  │                                                                     │   │
+│  │  3. Solver 网络竞争执行                                             │   │
+│  │     → 最优 Solver 报价: 0.52 ETH                                   │   │
+│  │                                                                     │   │
+│  │  4. 执行完成，AI 持有 0.52 ETH                                      │   │
+│  │     → 全程无人工干预                                                │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  这就是 Titan 的愿景:                                                       │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  "让 AI 像人一样自由地使用互联网和金融系统"                         │   │
+│  │                                                                     │   │
+│  │  x402 = AI 的信用卡                                                 │   │
+│  │  Intents = AI 的执行秘书                                            │   │
+│  │  Titan = AI 的操作系统                                              │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+> **Titan Intents 的终极意义：** 从"告诉计算机怎么做"到"告诉计算机要什么"。
+>
+> 这不仅仅是 UX 的改进，而是**编程范式的根本变革**。
+>
+> 当 x402 让 AI 能够自主支付，Intents 让 AI 能够自主决策，
+> Titan 就成为了 **AI Agent 真正的操作系统** ——
+> 一个 AI 可以在其上"生活"、"工作"、"交易"的完整世界。
+>
+> **The Uber for Transactions. The OS for AI Agents.**
+
+---
+
+## 17. 终极总结 (Conclusion)
 
 ### Titan Framework 是什么？
 
