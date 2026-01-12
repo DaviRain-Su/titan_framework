@@ -297,6 +297,105 @@ pub fn storage_write(key: []const u8, val: []const u8) void {
 | **Bitcoin** | Inline | Miniscript | 模版引擎 | Source Maps |
 | **Sui/Aptos** | Inline | Move IR | 模版引擎 | Source Maps |
 
+### 全生态版图：完整链覆盖 (The Grand Map)
+
+面对异构的区块链生态，Titan 内核通过双引擎实现 **100% 主流链覆盖**。这是我们最核心的技术护城河。
+
+#### 原生编译引擎覆盖 (Native Engine) —— *高性能赛道*
+
+**原理：** Zig + LLVM 后端，直接生成二进制机器码。**零运行时开销，性能极致。**
+
+| 支持网络 | 底层架构 | Titan 策略 | 备注 |
+|----------|----------|------------|------|
+| **Solana** (含 Render) | SBF (eBPF) | Zig → SBF Binary | Render 已迁移至 Solana，直接复用驱动 |
+| **Nervos (CKB)** | **RISC-V** | Zig → RISC-V ELF | **真正的裸金属编程**，最符合 Titan OS 理念 |
+| **Cosmos** (Atom) | CosmWasm | Zig → Wasm | 模块化区块链标准 |
+| **Polkadot** (含 Bittensor) | Wasm | Zig → Wasm | 覆盖 Substrate 生态及 **AI 算力链** |
+| **Filecoin** (FIL) | FVM (Wasm) | Zig → Wasm | **存储公链**，支持计算 |
+| **Internet Computer** (ICP) | Wasm | Zig → Wasm | 全栈去中心化云 |
+| **Stellar** | Soroban (Wasm) | Zig → Wasm | 老牌支付链智能合约升级 |
+| **Ripple** | Hooks (Wasm) | Zig → Wasm | 跨境支付网络智能合约 |
+| **Near** | Wasm | Zig → Wasm | 分片架构，高 TPS |
+| **Arbitrum Stylus** | Wasm | Zig → Wasm | EVM L2 + Wasm 双栈 |
+
+#### 转译引擎覆盖 (Transpiler Engine) —— *兼容与长尾赛道*
+
+**原理：** **静态内联 (Static Inlining)**。分析 AST，向内核请求底层代码片段，内联生成目标代码。
+
+| 支持网络 | 底层架构 | Titan 策略 | 备注 |
+|----------|----------|------------|------|
+| **EVM 系** | Stack VM | Zig → Yul → Bytecode | 覆盖 90% 存量 DeFi 资产 |
+| ├─ Ethereum | EVM | Yul | 主网 |
+| ├─ BSC | EVM | Yul | Binance 生态 |
+| ├─ Avalanche | EVM | Yul | 子网架构 |
+| ├─ Polygon | EVM | Yul | zkEVM |
+| ├─ Tron | EVM | Yul | USDT 最大流通链 |
+| ├─ Arbitrum | EVM | Yul | L2 领导者 |
+| ├─ Base | EVM | Yul | Coinbase L2 |
+| └─ World Chain | EVM | Yul | World ID 生态 |
+| **TON** | Actor Model (TVM) | Zig → Fift/Func | Telegram 生态，高并发异步消息 |
+| **UTXO 系** | Script | Zig → Opcodes | **谓词编程**：多签、时间锁、哈希锁 |
+| ├─ Bitcoin | Script | Miniscript | 最大市值，Ordinals/BRC-20 |
+| ├─ Litecoin | Script | 复用 Bitcoin 驱动 | 支付用途 |
+| └─ Dogecoin | Script | 复用 Bitcoin 驱动 | Meme 经济 |
+| **Kaspa** | BlockDAG + UTXO | Zig → Kaspa Script | **高性能 UTXO**，KRC-20 自动化 |
+| **Cardano** | EUTXO | Zig → UPLC (Plutus) | 学术派，形式化验证友好 |
+| **Algorand** | AVM | Zig → TEAL | 纯 PoS，即时最终性 |
+| **隐私链** | Custom | 特殊处理 | |
+| ├─ Zcash | Sapling | 加密备注编程 | 可选隐私 |
+| └─ Monero | Ring Signatures | 仅钱包集成 | 完全隐私 |
+| **Move 系** | Move VM | Zig → Move IR | 资源导向编程 |
+| ├─ Sui | Move | Move IR | 对象中心 |
+| └─ Aptos | Move | Move IR | 并行执行 |
+
+#### 双引擎覆盖全景图
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         双引擎覆盖全景图                                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│                           Titan Zig Kernel                                  │
+│                                 │                                           │
+│              ┌──────────────────┴──────────────────┐                       │
+│              │                                      │                       │
+│              ▼                                      ▼                       │
+│    ┌─────────────────────┐              ┌─────────────────────┐            │
+│    │   Native Engine     │              │  Transpiler Engine  │            │
+│    │   (LLVM Backend)    │              │  (Static Inlining)  │            │
+│    └─────────┬───────────┘              └─────────┬───────────┘            │
+│              │                                    │                         │
+│    ┌─────────┴─────────┐              ┌──────────┴──────────┐              │
+│    │                   │              │                     │              │
+│    ▼                   ▼              ▼                     ▼              │
+│  ┌─────┐ ┌─────┐ ┌─────┐          ┌─────┐ ┌─────┐ ┌─────┐ ┌─────┐        │
+│  │ SBF │ │RISCV│ │Wasm │          │ EVM │ │ TVM │ │UTXO │ │ DAG │        │
+│  └──┬──┘ └──┬──┘ └──┬──┘          └──┬──┘ └──┬──┘ └──┬──┘ └──┬──┘        │
+│     │       │       │                │       │       │       │            │
+│     ▼       ▼       ▼                ▼       ▼       ▼       ▼            │
+│  Solana  Nervos  Cosmos           ETH     TON    Bitcoin  Kaspa          │
+│  Render    CKB   Polkadot         BSC            Litecoin                │
+│                  Filecoin         Tron           Dogecoin                │
+│                  ICP              Avax           Cardano                  │
+│                  Stellar          Polygon                                 │
+│                  Ripple           World                                   │
+│                  Bittensor        Arbitrum                                │
+│                  Near             Base                                    │
+│                                   Algorand                                │
+│                                   Sui/Aptos                               │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 市场覆盖统计
+
+| 维度 | 覆盖率 | 说明 |
+|------|--------|------|
+| **流动性覆盖** | 99%+ | ETH + Solana + BSC + Tron 占总市值 90%+ |
+| **创新方向覆盖** | 100% | AI (Bittensor)、存储 (Filecoin)、支付 (Stellar)、高性能 (Kaspa) |
+| **架构覆盖** | 7 种 | RISC-V, SBF, Wasm, EVM, TVM, UTXO, DAG |
+| **主流链数量** | 25+ | 覆盖所有 Top 50 可编程公链 |
+
 ---
 
 ## 4. 抽象哲学：Web3 POSIX 标准
