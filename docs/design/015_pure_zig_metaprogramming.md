@@ -713,7 +713,354 @@ Titan SDK (comptime 多态)
 
 **关键洞察**: Zig 层就是 Roc 的 Runtime。先做好 Zig，Roc 就是锦上添花。
 
-## 7. 结论
+## 7. 架构参考：Sovereign SDK vs Linux-style
+
+### 7.1 Sovereign SDK 简介
+
+[Sovereign SDK](https://github.com/Sovereign-Labs/sovereign-sdk) 是一个用 Rust 构建的模块化 Rollup 框架，其 `module-system` 设计与 Titan Framework 有**极高的同构性**。
+
+**Sovereign SDK 核心组件**:
+
+| 组件 | 功能 | Titan 对应 |
+| :--- | :--- | :--- |
+| `sov-modules-api` | 核心 trait 定义 (Spec, Context, Module) | `titan_sdk/` |
+| `sov-state` | 状态容器 (StateMap, StateValue) | `titan.Storage(T)` |
+| `sov-kernels` | 执行环境 (ZK/Native) | `arch/*` 驱动层 |
+| `WorkingSet` | 事务性状态访问 | `titan.Context` |
+
+### 7.2 Sovereign SDK 架构分析
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Sovereign SDK Module System                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  用户模块 (Module):                                                         │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  #[module]                                                           │   │
+│  │  struct Bank<S: Spec> {                                              │   │
+│  │      #[state]                                                        │   │
+│  │      balances: StateMap<S::Address, u64>,                            │   │
+│  │  }                                                                   │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                              │                                              │
+│                              ▼                                              │
+│  抽象层 (Traits):                                                           │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐                      │
+│  │  Spec        │  │  Context     │  │  Storage     │                      │
+│  │  - Address   │  │  - sender()  │  │  - get()     │                      │
+│  │  - Hasher    │  │  - time()    │  │  - set()     │                      │
+│  │  - Signature │  │  - gas()     │  │  - delete()  │                      │
+│  └──────────────┘  └──────────────┘  └──────────────┘                      │
+│                              │                                              │
+│                              ▼                                              │
+│  后端实现:                                                                  │
+│  ┌──────────────┐  ┌──────────────┐                                        │
+│  │  ZkStorage   │  │  ProverStorage│                                       │
+│  │  (ZK 证明)   │  │  (Native 执行)│                                       │
+│  └──────────────┘  └──────────────┘                                        │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Sovereign SDK 的优点**:
+- Trait 抽象清晰 (Spec, Context, Storage)
+- StateMap/StateValue 容器化状态
+- 模块间依赖管理 (ModuleVisitor, 拓扑排序)
+- ZK 友好的 Witness 系统
+- CacheLog 优化状态访问
+
+**Sovereign SDK 的局限**:
+- 只针对 ZK-Rollup (同构执行环境)
+- 没有处理异构链 (EVM/TON/Solana 差异巨大)
+- Rust 泛型嵌套复杂 (`Bank<S: Spec, C: Context<Spec = S>>`)
+
+### 7.3 Linux-style 抽象的优势
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Titan Framework (Linux-style)                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  用户空间 (User Space):                                                     │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  const Bank = struct {                                               │   │
+│  │      owner: titan.Address,                                           │   │
+│  │      balance: u256,                                                  │   │
+│  │                                                                      │   │
+│  │      pub fn transfer(ctx: *titan.Context, to: Address, amt: u256) {} │   │
+│  │  };                                                                  │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                              │                                              │
+│                              ▼                                              │
+│  系统调用层 (Syscalls):                                                     │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐   │
+│  │  storage_*   │  │  log / emit  │  │  call / cpi  │  │  read_input  │   │
+│  └──────────────┘  └──────────────┘  └──────────────┘  └──────────────┘   │
+│                              │                                              │
+│                              ▼                                              │
+│  驱动层 (Drivers / arch/*):                                                 │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐   │
+│  │  solana/     │  │  evm/        │  │  ton/        │  │  wasm/       │   │
+│  │  - AccountInfo│  │  - SLOAD    │  │  - Cell      │  │  - host_*    │   │
+│  │  - CPI       │  │  - CALL     │  │  - SENDRAWMSG│  │  - Promise   │   │
+│  └──────────────┘  └──────────────┘  └──────────────┘  └──────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Linux-style 的优点**:
+- 支持异构链 (EVM/TON/Solana 差异通过驱动层隔离)
+- comptime 在编译时选择后端，零运行时开销
+- 概念熟悉 (Linux syscall 模型)
+- 更底层控制 (可以绕过抽象直接调用驱动)
+
+**Linux-style 的局限**:
+- 需要更多手动实现
+- 模块间依赖管理需要自己设计
+
+### 7.4 融合方案：Linux 骨架 + Sovereign 容器
+
+**核心决策**: 以 Linux-style 为骨架，融入 Sovereign SDK 的精华。
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│              Titan Framework: 融合架构 (Hybrid Architecture)                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Layer 3: 用户模块 (借鉴 Sovereign: StateMap/StateValue 容器)               │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  const Bank = struct {                                               │   │
+│  │      balances: titan.StateMap(Address, u256),  // ← Sovereign 风格   │   │
+│  │      total_supply: titan.StateValue(u256),     // ← Sovereign 风格   │   │
+│  │                                                                      │   │
+│  │      pub fn transfer(ctx: *titan.Context, to: Address, amt: u256) {} │   │
+│  │  };                                                                  │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                              │                                              │
+│  Layer 2: 系统服务 (Linux-style Syscalls + Sovereign Context)               │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  titan.Context:                                                      │   │
+│  │    - sender() → Address        (Sovereign 风格)                      │   │
+│  │    - value()  → u256           (Sovereign 风格)                      │   │
+│  │    - emit(event)               (Linux syscall 风格)                  │   │
+│  │    - call(target, data)        (Linux syscall 风格)                  │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                              │                                              │
+│  Layer 1: 内核 (Linux-style: comptime 驱动选择)                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  if (comptime target == .solana) {                                   │   │
+│  │      // Solana: PDA + AccountInfo                                    │   │
+│  │  } else if (comptime target == .evm) {                               │   │
+│  │      // EVM: SLOAD/SSTORE + keccak256 slot                           │   │
+│  │  } else if (comptime target == .ton) {                               │   │
+│  │      // TON: Cell Builder + SENDRAWMSG                               │   │
+│  │  }                                                                   │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                              │                                              │
+│  Layer 0: 驱动 (Linux-style: arch/* 目录结构)                               │
+│  ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌────────────┐           │
+│  │ arch/solana│  │ arch/evm   │  │ arch/ton   │  │ arch/wasm  │           │
+│  └────────────┘  └────────────┘  └────────────┘  └────────────┘           │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 7.5 从 Sovereign SDK 借鉴什么
+
+| 组件 | 从 Sovereign 借鉴 | 用 Zig/Linux 改进 |
+| :--- | :--- | :--- |
+| **StateMap/StateValue** | ✅ 容器化思想 | comptime 选择后端，而非 Rust trait |
+| **Context** | ✅ sender/value/time 统一 | comptime 条件编译添加链特有字段 |
+| **Module 依赖** | ✅ 拓扑排序思想 | comptime 静态检查，无运行时开销 |
+| **Witness** | ✅ ZK 证明系统 | 只在 `-Dtarget=zk` 时启用 |
+| **CacheLog** | ✅ 状态访问优化 | comptime 内联优化 |
+| **Storage Trait** | ❌ Rust trait 太复杂 | Linux syscall 风格: `storage_read/write` |
+| **Async 模型** | ❌ Sovereign 无此需求 | 新增 `titan.Message` 处理 TON/Near 异步 |
+
+### 7.6 Sovereign SDK 没有但 Titan 需要的
+
+#### 7.6.1 异步模型抽象 (The Async Gap)
+
+Sovereign 的 `call` 函数通常是同步返回结果的。这在 TON 上行不通。
+
+```zig
+// Titan SDK 需要支持消息传递模式
+pub fn call_other_contract(ctx: *Context, target: Address, msg: anytype) !void {
+    if (comptime target_chain == .ton) {
+        // TON: 生成 SENDRAWMSG，结束当前执行，等待回调
+        ctx.send_message(target, msg);
+    } else if (comptime target_chain == .near) {
+        // Near: Promise 链
+        try ctx.promise_create(target, msg);
+    } else {
+        // EVM/Solana: 直接执行同步调用
+        const res = ctx.sync_call(target, msg);
+    }
+}
+```
+
+#### 7.6.2 资产模型抽象 (Asset Model)
+
+Sovereign SDK 里的资产通常只是状态树上的一个数字。但在 Solana 上，资产是独立的 Account。
+
+```zig
+// Titan 定义统一的 Token 抽象类型
+pub const Token = struct {
+    pub fn transfer(ctx: *Context, to: Address, amount: u256) !void {
+        if (comptime target_chain == .solana) {
+            // CPI 调用 SPL Token Program
+            try spl_token.transfer(ctx, to, amount);
+        } else if (comptime target_chain == .evm) {
+            // 内部余额更新 (ERC20 模式)
+            try update_balance(ctx.sender, to, amount);
+        } else if (comptime target_chain == .ton) {
+            // Jetton 消息发送
+            try jetton.send_transfer(ctx, to, amount);
+        }
+    }
+};
+```
+
+### 7.7 最终目录结构
+
+基于融合架构的推荐目录结构:
+
+```
+titan/
+├── kernel/                      # Linux 内核层
+│   ├── syscalls.zig             # storage_*, log, call, ...
+│   ├── allocator.zig            # TitanAllocator
+│   └── context.zig              # Context 实现
+│
+├── arch/                        # Linux 驱动层 (per-chain)
+│   ├── solana/
+│   │   ├── account.zig
+│   │   ├── cpi.zig
+│   │   └── pda.zig
+│   ├── evm/
+│   │   ├── storage.zig          # SLOAD/SSTORE
+│   │   ├── call.zig
+│   │   └── yul_codegen.zig
+│   ├── ton/
+│   │   ├── cell.zig
+│   │   ├── message.zig
+│   │   └── fift_codegen.zig
+│   └── wasm/
+│       ├── host.zig
+│       └── promise.zig
+│
+├── lib/                         # Sovereign 风格容器
+│   ├── state_map.zig            # StateMap(K, V) - 借鉴 Sovereign
+│   ├── state_value.zig          # StateValue(T) - 借鉴 Sovereign
+│   ├── address.zig              # 跨链统一地址
+│   └── math.zig                 # u256 安全数学
+│
+├── std/                         # 标准库 (高级抽象)
+│   ├── token.zig                # ERC20/SPL/Jetton 统一
+│   ├── nft.zig
+│   └── governance.zig
+│
+└── router.zig                   # 入口点生成器
+```
+
+### 7.8 StateMap/StateValue 实现示例
+
+借鉴 Sovereign SDK 的容器化思想，用 Zig comptime 实现:
+
+```zig
+// titan/lib/state_map.zig
+
+const target = @import("build_options").target_chain;
+
+/// StateMap - 借鉴 Sovereign SDK 的状态容器设计
+/// 键值对存储，自动处理跨链存储差异
+pub fn StateMap(comptime K: type, comptime V: type) type {
+    return struct {
+        const Self = @This();
+
+        // 内部状态 (根据目标链不同)
+        inner: if (target == .solana) SolanaPdaMap(K, V)
+               else if (target == .evm) EvmSlotMap(K, V)
+               else if (target == .ton) TonCellMap(K, V)
+               else WasmKvMap(K, V),
+
+        /// 获取值
+        pub fn get(self: *Self, key: K) ?V {
+            return self.inner.get(key);
+        }
+
+        /// 设置值
+        pub fn set(self: *Self, key: K, value: V) !void {
+            return self.inner.set(key, value);
+        }
+
+        /// 删除值
+        pub fn remove(self: *Self, key: K) !void {
+            return self.inner.remove(key);
+        }
+
+        /// 检查是否存在
+        pub fn contains(self: *Self, key: K) bool {
+            return self.inner.contains(key);
+        }
+    };
+}
+
+/// StateValue - 单值存储
+/// 借鉴 Sovereign SDK: "group data that is frequently read together"
+pub fn StateValue(comptime T: type) type {
+    return struct {
+        const Self = @This();
+
+        /// 获取值
+        pub fn get(self: *Self) !T {
+            if (comptime target == .solana) {
+                return self.loadFromAccount();
+            } else if (comptime target == .evm) {
+                return self.loadFromSlots();
+            } else if (comptime target == .ton) {
+                return self.loadFromCell();
+            } else {
+                return self.loadFromKv();
+            }
+        }
+
+        /// 设置值
+        pub fn set(self: *Self, value: T) !void {
+            if (comptime target == .solana) {
+                try self.saveToAccount(value);
+            } else if (comptime target == .evm) {
+                try self.saveToSlots(value);
+            } else if (comptime target == .ton) {
+                try self.saveToCell(value);
+            } else {
+                try self.saveToKv(value);
+            }
+        }
+    };
+}
+```
+
+### 7.9 融合架构总结
+
+| 问题 | 答案 |
+| :--- | :--- |
+| **完全抄 Sovereign？** | ❌ 它只解决 ZK-Rollup，不支持异构链 |
+| **完全用 Linux-style？** | ❌ 会缺少 StateMap 等开发者友好容器 |
+| **融合两者？** | ✅ **Linux 骨架 + Sovereign 容器 = 最优解** |
+
+**核心收益**:
+- **Sovereign 的开发者体验** (StateMap, StateValue, Context)
+- **Linux 的架构清晰度** (kernel/arch 分层)
+- **Zig 的编译时性能** (comptime 零开销抽象)
+
+**参考资料**:
+- [Sovereign SDK GitHub](https://github.com/Sovereign-Labs/sovereign-sdk)
+- [sov-state Documentation](https://docs.rs/sov-state/latest/sov_state/)
+- [The Sovereign SDK Book](https://docs.sovereign.xyz/)
+
+## 8. 结论
 
 **一句话总结**:
 
