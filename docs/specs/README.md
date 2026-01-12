@@ -15,6 +15,7 @@
 | [技术栈](../architecture/technical_stack.md) | 层级架构与技术选型。 |
 | [**为什么选择 Zig**](../architecture/why_zig.md) | 语言选型决策：comptime、零运行时、交叉编译优势。 |
 | [**商业愿景**](../architecture/business_vision.md) | 价值主张、目标客户与商业化路线图。 |
+| [**竞品分析**](../architecture/competitive_analysis.md) | 市场定位、竞品对比与蓝海机会分析。 |
 
 ## 核心规范 (Core Specs)
 
