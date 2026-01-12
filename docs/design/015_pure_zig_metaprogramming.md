@@ -1060,23 +1060,742 @@ pub fn StateValue(comptime T: type) type {
 - [sov-state Documentation](https://docs.rs/sov-state/latest/sov_state/)
 - [The Sovereign SDK Book](https://docs.sovereign.xyz/)
 
-## 8. 结论
+## 8. libtitan: 通用区块链运行时引擎 (Universal Runtime)
 
-**一句话总结**:
+### 8.1 战略升级：从框架到引擎
 
-> **Titan Framework = Zig comptime 多态 + 统一抽象层**
->
-> **"Web3 时代的 C 语言" - 一种可以编译到任何链底层的高性能语言**
+**核心构想**: 将 Titan Framework 的 Zig 核心封装成 **C ABI 接口**，创造 `libtitan`。
+
+这意味着：**任何能调用 C 的语言，都可以通过 Titan 开发区块链合约。**
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    libtitan: 通用区块链运行时引擎                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  定位升级:                                                                  │
+│                                                                             │
+│  之前: Titan Framework = Zig 开发框架 (单一语言)                            │
+│  现在: libtitan = 通用区块链运行时 (万语言支持)                             │
+│                                                                             │
+│  类比:                                                                      │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  LLVM 没有强迫大家用 C++                                             │   │
+│  │  → 它暴露接口，Rust/Swift/Zig 都在用它                              │   │
+│  │                                                                      │   │
+│  │  libtitan 不强迫大家用 Zig                                           │   │
+│  │  → 它暴露 C 接口，Swift/Go/Rust/Nim 都可以用它                      │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 8.2 架构设计
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         libtitan 三层架构                                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Layer 3: Guest Languages (用户层)                                          │
+│  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐  │
+│  │  Swift  │ │  Rust   │ │ TinyGo  │ │   Nim   │ │  Zig    │ │   C     │  │
+│  │  SDK    │ │  SDK    │ │  SDK    │ │  SDK    │ │  SDK    │ │  SDK    │  │
+│  └────┬────┘ └────┬────┘ └────┬────┘ └────┬────┘ └────┬────┘ └────┬────┘  │
+│       │          │          │          │          │          │           │
+│       └──────────┴──────────┴────┬─────┴──────────┴──────────┘           │
+│                                  │                                        │
+│  Layer 2: C ABI Bridge (接口层)  │                                        │
+│  ┌───────────────────────────────┴───────────────────────────────────┐   │
+│  │                         titan.h                                    │   │
+│  │                                                                    │   │
+│  │  // Memory                                                         │   │
+│  │  void* titan_alloc(size_t size);                                  │   │
+│  │  void  titan_free(void* ptr);                                     │   │
+│  │                                                                    │   │
+│  │  // Storage                                                        │   │
+│  │  int   titan_storage_read(const char* key, void* buf, size_t len);│   │
+│  │  int   titan_storage_write(const char* key, void* buf, size_t len);│  │
+│  │                                                                    │   │
+│  │  // Context                                                        │   │
+│  │  void  titan_get_sender(uint8_t* out_addr);                       │   │
+│  │  uint64_t titan_get_value(void);                                  │   │
+│  │                                                                    │   │
+│  │  // Actions                                                        │   │
+│  │  int   titan_transfer(const uint8_t* to, uint64_t amount);        │   │
+│  │  void  titan_log(const char* msg, size_t len);                    │   │
+│  │  int   titan_call(const uint8_t* target, void* data, size_t len); │   │
+│  └───────────────────────────────────────────────────────────────────┘   │
+│                                  │                                        │
+│  Layer 1: Titan Core (核心层)    │                                        │
+│  ┌───────────────────────────────┴───────────────────────────────────┐   │
+│  │                    Pure Zig Implementation                         │   │
+│  │                                                                    │   │
+│  │  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐               │   │
+│  │  │ TitanAllocator│ │   Context   │ │   Storage    │               │   │
+│  │  └──────────────┘ └──────────────┘ └──────────────┘               │   │
+│  │                         │                                          │   │
+│  │           ┌─────────────┴─────────────┐                           │   │
+│  │           ▼                           ▼                           │   │
+│  │  ┌──────────────┐           ┌──────────────┐                      │   │
+│  │  │ arch/solana  │           │  arch/evm    │  ...                 │   │
+│  │  └──────────────┘           └──────────────┘                      │   │
+│  └───────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 8.3 C ABI 导出实现
+
+Zig 对 C 的兼容性是所有语言里最好的。使用 `export` 关键字即可导出 C 函数。
+
+```zig
+// titan/exports.zig - libtitan C ABI 导出
+
+const std = @import("std");
+const target = @import("build_options").target_chain;
+const context = @import("kernel/context.zig");
+const storage = @import("kernel/syscalls.zig");
+const allocator = @import("kernel/allocator.zig");
+
+// ============================================================================
+// Memory Management
+// ============================================================================
+
+/// 分配内存
+export fn titan_alloc(size: usize) ?*anyopaque {
+    return allocator.titan_allocator.alloc(u8, size) catch null;
+}
+
+/// 释放内存 (在 Bump Allocator 中可能是 no-op)
+export fn titan_free(ptr: ?*anyopaque) void {
+    // Bump allocator: no-op, 或标记为可回收
+    _ = ptr;
+}
+
+/// 重新分配内存
+export fn titan_realloc(ptr: ?*anyopaque, old_size: usize, new_size: usize) ?*anyopaque {
+    return allocator.titan_allocator.realloc(ptr, old_size, new_size) catch null;
+}
+
+// ============================================================================
+// Storage Operations
+// ============================================================================
+
+/// 读取存储
+export fn titan_storage_read(
+    key_ptr: [*]const u8,
+    key_len: usize,
+    buf_ptr: [*]u8,
+    buf_len: usize,
+) i32 {
+    const key = key_ptr[0..key_len];
+    const buf = buf_ptr[0..buf_len];
+
+    if (comptime target == .solana) {
+        return storage.solana_storage_read(key, buf);
+    } else if (comptime target == .evm) {
+        return storage.evm_storage_read(key, buf);
+    } else if (comptime target == .ton) {
+        return storage.ton_storage_read(key, buf);
+    } else {
+        return storage.wasm_storage_read(key, buf);
+    }
+}
+
+/// 写入存储
+export fn titan_storage_write(
+    key_ptr: [*]const u8,
+    key_len: usize,
+    val_ptr: [*]const u8,
+    val_len: usize,
+) i32 {
+    const key = key_ptr[0..key_len];
+    const val = val_ptr[0..val_len];
+
+    if (comptime target == .solana) {
+        return storage.solana_storage_write(key, val);
+    } else if (comptime target == .evm) {
+        return storage.evm_storage_write(key, val);
+    } else if (comptime target == .ton) {
+        return storage.ton_storage_write(key, val);
+    } else {
+        return storage.wasm_storage_write(key, val);
+    }
+}
+
+// ============================================================================
+// Context Operations
+// ============================================================================
+
+/// 获取调用者地址
+export fn titan_get_sender(out_addr: [*]u8) void {
+    const ctx = context.Context.init();
+    const addr_bytes = ctx.sender.toBytes();
+    @memcpy(out_addr, &addr_bytes, addr_bytes.len);
+}
+
+/// 获取附带的原生代币数量
+export fn titan_get_value() u64 {
+    const ctx = context.Context.init();
+    return @truncate(ctx.value);
+}
+
+/// 获取当前时间戳
+export fn titan_get_timestamp() u64 {
+    const ctx = context.Context.init();
+    return ctx.timestamp;
+}
+
+/// 获取当前区块高度
+export fn titan_get_block_height() u64 {
+    const ctx = context.Context.init();
+    return ctx.block_height;
+}
+
+// ============================================================================
+// Actions
+// ============================================================================
+
+/// 转账原生代币
+export fn titan_transfer(to_addr: [*]const u8, amount: u64) i32 {
+    var ctx = context.Context.init();
+    const to = context.Address.fromBytes(to_addr[0..32]);
+    ctx.transfer(to, amount) catch return -1;
+    return 0;
+}
+
+/// 输出日志
+export fn titan_log(msg_ptr: [*]const u8, msg_len: usize) void {
+    const msg = msg_ptr[0..msg_len];
+
+    if (comptime target == .solana) {
+        @import("arch/solana/log.zig").sol_log(msg);
+    } else if (comptime target == .evm) {
+        @import("arch/evm/log.zig").evm_log(msg);
+    } else {
+        std.log.info("{s}", .{msg});
+    }
+}
+
+/// 调用其他合约
+export fn titan_call(
+    target_addr: [*]const u8,
+    data_ptr: [*]const u8,
+    data_len: usize,
+    ret_ptr: [*]u8,
+    ret_len: usize,
+) i32 {
+    const target_address = context.Address.fromBytes(target_addr[0..32]);
+    const data = data_ptr[0..data_len];
+    const ret_buf = ret_ptr[0..ret_len];
+
+    var ctx = context.Context.init();
+    const result = ctx.call(target_address, data, ret_buf) catch return -1;
+    return @intCast(result);
+}
+
+/// 发出事件
+export fn titan_emit_event(
+    name_ptr: [*]const u8,
+    name_len: usize,
+    data_ptr: [*]const u8,
+    data_len: usize,
+) void {
+    const name = name_ptr[0..name_len];
+    const data = data_ptr[0..data_len];
+
+    var ctx = context.Context.init();
+    ctx.emit_raw(name, data);
+}
+
+// ============================================================================
+// Compilation Service (for transpile targets)
+// ============================================================================
+
+/// 编译 AST 到 Yul (用于 EVM 目标)
+/// 返回生成的 Yul 代码长度，-1 表示错误
+export fn titan_compile_to_yul(
+    ast_json_ptr: [*]const u8,
+    ast_json_len: usize,
+    out_ptr: [*]u8,
+    out_max_len: usize,
+) i32 {
+    const ast_json = ast_json_ptr[0..ast_json_len];
+    const out_buf = out_ptr[0..out_max_len];
+
+    const yul_code = @import("arch/evm/yul_codegen.zig").compileFromJson(ast_json) catch return -1;
+    if (yul_code.len > out_max_len) return -2; // buffer too small
+
+    @memcpy(out_buf, yul_code, yul_code.len);
+    return @intCast(yul_code.len);
+}
+
+/// 编译 AST 到 Fift (用于 TON 目标)
+export fn titan_compile_to_fift(
+    ast_json_ptr: [*]const u8,
+    ast_json_len: usize,
+    out_ptr: [*]u8,
+    out_max_len: usize,
+) i32 {
+    const ast_json = ast_json_ptr[0..ast_json_len];
+    const out_buf = out_ptr[0..out_max_len];
+
+    const fift_code = @import("arch/ton/fift_codegen.zig").compileFromJson(ast_json) catch return -1;
+    if (fift_code.len > out_max_len) return -2;
+
+    @memcpy(out_buf, fift_code, fift_code.len);
+    return @intCast(fift_code.len);
+}
+```
+
+### 8.4 titan.h 头文件
+
+```c
+// titan.h - libtitan C ABI Header
+// Generated from Zig exports
+
+#ifndef TITAN_H
+#define TITAN_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+// ============================================================================
+// Memory Management
+// ============================================================================
+
+void* titan_alloc(size_t size);
+void  titan_free(void* ptr);
+void* titan_realloc(void* ptr, size_t old_size, size_t new_size);
+
+// ============================================================================
+// Storage Operations
+// ============================================================================
+
+int titan_storage_read(
+    const uint8_t* key, size_t key_len,
+    uint8_t* buf, size_t buf_len
+);
+
+int titan_storage_write(
+    const uint8_t* key, size_t key_len,
+    const uint8_t* val, size_t val_len
+);
+
+// ============================================================================
+// Context Operations
+// ============================================================================
+
+void     titan_get_sender(uint8_t* out_addr);  // 32 bytes
+uint64_t titan_get_value(void);
+uint64_t titan_get_timestamp(void);
+uint64_t titan_get_block_height(void);
+
+// ============================================================================
+// Actions
+// ============================================================================
+
+int  titan_transfer(const uint8_t* to_addr, uint64_t amount);
+void titan_log(const char* msg, size_t len);
+int  titan_call(
+    const uint8_t* target_addr,
+    const uint8_t* data, size_t data_len,
+    uint8_t* ret_buf, size_t ret_len
+);
+void titan_emit_event(
+    const char* name, size_t name_len,
+    const uint8_t* data, size_t data_len
+);
+
+// ============================================================================
+// Compilation Service (for tooling)
+// ============================================================================
+
+int titan_compile_to_yul(
+    const char* ast_json, size_t ast_len,
+    char* out_buf, size_t out_max_len
+);
+
+int titan_compile_to_fift(
+    const char* ast_json, size_t ast_len,
+    char* out_buf, size_t out_max_len
+);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif // TITAN_H
+```
+
+### 8.5 多语言绑定示例
+
+#### 8.5.1 Swift on Solana (苹果开发者的福音)
+
+```swift
+// TitanSwift/Sources/Titan.swift
+
+import Foundation
+
+public class TitanContext {
+    public static func getSender() -> [UInt8] {
+        var addr = [UInt8](repeating: 0, count: 32)
+        titan_get_sender(&addr)
+        return addr
+    }
+
+    public static func getValue() -> UInt64 {
+        return titan_get_value()
+    }
+
+    public static func transfer(to: [UInt8], amount: UInt64) throws {
+        let result = titan_transfer(to, amount)
+        if result != 0 {
+            throw TitanError.transferFailed
+        }
+    }
+
+    public static func log(_ message: String) {
+        message.withCString { ptr in
+            titan_log(ptr, message.utf8.count)
+        }
+    }
+}
+
+public class TitanStorage {
+    public static func read(key: String) -> Data? {
+        var buffer = [UInt8](repeating: 0, count: 1024)
+        let result = key.withCString { keyPtr in
+            titan_storage_read(keyPtr, key.utf8.count, &buffer, buffer.count)
+        }
+        if result < 0 { return nil }
+        return Data(buffer[0..<Int(result)])
+    }
+
+    public static func write(key: String, value: Data) throws {
+        let result = key.withCString { keyPtr in
+            value.withUnsafeBytes { valPtr in
+                titan_storage_write(keyPtr, key.utf8.count, valPtr, value.count)
+            }
+        }
+        if result != 0 {
+            throw TitanError.writeFailed
+        }
+    }
+}
+
+// 用户合约示例
+@main
+struct MyContract {
+    static func main() {
+        TitanContext.log("Hello from Swift on Solana!")
+
+        let sender = TitanContext.getSender()
+        let balance = TitanStorage.read(key: "balance:\(sender)") ?? Data()
+
+        // 业务逻辑...
+    }
+}
+```
+
+#### 8.5.2 Rust (简化版，绕过 Anchor)
+
+```rust
+// titan-rust/src/lib.rs
+
+use std::ffi::c_void;
+
+extern "C" {
+    fn titan_alloc(size: usize) -> *mut c_void;
+    fn titan_storage_read(key: *const u8, key_len: usize, buf: *mut u8, buf_len: usize) -> i32;
+    fn titan_storage_write(key: *const u8, key_len: usize, val: *const u8, val_len: usize) -> i32;
+    fn titan_get_sender(out: *mut u8);
+    fn titan_transfer(to: *const u8, amount: u64) -> i32;
+    fn titan_log(msg: *const u8, len: usize);
+}
+
+pub struct Context;
+
+impl Context {
+    pub fn sender() -> [u8; 32] {
+        let mut addr = [0u8; 32];
+        unsafe { titan_get_sender(addr.as_mut_ptr()) };
+        addr
+    }
+
+    pub fn transfer(to: &[u8; 32], amount: u64) -> Result<(), &'static str> {
+        let result = unsafe { titan_transfer(to.as_ptr(), amount) };
+        if result == 0 { Ok(()) } else { Err("transfer failed") }
+    }
+
+    pub fn log(msg: &str) {
+        unsafe { titan_log(msg.as_ptr(), msg.len()) };
+    }
+}
+
+pub struct Storage;
+
+impl Storage {
+    pub fn read(key: &str) -> Option<Vec<u8>> {
+        let mut buf = vec![0u8; 1024];
+        let result = unsafe {
+            titan_storage_read(key.as_ptr(), key.len(), buf.as_mut_ptr(), buf.len())
+        };
+        if result < 0 { None } else {
+            buf.truncate(result as usize);
+            Some(buf)
+        }
+    }
+
+    pub fn write(key: &str, value: &[u8]) -> Result<(), &'static str> {
+        let result = unsafe {
+            titan_storage_write(key.as_ptr(), key.len(), value.as_ptr(), value.len())
+        };
+        if result == 0 { Ok(()) } else { Err("write failed") }
+    }
+}
+
+// 用户合约 - 比 Anchor 简洁 10 倍
+#[no_mangle]
+pub extern "C" fn entrypoint() {
+    Context::log("Hello from Rust via libtitan!");
+
+    let sender = Context::sender();
+    let key = format!("balance:{:?}", sender);
+
+    if let Some(balance) = Storage::read(&key) {
+        // 业务逻辑...
+    }
+}
+```
+
+#### 8.5.3 TinyGo on Wasm
+
+```go
+// titan-go/titan.go
+
+package titan
+
+/*
+#include "titan.h"
+*/
+import "C"
+import "unsafe"
+
+func GetSender() [32]byte {
+    var addr [32]byte
+    C.titan_get_sender((*C.uint8_t)(unsafe.Pointer(&addr[0])))
+    return addr
+}
+
+func GetValue() uint64 {
+    return uint64(C.titan_get_value())
+}
+
+func Transfer(to [32]byte, amount uint64) error {
+    result := C.titan_transfer((*C.uint8_t)(unsafe.Pointer(&to[0])), C.uint64_t(amount))
+    if result != 0 {
+        return errors.New("transfer failed")
+    }
+    return nil
+}
+
+func Log(msg string) {
+    cstr := C.CString(msg)
+    defer C.free(unsafe.Pointer(cstr))
+    C.titan_log(cstr, C.size_t(len(msg)))
+}
+
+func StorageRead(key string) ([]byte, error) {
+    buf := make([]byte, 1024)
+    ckey := C.CString(key)
+    defer C.free(unsafe.Pointer(ckey))
+
+    result := C.titan_storage_read(
+        (*C.uint8_t)(unsafe.Pointer(ckey)), C.size_t(len(key)),
+        (*C.uint8_t)(unsafe.Pointer(&buf[0])), C.size_t(len(buf)),
+    )
+    if result < 0 {
+        return nil, errors.New("read failed")
+    }
+    return buf[:result], nil
+}
+
+// 用户合约
+//export entrypoint
+func entrypoint() {
+    titan.Log("Hello from Go via libtitan!")
+
+    sender := titan.GetSender()
+    balance, _ := titan.StorageRead(fmt.Sprintf("balance:%x", sender))
+    // 业务逻辑...
+}
+
+func main() {} // Required for TinyGo
+```
+
+### 8.6 两种路径的适配策略
+
+#### 8.6.1 原生路径 (Solana / Wasm) - Runtime Binding
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              原生路径: 真·多语言混合编译                         │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Swift/Rust/Go 源码                                             │
+│        │                                                        │
+│        ▼                                                        │
+│  编译为 .o (目标文件)                                           │
+│        │                                                        │
+│        │    libtitan.a (Zig 编译)                               │
+│        │         │                                              │
+│        └────┬────┘                                              │
+│             │                                                   │
+│             ▼                                                   │
+│      Linker (链接器)                                            │
+│             │                                                   │
+│             ▼                                                   │
+│   ┌─────────────────┐                                          │
+│   │  .so (Solana)   │  或  .wasm (Near/Cosmos/Stylus)          │
+│   └─────────────────┘                                          │
+│                                                                 │
+│   效果: Swift 调用 Zig，Zig 调用 Solana Syscall                │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 8.6.2 转译路径 (TON / EVM) - Compiler Service
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              转译路径: 编译服务库                                │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  因为 EVM/TON 需要生成源码 (Yul/Fift)，不能直接链接二进制       │
+│                                                                 │
+│  Python/JS 工具                                                 │
+│        │                                                        │
+│        │ 调用 libtitan.dll/so                                   │
+│        │                                                        │
+│        ▼                                                        │
+│  ┌─────────────────────────────────────────┐                   │
+│  │  titan_compile_to_yul(ast_json)         │                   │
+│  │  titan_compile_to_fift(ast_json)        │                   │
+│  └─────────────────────────────────────────┘                   │
+│        │                                                        │
+│        ▼                                                        │
+│  返回生成的 Yul/Fift 源码                                       │
+│        │                                                        │
+│        ▼                                                        │
+│  官方编译器 (solc / fift)                                       │
+│        │                                                        │
+│        ▼                                                        │
+│   .bin (EVM) / .boc (TON)                                       │
+│                                                                 │
+│  场景: IDE 插件、CLI 工具、CI/CD 管道                           │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 8.7 "万国来朝" 生态效应
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    libtitan 生态效应: 万国来朝                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  语言绑定 (Language Bindings):                                              │
+│                                                                             │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐       │
+│  │ titan-swift │  │ titan-rust  │  │ titan-go    │  │ titan-nim   │       │
+│  │             │  │             │  │ (TinyGo)    │  │             │       │
+│  │ iOS 开发者  │  │ Rust 开发者 │  │ Go 开发者   │  │ Nim 开发者  │       │
+│  │ 几百万人    │  │ 几十万人    │  │ 几百万人    │  │ 小众但硬核  │       │
+│  └─────────────┘  └─────────────┘  └─────────────┘  └─────────────┘       │
+│                                                                             │
+│  工具绑定 (Tool Bindings):                                                  │
+│                                                                             │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐                         │
+│  │ Python CLI  │  │ VS Code     │  │ GitHub      │                         │
+│  │ titan-cli   │  │ Extension   │  │ Actions     │                         │
+│  │             │  │             │  │             │                         │
+│  │ 调用        │  │ 调用        │  │ 调用        │                         │
+│  │ libtitan    │  │ libtitan    │  │ libtitan    │                         │
+│  └─────────────┘  └─────────────┘  └─────────────┘                         │
+│                                                                             │
+│  战略价值:                                                                  │
+│                                                                             │
+│  1. 网络效应: 社区自发创建各语言绑定                                       │
+│  2. 技术护城河: 所有语言最终依赖 Zig 核心                                  │
+│  3. 生态锁定: 一旦用了 libtitan，切换成本极高                              │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 8.8 实现路线图
+
+| 阶段 | 任务 | 优先级 |
+| :--- | :--- | :---: |
+| **Phase 1** | Zig 核心完成 (Storage, Context, Router) | P0 |
+| **Phase 2** | 导出 C ABI (`export fn`) | P0 |
+| **Phase 3** | 生成 `titan.h` 头文件 | P0 |
+| **Phase 4** | 编译为 `libtitan.a` 静态库 | P1 |
+| **Phase 5** | 验证: C 程序调用 libtitan | P1 |
+| **Phase 6** | 验证: Rust FFI 调用 libtitan | P1 |
+| **Phase 7** | titan-swift SDK 原型 | P2 |
+| **Phase 8** | titan-go (TinyGo) SDK 原型 | P2 |
+
+### 8.9 小结
 
 ```
 ┌───────────────────────────────────────────────────────────────────────────┐
-│                      Pure Zig 架构价值主张                                 │
+│                      libtitan 战略价值                                     │
 ├───────────────────────────────────────────────────────────────────────────┤
 │                                                                           │
-│  对于开发者:                                                              │
+│  之前: 你做了一个好用的锄头 (Zig Framework)                               │
+│  现在: 你做了一个通用的 "农具手柄" (libtitan)                             │
+│       别人可以在上面装锄头、镰刀、铲子                                    │
+│                                                                           │
+│  定位升级:                                                                │
+│  • 开发框架 → 通用运行时引擎                                              │
+│  • 单一语言 → 万语言支持                                                  │
+│  • 工具 → 基础设施                                                        │
+│                                                                           │
+│  技术可行性: ✅ Zig 对 C ABI 的支持是所有语言中最好的                     │
+│  商业可行性: ✅ 极大扩展目标用户群 (Swift/Go/Rust 开发者)                 │
+│  生态可行性: ✅ 社区可自发创建语言绑定，降低维护成本                       │
+│                                                                           │
+└───────────────────────────────────────────────────────────────────────────┘
+```
+
+## 9. 结论
+
+**一句话总结**:
+
+> **Titan Framework = Zig comptime 多态 + 统一抽象层 + C ABI 万语言支持**
+>
+> **"Web3 时代的 LLVM" - 一个可以编译任何语言到任何链的通用运行时引擎**
+
+```
+┌───────────────────────────────────────────────────────────────────────────┐
+│                   Titan Framework 完整价值主张                             │
+├───────────────────────────────────────────────────────────────────────────┤
+│                                                                           │
+│  对于 Zig 开发者:                                                         │
 │  • 只学一种语言，部署到所有链                                            │
-│  • Zig 的 C 风格语法，学习曲线平缓                                       │
 │  • comptime 魔法自动处理跨链差异                                         │
+│  • 真正的 "Write Once, Compile Anywhere"                                 │
+│                                                                           │
+│  对于其他语言开发者 (libtitan):                                           │
+│  • Swift/Rust/Go 开发者可直接使用                                        │
+│  • C ABI 绑定，零学习成本                                                │
+│  • 享受 Zig 核心的性能和安全                                             │
 │                                                                           │
 │  对于项目方:                                                              │
 │  • 工程复杂度最低                                                        │
@@ -1084,11 +1803,17 @@ pub fn StateValue(comptime T: type) type {
 │  • 性能最优 (零运行时开销)                                               │
 │                                                                           │
 │  对于生态:                                                                │
-│  • Zig 成为 Web3 的"通用汇编语言"                                        │
-│  • 统一的开发范式和工具链                                                │
-│  • 真正的 "Write Once, Compile Anywhere"                                 │
+│  • libtitan 成为 Web3 的 "LLVM"                                          │
+│  • 万语言支持，万国来朝                                                  │
+│  • 社区自发创建语言绑定                                                  │
 │                                                                           │
 └───────────────────────────────────────────────────────────────────────────┘
 ```
 
-**行动指南**: 设计 `Titan SDK` 时，牢记**"多态 (Polymorphism)"**。每一个 API (`save`, `load`, `transfer`, `emit`) 都要在内部通过 `comptime switch (target)` 实现多种逻辑。
+**行动指南**:
+
+1. **Zig 核心**: 设计 `Titan SDK` 时，牢记**"多态 (Polymorphism)"**。每一个 API 都通过 `comptime switch (target)` 实现多种逻辑。
+
+2. **C ABI 导出**: 完成 Zig 核心后，立即用 `export fn` 导出 C 接口，生成 `titan.h` 和 `libtitan.a`。
+
+3. **验证路径**: 先用 C 程序调用 libtitan，验证 ABI 正确性；再用 Rust FFI 验证；最后开放社区创建更多语言绑定。

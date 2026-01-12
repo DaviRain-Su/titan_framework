@@ -99,7 +99,29 @@ Zig comptime 元编程引擎
 - [ ] 跨链通信协议 (Titan IBC)
 - [ ] Titan Cloud 托管平台
 
-### 3.4 可选插件: Roc 集成 (非必须)
+### 3.4 libtitan: 通用运行时引擎 (核心战略)
+
+> **核弹级升级**: 将 Titan 从"开发框架"升级为"通用区块链运行时引擎"
+
+**核心思想**: 导出 C ABI 接口，让任何能调用 C 的语言都可以使用 Titan 开发合约。
+
+- [ ] C ABI 导出 (`export fn titan_*`)
+- [ ] 生成 `titan.h` 头文件
+- [ ] 编译为 `libtitan.a` 静态库
+- [ ] 验证: C 程序调用 libtitan
+- [ ] 验证: Rust FFI 调用 libtitan
+- [ ] titan-swift SDK 原型
+- [ ] titan-rust SDK (简化版)
+- [ ] titan-go (TinyGo) SDK 原型
+
+**战略价值**:
+- 万语言支持: Swift/Rust/Go/Nim 开发者可直接使用
+- 网络效应: 社区自发创建语言绑定
+- 技术护城河: 所有语言最终依赖 Zig 核心
+
+详见: [D-015 Section 8: libtitan](docs/design/015_pure_zig_metaprogramming.md#8-libtitan-通用区块链运行时引擎-universal-runtime)
+
+### 3.5 可选插件: Roc 集成 (非必须)
 
 > **注意**: Roc 作为可选的函数式入口，仅在社区有强烈需求时评估实现
 
@@ -110,7 +132,7 @@ Zig comptime 元编程引擎
 
 详见: [D-014 Roc Platform Interface](docs/design/014_roc_platform_interface.md) (Future Plugin)
 
-### 3.5 里程碑
+### 3.6 里程碑
 - **M3.1**: 支持 10+ 链的编译后端
 - **M3.2**: 50+ 活跃项目使用 Titan
 - **M3.3**: 行业标准地位确立
@@ -124,9 +146,11 @@ Zig comptime 元编程引擎
 | **1** | Pure Zig comptime 核心抽象 | P0 | Storage(T), Context, Router |
 | **1.5** | Solana, Wasm (Near/Cosmos/Polkadot) | P0 | LLVM 主场，验证核心价值 |
 | **2** | EVM Native (Yul), BTC L2 | P0 | EVM 覆盖 + BTC 流动性 |
-| **2.5** | ZK (Noir), BTC L1 (Miniscript) | P1 | 隐私 + BTC 原生 |
-| **3** | TON (Fift), Stacks (Clarity) | P2 | 特殊架构，专门团队 |
-| **4** | Roc Plugin (可选) | P3 | 函数式入口，非必须 |
+| **2.5** | **libtitan C ABI** | P1 | 万语言支持，核弹级升级 |
+| **3** | ZK (Noir), BTC L1 (Miniscript) | P1 | 隐私 + BTC 原生 |
+| **3.5** | TON (Fift), Stacks (Clarity) | P2 | 特殊架构，专门团队 |
+| **4** | 语言绑定 (Swift/Rust/Go) | P2 | 社区驱动 |
+| **5** | Roc Plugin (可选) | P3 | 函数式入口，非必须 |
 
 ---
 
@@ -143,10 +167,16 @@ Zig comptime 元编程引擎
 
 ## 历史记录
 
+- **2026-01-12**: **新增 libtitan C ABI 战略** (D-015 Section 8)
+  - 核弹级升级: 从"开发框架"升级为"通用区块链运行时引擎"
+  - C ABI 导出: `export fn titan_*` 接口
+  - 万语言支持: Swift/Rust/Go/Nim 等可直接调用
 - **2026-01-12**: **战略转向 Pure Zig 元编程** (D-015)，Roc 降级为可选插件
   - 核心洞察: Zig comptime 足够强大，可直接作为 DSL
   - 三大抽象: Storage(T), Context, Router
   - Roc 从"必须"变为"可选"
+- **2026-01-12**: 新增 Sovereign SDK 对比分析 (D-015 Section 7)
+  - 混合架构: Linux 骨架 + Sovereign 容器
 - **2026-01-12**: 确立 Roc + Zig 双层输入架构 (已被 Pure Zig 策略取代)
 - **2026-01-12**: 完成 ZK (Noir) 集成设计 (D-009)
 - **2026-01-11**: 完成 Bitcoin 生态适配设计 (023)
