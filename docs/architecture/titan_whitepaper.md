@@ -401,6 +401,744 @@ pub fn storage_write(key: []const u8, val: []const u8) void {
 | **架构覆盖** | 7 种 | RISC-V, SBF, Wasm, EVM, TVM, UTXO, DAG |
 | **主流链数量** | 25+ | 覆盖所有 Top 50 可编程公链 |
 
+### 编译时虚拟化：四大核心机制 (Compile-Time Virtualization)
+
+这是 Titan OS 最深刻的技术灵魂。
+
+**Linux 内核通过"运行时虚拟化"欺骗了应用程序：**
+- 进程调度 (Process Scheduling) 让每个程序以为自己独占 CPU
+- 虚拟内存 (Virtual Memory) 让每个程序以为自己有 4GB 内存
+
+**Titan OS 通过"编译时虚拟化"欺骗了智能合约：**
+- 我们不在链上跑虚拟机（太慢太贵）
+- 而是在编译阶段，通过 Zig 的 `comptime` 元编程，将异构区块链特性虚拟化为统一接口
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Linux 运行时虚拟化 vs Titan 编译时虚拟化                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Linux 运行时虚拟化:                                                        │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │                                                                       │ │
+│  │    物理资源              运行时调度             应用程序视角           │ │
+│  │    ─────────────────────────────────────────────────────────────────  │ │
+│  │                                                                       │ │
+│  │    1 个 CPU    ──────►   时间片轮转    ──────►  "我独占 CPU"          │ │
+│  │    8GB 内存    ──────►   MMU 映射      ──────►  "我有 4GB"            │ │
+│  │    1 块硬盘    ──────►   VFS 抽象      ──────►  "我有完整文件系统"     │ │
+│  │                                                                       │ │
+│  │    代价: 运行时开销 (Context Switch, Page Fault)                      │ │
+│  │                                                                       │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+│  Titan 编译时虚拟化:                                                        │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │                                                                       │ │
+│  │    异构区块链           编译时展开             合约代码视角           │ │
+│  │    ─────────────────────────────────────────────────────────────────  │ │
+│  │                                                                       │ │
+│  │    7 种 VM     ──────►   comptime 分发  ──────►  "统一 API"           │ │
+│  │    不同存储    ──────►   VSS 映射       ──────►  "统一 State"         │ │
+│  │    跨链隔离    ──────►   TICP 抽象      ──────►  "统一网络栈"         │ │
+│  │                                                                       │ │
+│  │    代价: 零！(编译时已展开为原生代码)                                 │ │
+│  │                                                                       │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+│  核心差异:                                                                   │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │                                                                       │ │
+│  │  Linux: 运行时动态分发 (Dynamic Dispatch)                             │ │
+│  │         if (is_process_A) switch_to(A);                               │ │
+│  │         每次调用有开销                                                 │ │
+│  │                                                                       │ │
+│  │  Titan: 编译时静态分发 (Static Dispatch)                              │ │
+│  │         comptime { generate_native_code_for_target() }                │ │
+│  │         运行时零开销，因为代码已经是目标链原生代码                     │ │
+│  │                                                                       │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 机制一：虚拟指令集 (Virtual ISA) —— 对标 Linux CPU 虚拟化
+
+**Linux 问题：** 一个 CPU 如何运行 4 个程序？答案是时间片轮转。
+**Titan 问题：** 一份代码如何运行在 7 种 VM 上？答案是编译时静态多态。
+
+```zig
+// ============================================================================
+// Titan 虚拟指令集实现
+// ============================================================================
+
+const std = @import("std");
+const target = @import("builtin").target;
+
+/// Titan 虚拟转账指令
+/// 对用户来说，只有一个 API；对链来说，看到的是原生代码
+pub fn sys_transfer(to: Address, amount: u64) void {
+    // 编译时分发：根据目标平台生成不同的原生代码
+    if (comptime target.os.tag == .solana) {
+        // Solana: 生成 CPI 调用
+        // 这段代码在 EVM 编译时根本不存在于输出中
+        const transfer_ix = sol_system.transfer_instruction(
+            @ptrCast(context.program_id),
+            @ptrCast(to.bytes),
+            amount,
+        );
+        sol_cpi.invoke(&transfer_ix, context.accounts);
+
+    } else if (comptime target.os.tag == .evm) {
+        // EVM: 生成内联 Yul 汇编
+        // 这段代码在 Solana 编译时根本不存在于输出中
+        asm volatile (
+            \\call(gas(), %[to], %[amount], 0, 0, 0, 0)
+            :
+            : [to] "r" (to.as_u256()),
+              [amount] "r" (amount)
+        );
+
+    } else if (comptime target.os.tag == .bitcoin) {
+        // Bitcoin: 生成 UTXO 脚本
+        // 这是一个输出脚本，不是"调用"
+        script_builder.emit(.OP_DUP);
+        script_builder.emit(.OP_HASH160);
+        script_builder.emit_push(to.pubkey_hash);
+        script_builder.emit(.OP_EQUALVERIFY);
+        script_builder.emit(.OP_CHECKSIG);
+
+    } else if (comptime target.os.tag == .ton) {
+        // TON: 生成内部消息
+        const msg = ton_message.internal(
+            .{ .dest = to, .value = amount, .bounce = true }
+        );
+        ton_send_raw_message(msg, 64); // mode: pay fee separately
+    }
+}
+
+/// 虚拟存储读取
+pub fn sys_storage_read(slot: u256) u256 {
+    if (comptime target.os.tag == .solana) {
+        // Solana: 直接指针运算读取 Account Data
+        const account = context.get_account(context.program_id);
+        const offset = @intCast(usize, slot) * 32;
+        return std.mem.readIntBig(u256, account.data[offset..][0..32]);
+
+    } else if (comptime target.os.tag == .evm) {
+        // EVM: 生成 SLOAD 指令
+        var result: u256 = undefined;
+        asm volatile (
+            \\sload %[slot]
+            : [result] "=r" (result)
+            : [slot] "r" (slot)
+        );
+        return result;
+
+    } else if (comptime target.os.tag == .ton) {
+        // TON: 从 Cell 树中读取
+        const dict = context.get_storage_dict();
+        return dict.get_u256(slot) orelse 0;
+    }
+}
+```
+
+**技术关键点：**
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    虚拟指令集的魔法                                           │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  用户代码:                                                                   │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │  titan.transfer(to, 100);  // 就这一行                                │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+│                          ┌───────────────┐                                  │
+│                          │ Zig Compiler  │                                  │
+│                          │   comptime    │                                  │
+│                          └───────┬───────┘                                  │
+│                                  │                                          │
+│           ┌──────────────────────┼──────────────────────┐                  │
+│           │                      │                      │                   │
+│           ▼                      ▼                      ▼                   │
+│  ┌─────────────────┐   ┌─────────────────┐   ┌─────────────────┐           │
+│  │  Solana 输出    │   │   EVM 输出      │   │  Bitcoin 输出   │           │
+│  │                 │   │                 │   │                 │           │
+│  │  invoke(        │   │  PUSH 100       │   │  OP_DUP         │           │
+│  │    transfer_ix, │   │  PUSH to        │   │  OP_HASH160     │           │
+│  │    accounts     │   │  CALL           │   │  PUSH <hash>    │           │
+│  │  )              │   │                 │   │  OP_EQUALVERIFY │           │
+│  └─────────────────┘   └─────────────────┘   └─────────────────┘           │
+│                                                                             │
+│  关键: 目标链看到的是 100% 原生代码，完全不知道 Titan 的存在               │
+│        这就是"编译时虚拟化" —— 虚拟化发生在编译器里，不是运行时             │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 机制二：虚拟存储系统 VSS —— 对标 Linux VFS
+
+**Linux 问题：** ext4、NTFS、FAT32 完全不同，如何让用户看到统一的文件树？答案是 VFS。
+**Titan 问题：** EVM (KV Trie)、Solana (Byte Array)、UTXO (无状态) 完全不同，如何统一？答案是 VSS。
+
+```zig
+// ============================================================================
+// Titan VSS (Virtual Storage System) - 虚拟存储系统
+// ============================================================================
+
+/// 统一的状态对象
+/// 无论底层是什么存储模型，用户都看到同样的接口
+pub fn State(comptime T: type) type {
+    return struct {
+        const Self = @This();
+
+        /// 读取状态
+        pub fn load(slot: u256) T {
+            const raw = sys_storage_read(slot);
+            return @bitCast(T, raw);
+        }
+
+        /// 写入状态
+        pub fn store(slot: u256, value: T) void {
+            const raw = @bitCast(u256, value);
+            sys_storage_write(slot, raw);
+        }
+    };
+}
+
+/// 统一的 Map 抽象
+pub fn StorageMap(comptime K: type, comptime V: type) type {
+    return struct {
+        const Self = @This();
+        base_slot: u256,
+
+        pub fn get(self: *Self, key: K) V {
+            // 计算存储位置：hash(key, base_slot)
+            const slot = compute_slot(key, self.base_slot);
+            return State(V).load(slot);
+        }
+
+        pub fn set(self: *Self, key: K, value: V) void {
+            const slot = compute_slot(key, self.base_slot);
+            State(V).store(slot, value);
+        }
+
+        fn compute_slot(key: K, base: u256) u256 {
+            if (comptime target.os.tag == .evm) {
+                // EVM: Solidity 风格的存储布局
+                // slot = keccak256(key . base_slot)
+                var hasher = std.crypto.Keccak256.init(.{});
+                hasher.update(std.mem.asBytes(&key));
+                hasher.update(std.mem.asBytes(&base));
+                return @bitCast(u256, hasher.final());
+
+            } else if (comptime target.os.tag == .solana) {
+                // Solana: 线性偏移量
+                // Account Data 是连续字节数组
+                const key_hash = std.hash.Wyhash.hash(0, std.mem.asBytes(&key));
+                return base + (key_hash % 1000000);  // 简化示例
+
+            } else if (comptime target.os.tag == .ton) {
+                // TON: Dictionary 索引
+                // Cell 树结构，用 key 作为 dict key
+                return @bitCast(u256, key);
+            }
+            return 0;
+        }
+    };
+}
+
+/// 实际使用示例
+pub const TokenContract = struct {
+    // 用户只需要声明，不需要知道底层存储模型
+    balances: StorageMap(Address, u256),
+    allowances: StorageMap(AddressPair, u256),
+    total_supply: State(u256),
+
+    pub fn transfer(self: *TokenContract, to: Address, amount: u256) !void {
+        const sender = msg.sender();
+        const sender_balance = self.balances.get(sender);
+
+        if (sender_balance < amount) return error.InsufficientBalance;
+
+        // 这些操作在不同链上会生成完全不同的底层代码
+        // 但用户代码完全一样
+        self.balances.set(sender, sender_balance - amount);
+        self.balances.set(to, self.balances.get(to) + amount);
+    }
+};
+```
+
+**存储模型映射：**
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    VSS 如何统一异构存储                                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  用户视角 (统一的):                                                          │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │  balances.get(alice)    // 读取 Alice 余额                            │ │
+│  │  balances.set(bob, 100) // 设置 Bob 余额                              │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+│  底层实现 (完全不同):                                                        │
+│                                                                             │
+│  EVM (Patricia Merkle Trie):                                                │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │  slot = keccak256(alice_addr ++ base_slot)                            │ │
+│  │  SLOAD(slot) → 返回值                                                 │ │
+│  │                                                                       │ │
+│  │  存储结构:                                                            │ │
+│  │  ┌────────────────────────────────────────────────────────┐          │ │
+│  │  │ Slot 0x3a7b...  →  100 (Alice 余额)                    │          │ │
+│  │  │ Slot 0x8c2f...  →  200 (Bob 余额)                      │          │ │
+│  │  └────────────────────────────────────────────────────────┘          │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+│  Solana (Account Data - Byte Array):                                        │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │  offset = hash(alice_pubkey) % account_size                           │ │
+│  │  直接指针运算读取: account_data[offset..offset+32]                    │ │
+│  │                                                                       │ │
+│  │  存储结构:                                                            │ │
+│  │  ┌────────────────────────────────────────────────────────┐          │ │
+│  │  │ Account Data: [header][alice:100][bob:200][...]        │          │ │
+│  │  │               ^offset1   ^offset2                      │          │ │
+│  │  └────────────────────────────────────────────────────────┘          │ │
+│  │                                                                       │ │
+│  │  优势: 零拷贝，直接内存访问，极致性能                                 │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+│  TON (Cell Tree / Dictionary):                                              │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │  dict.get(alice_addr) → Cell → 解析值                                 │ │
+│  │                                                                       │ │
+│  │  存储结构:                                                            │ │
+│  │  ┌────────────────────────────────────────────────────────┐          │ │
+│  │  │ Root Cell                                              │          │ │
+│  │  │ ├── Dict Cell (balances)                               │          │ │
+│  │  │ │   ├── Key: alice → Value Cell: 100                  │          │ │
+│  │  │ │   └── Key: bob   → Value Cell: 200                  │          │ │
+│  │  │ └── Other data...                                      │          │ │
+│  │  └────────────────────────────────────────────────────────┘          │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+│  UTXO (Bitcoin - 无状态):                                                   │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │  Bitcoin 没有"状态"，只有 UTXO                                        │ │
+│  │                                                                       │ │
+│  │  Titan 解决方案:                                                      │ │
+│  │  • 编译时检查：如果代码需要状态，拒绝编译到 Bitcoin                   │ │
+│  │  • 或映射为 OP_RETURN 元数据链                                        │ │
+│  │  • 或使用 Ordinals/BRC-20 协议                                        │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 机制三：虚拟并发模型 —— 对标 Linux 进程调度
+
+**Linux 问题：** 一个 CPU 如何同时跑 4 个程序？答案是时间片轮转 + 上下文切换。
+**Titan 问题：** EVM 是串行的，Solana 是并行的，如何统一？答案是 Actor 模型。
+
+```zig
+// ============================================================================
+// Titan 虚拟并发模型 - Actor 抽象
+// ============================================================================
+
+/// Titan 强制采用 Actor 模型
+/// 每个合约都是独立的 Actor，通过消息传递通信
+pub const Actor = struct {
+    const Self = @This();
+
+    /// 处理消息（跨合约调用）
+    pub fn handle_message(self: *Self, msg: Message) !Response {
+        // 用户只需要实现消息处理逻辑
+        // Titan 负责在不同链上正确调度
+        return self.dispatch(msg);
+    }
+
+    /// 发送消息给其他 Actor
+    pub fn send(self: *Self, target: Address, msg: Message) !void {
+        if (comptime target.os.tag == .solana) {
+            // Solana: 真正的并行执行
+            // Sealevel 运行时会自动并行调度不冲突的 Actor
+            const ix = build_cpi_instruction(target, msg);
+
+            // 关键：声明账户读写权限，让运行时知道如何并行
+            const account_metas = [_]AccountMeta{
+                .{ .pubkey = target, .is_writable = true, .is_signer = false },
+                // ... 其他账户
+            };
+
+            try sol_cpi.invoke(&ix, &account_metas);
+
+        } else if (comptime target.os.tag == .evm) {
+            // EVM: 串行执行，但逻辑上仍是 Actor 模型
+            // 编译器将 Actor 调用"降维"为普通函数调用
+            const success = external_call(target, msg.encode());
+            if (!success) return error.CallFailed;
+
+        } else if (comptime target.os.tag == .ton) {
+            // TON: 原生 Actor 模型！
+            // TON 本身就是 Actor 架构，完美匹配
+            const internal_msg = ton_message.internal(.{
+                .dest = target,
+                .value = msg.value,
+                .body = msg.encode(),
+                .bounce = true,
+            });
+            ton_send_raw_message(internal_msg, 64);
+        }
+    }
+};
+
+/// 并行处理示例
+pub const BatchProcessor = struct {
+    pub fn process_batch(items: []Item) !void {
+        if (comptime target.os.tag == .solana) {
+            // Solana: 可以真正并行处理
+            // 每个 item 处理不冲突的账户
+            for (items) |item| {
+                // 这些调用可能并行执行
+                try process_item(item);
+            }
+
+        } else if (comptime target.os.tag == .evm) {
+            // EVM: 串行处理，但保持相同的语义
+            for (items) |item| {
+                try process_item(item);
+            }
+        }
+    }
+};
+```
+
+**并发模型映射：**
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    不同链的并发模型                                           │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Titan 用户代码 (统一的 Actor 模型):                                        │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │  actor.send(other_contract, message);                                 │ │
+│  │  // 用户不需要知道底层是并行还是串行                                  │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+│  EVM (串行执行):                                                             │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │                                                                       │ │
+│  │  ┌─────┐  ┌─────┐  ┌─────┐  ┌─────┐                                 │ │
+│  │  │ Tx1 │→│ Tx2 │→│ Tx3 │→│ Tx4 │  (串行队列)                       │ │
+│  │  └─────┘  └─────┘  └─────┘  └─────┘                                 │ │
+│  │                                                                       │ │
+│  │  Titan 策略: 编译为普通 CALL 指令，保持 Actor 语义                    │ │
+│  │                                                                       │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+│  Solana Sealevel (并行执行):                                                │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │                                                                       │ │
+│  │  ┌─────┐     ┌─────┐                                                 │ │
+│  │  │ Tx1 │     │ Tx2 │   (不冲突的交易并行)                            │ │
+│  │  └─────┘     └─────┘                                                 │ │
+│  │      │           │                                                    │ │
+│  │      ▼           ▼                                                    │ │
+│  │  ┌───────────────────┐                                               │ │
+│  │  │   Sealevel 调度器  │                                               │ │
+│  │  │   (检测账户冲突)   │                                               │ │
+│  │  └───────────────────┘                                               │ │
+│  │                                                                       │ │
+│  │  Titan 策略: 生成正确的 account_metas，让运行时知道如何并行           │ │
+│  │                                                                       │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+│  TON (原生 Actor 模型):                                                     │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │                                                                       │ │
+│  │  ┌─────────┐    消息     ┌─────────┐                                 │ │
+│  │  │ Actor A │ ──────────→ │ Actor B │                                 │ │
+│  │  └─────────┘             └─────────┘                                 │ │
+│  │       ↑                       │                                       │ │
+│  │       └───────── 响应 ────────┘                                       │ │
+│  │                                                                       │ │
+│  │  Titan 策略: 完美匹配！直接映射为 TON 内部消息                        │ │
+│  │                                                                       │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+│  Solver Network (真正的并行):                                                │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │                                                                       │ │
+│  │  这里实现了"一个处理器跑 4 个程序"的隐喻：                            │ │
+│  │                                                                       │ │
+│  │  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐                 │ │
+│  │  │ Solver1 │  │ Solver2 │  │ Solver3 │  │ Solver4 │                 │ │
+│  │  │ Intent1 │  │ Intent2 │  │ Intent3 │  │ Intent4 │                 │ │
+│  │  └────┬────┘  └────┬────┘  └────┬────┘  └────┬────┘                 │ │
+│  │       │            │            │            │                        │ │
+│  │       └────────────┴────────────┴────────────┘                        │ │
+│  │                        │                                              │ │
+│  │                        ▼                                              │ │
+│  │              ┌─────────────────┐                                     │ │
+│  │              │   链上结算       │                                     │ │
+│  │              │ (串行验证)      │                                     │ │
+│  │              └─────────────────┘                                     │ │
+│  │                                                                       │ │
+│  │  计算负载从"链上 CPU"卸载到"链下 Solver CPU"                         │ │
+│  │                                                                       │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 机制四：虚拟 I/O 层 TICP —— 对标 Linux 网络栈
+
+**Linux 问题：** 不同网卡、不同协议如何统一？答案是 Socket 抽象。
+**Titan 问题：** 跨链调用如何统一？答案是 TICP (中断向量表隐喻)。
+
+```zig
+// ============================================================================
+// Titan TICP - 虚拟跨链 I/O
+// ============================================================================
+
+/// 跨链传送 - 就像 Linux 的 send() 系统调用
+pub fn teleport(args: TeleportArgs) !TeleportResult {
+    // 1. 检查源链余额
+    const balance = sys_balance(args.token);
+    if (balance < args.amount) return error.InsufficientBalance;
+
+    // 2. 锁定源链资产
+    try sys_lock(args.token, args.amount);
+
+    // 3. 触发跨链"软中断"
+    if (comptime is_onchain()) {
+        // 链上：发出事件，等待 Solver 捕获
+        emit_event(.{
+            .event_type = .teleport_request,
+            .token = args.token,
+            .amount = args.amount,
+            .from_chain = current_chain(),
+            .to_chain = args.to_chain,
+            .recipient = args.recipient,
+            .nonce = generate_nonce(),
+        });
+
+        // 返回 pending 状态
+        return TeleportResult{ .status = .pending, .tx_hash = null };
+
+    } else {
+        // 链下 (Solver 视角)：执行实际跨链
+        // 这部分代码只在 Solver 节点运行
+        return execute_cross_chain_transfer(args);
+    }
+}
+
+/// 中断向量表 - 跨链事件处理
+pub const InterruptVectorTable = struct {
+    /// 处理跨链"中断"
+    pub fn handle_interrupt(interrupt: Interrupt) !void {
+        switch (interrupt.type) {
+            .teleport_request => {
+                // Solver 捕获到跨链请求
+                // 1. 验证源链锁定
+                // 2. 在目标链释放/铸造
+                // 3. 提交证明
+            },
+            .message_received => {
+                // 收到跨链消息
+                // 解码并分发给目标合约
+            },
+            .timeout => {
+                // 超时处理
+                // 解锁源链资产
+            },
+        }
+    }
+};
+
+/// 跨链消息传递 - 就像 IPC
+pub fn cross_chain_call(
+    target_chain: Chain,
+    target_contract: Address,
+    calldata: []const u8,
+) ![]const u8 {
+    // 构建跨链消息
+    const msg = CrossChainMessage{
+        .source_chain = current_chain(),
+        .target_chain = target_chain,
+        .target_contract = target_contract,
+        .calldata = calldata,
+        .gas_limit = 200_000,
+        .callback = @ptrToInt(&handle_response),
+    };
+
+    // 发送"网络包"
+    try ticp_send(msg);
+
+    // 异步等待响应（通过回调）
+    return &[_]u8{}; // 实际响应通过回调返回
+}
+```
+
+**跨链 I/O 架构：**
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    TICP 跨链 I/O 架构                                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Linux 网络栈类比:                                                           │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │                                                                       │ │
+│  │  应用程序                                                             │ │
+│  │      │                                                                │ │
+│  │      ▼                                                                │ │
+│  │  ┌────────┐                                                          │ │
+│  │  │ Socket │  ← 统一接口 (send/recv)                                  │ │
+│  │  └────┬───┘                                                          │ │
+│  │       │                                                               │ │
+│  │       ▼                                                               │ │
+│  │  ┌─────────────────────────────────────────────────────────────────┐ │ │
+│  │  │              Network Stack (TCP/IP)                             │ │ │
+│  │  │  传输层 → 网络层 → 链路层 → 物理层                               │ │ │
+│  │  └─────────────────────────────────────────────────────────────────┘ │ │
+│  │       │                                                               │ │
+│  │       ▼                                                               │ │
+│  │  ┌────────┐  ┌────────┐  ┌────────┐                                 │ │
+│  │  │ eth0   │  │ wlan0  │  │ lo     │  ← 不同网卡                     │ │
+│  │  └────────┘  └────────┘  └────────┘                                 │ │
+│  │                                                                       │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+│  Titan TICP:                                                                │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │                                                                       │ │
+│  │  智能合约                                                             │ │
+│  │      │                                                                │ │
+│  │      ▼                                                                │ │
+│  │  ┌────────────────┐                                                  │ │
+│  │  │ titan.teleport │  ← 统一跨链接口                                  │ │
+│  │  └────────┬───────┘                                                  │ │
+│  │           │                                                           │ │
+│  │           ▼                                                           │ │
+│  │  ┌─────────────────────────────────────────────────────────────────┐ │ │
+│  │  │              TICP Stack (Titan Inter-Chain Protocol)            │ │ │
+│  │  │                                                                 │ │ │
+│  │  │  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐         │ │ │
+│  │  │  │ 消息编码    │ →  │ 路由选择    │ →  │ 桥接适配    │         │ │ │
+│  │  │  │ (序列化)    │    │ (最优路径)  │    │ (底层桥)    │         │ │ │
+│  │  │  └─────────────┘    └─────────────┘    └─────────────┘         │ │ │
+│  │  │                                                                 │ │ │
+│  │  └─────────────────────────────────────────────────────────────────┘ │ │
+│  │           │                                                           │ │
+│  │           ▼                                                           │ │
+│  │  ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌────────────┐     │ │
+│  │  │ Wormhole   │  │ LayerZero  │  │ Axelar     │  │ Native     │     │ │
+│  │  │ Driver     │  │ Driver     │  │ Driver     │  │ IBC        │     │ │
+│  │  └────────────┘  └────────────┘  └────────────┘  └────────────┘     │ │
+│  │       │                │                │                │           │ │
+│  │       ▼                ▼                ▼                ▼           │ │
+│  │  ┌────────┐      ┌────────┐      ┌────────┐      ┌────────┐        │ │
+│  │  │ Solana │      │  EVM   │      │  TON   │      │ Cosmos │        │ │
+│  │  └────────┘      └────────┘      └────────┘      └────────┘        │ │
+│  │                                                                       │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+│  中断处理流程:                                                               │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │                                                                       │ │
+│  │  1. 合约调用 titan.teleport()                                         │ │
+│  │                    │                                                  │ │
+│  │                    ▼                                                  │ │
+│  │  2. 触发"软中断" (发出 Event/Log)                                     │ │
+│  │                    │                                                  │ │
+│  │                    ▼                                                  │ │
+│  │  3. Solver Network 捕获中断 (监听事件)                                │ │
+│  │                    │                                                  │ │
+│  │                    ▼                                                  │ │
+│  │  4. "上下文切换": Solver 在目标链恢复执行                             │ │
+│  │                    │                                                  │ │
+│  │                    ▼                                                  │ │
+│  │  5. 完成跨链操作，返回结果                                            │ │
+│  │                                                                       │ │
+│  │  这就像 Linux 处理网络包：                                            │ │
+│  │  网卡中断 → 内核处理 → 协议栈 → 应用程序                              │ │
+│  │                                                                       │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 虚拟化层级完整对照表
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Linux vs Titan 虚拟化完整对照                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Linux 组件          │ Titan OS 组件       │ 技术实现原理                   │
+│  ════════════════════╪═════════════════════╪══════════════════════════════  │
+│                      │                     │                                │
+│  ISA (x86/ARM/RISC-V)│ Blockchain Bytecode │ 底层"硬件"指令集               │
+│                      │ (EVM/SBF/Wasm/TVM)  │ (由各链定义)                   │
+│                      │                     │                                │
+│  ──────────────────────────────────────────────────────────────────────────│
+│                      │                     │                                │
+│  HAL                 │ Zig comptime        │ 编译时针对不同 Target          │
+│  (硬件抽象层)         │ Backend             │ 生成原生指令                   │
+│                      │                     │                                │
+│  ──────────────────────────────────────────────────────────────────────────│
+│                      │                     │                                │
+│  MMU                 │ Titan VSS           │ 将 KV/Offset/UTXO/Cell         │
+│  (内存管理单元)       │ (虚拟存储系统)       │ 统一抽象为 State Object        │
+│                      │                     │                                │
+│  ──────────────────────────────────────────────────────────────────────────│
+│                      │                     │                                │
+│  Scheduler           │ Actor Model +       │ 链上 Actor 语义 +              │
+│  (进程调度器)         │ Solver Network      │ 链下并行计算                   │
+│                      │                     │                                │
+│  ──────────────────────────────────────────────────────────────────────────│
+│                      │                     │                                │
+│  Network Stack       │ TICP                │ 中断向量表模式                 │
+│  (TCP/IP 协议栈)      │ (跨链协议)          │ Event → Solver → Resume        │
+│                      │                     │                                │
+│  ──────────────────────────────────────────────────────────────────────────│
+│                      │                     │                                │
+│  VFS                 │ Web3 POSIX          │ /oracle, /proc, /dev           │
+│  (虚拟文件系统)       │ (虚拟文件系统)       │ 统一资源访问                   │
+│                      │                     │                                │
+│  ──────────────────────────────────────────────────────────────────────────│
+│                      │                     │                                │
+│  Syscalls            │ Titan C ABI         │ titan_transfer()               │
+│  (系统调用)           │ (titan.h)           │ titan_storage_read()           │
+│                      │                     │                                │
+│  ──────────────────────────────────────────────────────────────────────────│
+│                      │                     │                                │
+│  User Space          │ Polyglot Shell      │ Python/Swift/TS 合约           │
+│  (用户空间)           │ (多语言外壳)        │                                │
+│                      │                     │                                │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+> **核心洞察：**
+>
+> Linux 说："只有 1 个 CPU，但我让 4 个程序以为自己独占了 CPU。"
+>
+> Titan 说："只有 1 份代码，但它同时运行在 Solana、EVM、Bitcoin 和 TON 这 4 个完全不同的处理器上。"
+>
+> **区别在于：**
+> - Linux 的虚拟化发生在**运行时**（有开销）
+> - Titan 的虚拟化发生在**编译时**（零开销）
+>
+> Zig 的 `comptime` 是实现这一切的魔法棒。它允许我们在编译阶段把异构差异全部抹平（Static Dispatch），从而在运行阶段不留任何性能包袱。
+>
+> **这就是为什么 Titan 是 Web3 的 Linux。**
+
 ---
 
 ## 4. 抽象哲学：Web3 POSIX 标准
