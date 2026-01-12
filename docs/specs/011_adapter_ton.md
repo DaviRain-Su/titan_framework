@@ -253,28 +253,379 @@ send(SendParameters{
 });
 ```
 
-## 5. 转译器 CLI 设计 (`roc-ton`)
+## 5. TON 编译流水线详解 (The Pipeline)
 
-我们需要开发一个名为 `titan-ton-bridge` 的 CLI 工具。
+要搞清楚"哪些用 Zig 实现，哪些复用"，必须先理解 TON 的完整编译流程。
 
-### 5.1 工作流
-1.  **解析**: 使用 `libclang` 或 Zig 自带的 `Ast` 解析 Zig 源码。
-2.  **分析**: 提取所有 `pub const` 结构体和 `pub fn` 函数。
-3.  **生成**: 使用模板引擎输出 `.tact` 文件。
-4.  **编译**: 调用 `tact` 编译器生成 `.boc`。
+### 5.1 TON 的编译层级
 
-## 6. 限制与边界 (Limitations)
+TON 的编译流程独特，中间夹着一个特殊的层级：**Fift**。
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    TON 编译流水线                                │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Level 1: 高级语言                                              │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │  Tact (.tact)  或  FunC (.fc)                           │   │
+│  │  • 人类可读的源代码                                      │   │
+│  │  • Tact: TypeScript 编译器 (需要 Node.js)               │   │
+│  │  • FunC: C++ 编译器                                     │   │
+│  └────────────────────────┬────────────────────────────────┘   │
+│                           │ 编译                                │
+│                           ▼                                     │
+│  Level 2: 汇编语言 (Fift)                                       │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │  Fift Script (.fif)                                     │   │
+│  │  • TON 特有的堆栈操作脚本语言                            │   │
+│  │  • 类似比特币 Script，但更强大                           │   │
+│  │  • 几乎所有 TON 编译器最终都输出 Fift                    │   │
+│  └────────────────────────┬────────────────────────────────┘   │
+│                           │ 执行/汇编                           │
+│                           ▼                                     │
+│  Level 3: 机器码 (Bytecode)                                     │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │  TVM Bytecode (.boc)                                    │   │
+│  │  • "Bag of Cells" 二进制格式                            │   │
+│  │  • Fift 脚本运行后的最终产物                            │   │
+│  │  • 真正上传到链上的数据                                  │   │
+│  └────────────────────────┬────────────────────────────────┘   │
+│                           │ 部署                                │
+│                           ▼                                     │
+│  Level 4: 区块链运行                                            │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │  TON Virtual Machine (TVM)                              │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 5.2 两种实现策略
+
+#### 策略 A: 输出 Fift 代码 (性价比最高，推荐初期)
+
+```
+Titan Zig AST ──► Zig Transpiler ──► .fif ──► Official Fift Binary ──► .boc
+                       │                              │
+                    我们实现                     官方工具 (轻量 C++)
+```
+
+**我们要实现**:
+- 输入: Titan Zig AST
+- 处理: 将 Zig 逻辑映射为 Fift 指令 (`DICTPUSH`, `STREF` 等)
+- 输出: `.fif` 文本文件
+
+**我们不实现**:
+- Fift 到 Bytecode 的转换
+- 直接调用 TON 官方 Fift 解释器 (轻量 C++ 二进制，几 MB，**无需 Node.js**)
+
+**优势**: 工程量小，快速验证
+**劣势**: 仍有外部依赖 (Fift binary)
+
+#### 策略 B: 直接输出 Bytecode (终极形态，零依赖)
+
+```
+Titan Zig AST ──► Zig Compiler Backend ──► .boc
+                         │
+                    完全自主实现
+                    零外部依赖
+```
+
+**我们要实现**:
+- TVM 指令集编码 (OpCode 映射)
+- Cell 序列化 (CellBuilder)
+- BoC 打包 (TL-B 格式)
+
+**我们不实现**:
+- 完全跳过 Fift 和 Tact
+- 直接与 TVM 对话
+
+**优势**: 单一二进制，极致体验
+**劣势**: 工程量大
+
+### 5.3 Zig 核心实现模块
+
+选择**策略 B**时，需要实现以下模块：
+
+#### 模块 1: Cell Builder (细胞构建器) - 核心基石
+
+TON 开发的核心数据结构。Zig 对内存布局的精确控制在这里是神技。
+
+```zig
+/// TON Cell 构建器
+/// 每个 Cell 最多 1023 bits 数据 + 4 个引用
+pub const CellBuilder = struct {
+    /// 位数据存储 (TON Cell 最大 1023 位)
+    bits: std.BitStack(1023),
+    /// 当前已使用的位数
+    bits_used: u10 = 0,
+    /// 子 Cell 引用 (最多 4 个)
+    refs: [4]?*Cell = .{ null, null, null, null },
+    /// 当前引用数
+    refs_count: u3 = 0,
+
+    /// 存储无符号整数
+    pub fn storeUint(self: *CellBuilder, val: u256, bits: u10) !void {
+        if (self.bits_used + bits > 1023) return error.CellOverflow;
+        // 位级存储逻辑
+        var i: u10 = 0;
+        while (i < bits) : (i += 1) {
+            const bit: u1 = @truncate((val >> (bits - 1 - i)));
+            self.bits.push(bit);
+        }
+        self.bits_used += bits;
+    }
+
+    /// 存储切片数据
+    pub fn storeSlice(self: *CellBuilder, data: []const u8) !void {
+        for (data) |byte| {
+            try self.storeUint(byte, 8);
+        }
+    }
+
+    /// 存储子 Cell 引用
+    pub fn storeRef(self: *CellBuilder, cell: *Cell) !void {
+        if (self.refs_count >= 4) return error.TooManyRefs;
+        self.refs[self.refs_count] = cell;
+        self.refs_count += 1;
+    }
+
+    /// 构建最终 Cell
+    pub fn build(self: *CellBuilder, allocator: Allocator) !*Cell {
+        const cell = try allocator.create(Cell);
+        cell.* = .{
+            .bits = self.bits.toSlice(),
+            .refs = self.refs,
+        };
+        return cell;
+    }
+};
+```
+
+#### 模块 2: TVM Instruction Set (指令集映射)
+
+建立 Titan 逻辑到 TVM 操作码的映射表。
+
+```zig
+/// TVM 操作码定义
+pub const TvmOpCode = enum(u8) {
+    // 算术运算
+    ADD = 0xA0,
+    SUB = 0xA1,
+    MUL = 0xA2,
+    DIV = 0xA4,
+
+    // 栈操作
+    PUSH = 0x80,
+    POP = 0x81,
+    DUP = 0x82,
+    SWAP = 0x83,
+
+    // Cell 操作
+    NEWC = 0xC8,      // 新建 CellBuilder
+    ENDC = 0xC9,      // 完成 Cell 构建
+    STREF = 0xCC,     // 存储引用
+    STSLICE = 0xCE,   // 存储切片
+
+    // 消息发送
+    SENDRAWMSG = 0xFB,
+
+    // 控制流
+    IF = 0xDE,
+    IFELSE = 0xE0,
+    REPEAT = 0xE4,
+
+    // 字典操作
+    DICTGET = 0xF4,
+    DICTSET = 0xF5,
+    DICTPUSH = 0xF6,
+};
+
+/// 将 Titan 操作映射到 TVM 指令
+pub fn compileExpression(expr: TitanExpr) ![]TvmOpCode {
+    return switch (expr) {
+        .add => &[_]TvmOpCode{.ADD},
+        .sub => &[_]TvmOpCode{.SUB},
+        .call => |c| compileCall(c),
+        .storage_get => |k| compileStorageGet(k),
+        // ...
+    };
+}
+```
+
+#### 模块 3: TL-B 序列化 (数据格式)
+
+处理 Titan 结构体到 TON 二进制格式的转换。
+
+```zig
+/// TL-B 序列化器
+pub const TlbSerializer = struct {
+    builder: CellBuilder,
+
+    /// 序列化 Titan 结构体
+    pub fn serialize(self: *TlbSerializer, comptime T: type, value: T) !void {
+        inline for (std.meta.fields(T)) |field| {
+            const field_value = @field(value, field.name);
+            try self.serializeField(field.type, field_value);
+        }
+    }
+
+    fn serializeField(self: *TlbSerializer, comptime T: type, value: T) !void {
+        switch (@typeInfo(T)) {
+            .Int => |info| {
+                try self.builder.storeUint(value, info.bits);
+            },
+            .Bool => {
+                try self.builder.storeUint(@intFromBool(value), 1);
+            },
+            .Pointer => |ptr| {
+                if (ptr.size == .Slice) {
+                    try self.serializeSlice(value);
+                }
+            },
+            .Struct => {
+                try self.serialize(T, value);
+            },
+            else => return error.UnsupportedType,
+        }
+    }
+};
+```
+
+#### 模块 4: BoC Serializer (最终打包)
+
+将 Cell 树打包为 `.boc` 文件。
+
+```zig
+/// Bag of Cells 序列化器
+pub const BocSerializer = struct {
+    /// 将 Cell 树序列化为 BoC 格式
+    pub fn serialize(root: *Cell, allocator: Allocator) ![]u8 {
+        var cells = std.ArrayList(*Cell).init(allocator);
+        defer cells.deinit();
+
+        // 1. 收集所有 Cell (拓扑排序)
+        try collectCells(root, &cells);
+
+        // 2. 计算每个 Cell 的索引
+        var indices = std.AutoHashMap(*Cell, u32).init(allocator);
+        defer indices.deinit();
+        for (cells.items, 0..) |cell, i| {
+            try indices.put(cell, @intCast(i));
+        }
+
+        // 3. 序列化 BoC header
+        var output = std.ArrayList(u8).init(allocator);
+        try output.appendSlice(&BOC_MAGIC); // b5ee9c72
+
+        // 4. 序列化每个 Cell
+        for (cells.items) |cell| {
+            try serializeCell(cell, &output, indices);
+        }
+
+        return output.toOwnedSlice();
+    }
+
+    const BOC_MAGIC = [_]u8{ 0xb5, 0xee, 0x9c, 0x72 };
+};
+```
+
+### 5.4 为什么 Zig 特别适合?
+
+TON 的数据结构是 **Bit-oriented (面向位)** 的，而非 Byte-oriented。
+
+```
+TON 数据示例:
+┌─1 bit─┬─7 bits─┬─256 bits─┬─32 bits─┐
+│ bool  │ flags  │ balance  │  time   │
+└───────┴────────┴──────────┴─────────┘
+  非字节对齐! 传统语言处理很痛苦
+```
+
+**Zig 的作弊级优势**:
+
+```zig
+// Zig 支持任意位宽整数!
+const a: u1 = 1;      // 1 位布尔
+const b: u7 = 127;    // 7 位标志
+const c: u257 = ...;  // TON 的 257 位整数!
+
+// 对比其他语言:
+// - TypeScript: 需要 BigInt + 手动位操作，性能差
+// - Rust: 需要 bitvec 库，语法繁琐
+// - Zig: 原生支持，编译器自动处理底层位操作
+```
+
+### 5.5 作战边界总结
+
+| 类别 | 状态 | 说明 |
+| :--- | :---: | :--- |
+| **我们实现** |
+| `ton-types` 库 | ✅ | Cell/Slice/Builder 数据结构 |
+| `titan-codegen` 模块 | ✅ | 遍历 Zig AST → TVM OpCode |
+| `boc-serializer` 模块 | ✅ | Cell 树 → .boc 文件 |
+| **我们不实现** |
+| Tact 语法解析器 | ❌ | 我们读 Zig，不读 Tact |
+| 类型推断 | ❌ | Zig 编译器已完成 |
+| Fift 解释器 | ❌ | 策略 B 跳过 Fift |
+
+**最终效果**:
+```bash
+# 用户体验: 零依赖，单一二进制
+$ titan-ton compile contract.zig -o contract.boc
+
+# 不需要: Node.js, npm, Tact, Fift
+# 只有: titan-ton 二进制 (~50MB)
+```
+
+## 6. 转译器 CLI 设计 (`titan-ton`)
+
+### 6.1 分阶段实现路线
+
+**阶段 1: 借鸡生蛋 (MVP)**
+```
+Titan Zig ──► .tact 文件 ──► 用户手动调用 Tact 编译器
+目的: 快速验证可行性
+```
+
+**阶段 2: 输出 Fift (Alpha)**
+```
+Titan Zig ──► .fif 文件 ──► 调用官方 Fift binary ──► .boc
+目的: 去除 Node.js 依赖
+```
+
+**阶段 3: 直接输出 Bytecode (Final)**
+```
+Titan Zig ──► titan-ton ──► .boc
+目的: 零依赖，极致体验
+```
+
+### 6.2 CLI 接口设计
+
+```bash
+# 编译为 BoC (最终形态)
+titan-ton compile src/contract.zig -o contract.boc
+
+# 编译为 Fift (中间形态)
+titan-ton compile src/contract.zig --emit=fift -o contract.fif
+
+# 编译为 Tact (MVP 形态)
+titan-ton compile src/contract.zig --emit=tact -o contract.tact
+```
+
+## 7. 限制与边界 (Limitations)
 
 由于是转译而非原生编译，TON 适配器会有以下限制：
 1.  **不支持指针运算**: Zig 中的指针操作无法翻译为 Tact。
 2.  **不支持裸内存访问**: `allocator` 在 TON 上是**不可用**的。用户必须使用高级数据结构 (`ArrayList` 等)，这些会被映射为 Tact 的数组。
 3.  **标准库受限**: 只有 `titan.lib` 中的子集（如 Math）可用。
 
-## 7. 三大阻抗失配详解 (The Three Impedance Mismatches)
+## 8. 三大阻抗失配详解 (The Three Impedance Mismatches)
 
 转译器的核心难点不是"写不出来"，而是存在巨大的**阻抗失配 (Impedance Mismatch)**。
 
-### 7.1 阻抗失配 #1: 同步思维 vs 异步宇宙 (Control Flow)
+### 8.1 阻抗失配 #1: 同步思维 vs 异步宇宙 (Control Flow)
 
 **这是最反直觉的一点。**
 
@@ -378,7 +729,7 @@ receive(msg: TransferNotification) {
 
 **难度评估**: S 级 - 需要完整的数据流分析和代码生成器
 
-### 7.2 阻抗失配 #2: 堆内存 vs Cell 树 (Memory Model)
+### 8.2 阻抗失配 #2: 堆内存 vs Cell 树 (Memory Model)
 
 #### 问题本质
 
@@ -446,7 +797,7 @@ Gas 成本: 每层 Cell 嵌套都要付费!
 
 **难度评估**: A 级 - 需要深入理解 TON 的存储计费模型
 
-### 7.3 阻抗失配 #3: 自动回滚 vs Saga 模式 (Error Handling)
+### 8.3 阻抗失配 #3: 自动回滚 vs Saga 模式 (Error Handling)
 
 #### 问题本质
 
@@ -512,7 +863,7 @@ receive(msg: RefundOK) {
 
 **难度评估**: S 级 - 相当于实现一个分布式事务引擎
 
-### 7.4 难度总结
+### 8.4 难度总结
 
 | 阻抗失配 | 核心挑战 | 难度 | 自动化可行性 |
 | :--- | :--- | :--- | :--- |
@@ -522,15 +873,15 @@ receive(msg: RefundOK) {
 
 **综合评估**: 让编译器自动处理这三个问题，难度堪比写一个分布式数据库引擎。
 
-## 8. 为什么函数式编程可能是答案
+## 9. 为什么函数式编程可能是答案
 
-### 8.1 Zig vs 函数式: 谁更适合 TON?
+### 9.1 Zig vs 函数式: 谁更适合 TON?
 
 用 **Zig (命令式语言)** 去适配 **TON (异步 Actor 模型)** 是非常痛苦的。
 
 但 **函数式编程** 有奇效。
 
-### 8.2 函数式架构与 TON 的同构性
+### 9.2 函数式架构与 TON 的同构性
 
 ```
 函数式编程核心:
@@ -550,7 +901,7 @@ Message -> State -> (State, OutMessages)
 发现: 它们是同构的 (Isomorphic)!
 ```
 
-### 8.3 函数式风格的 Titan for TON
+### 9.3 函数式风格的 Titan for TON
 
 ```zig
 // 假设: 函数式风格的 Titan DSL
@@ -594,7 +945,7 @@ fn update(model: Model, msg: anytype) struct { Model, []titan.Cmd } {
 }
 ```
 
-### 8.4 编译到不同目标的策略
+### 9.4 编译到不同目标的策略
 
 **同一套业务逻辑，编译成两种完全不同的运行范式**:
 
@@ -633,7 +984,7 @@ fn update(model: Model, msg: anytype) struct { Model, []titan.Cmd } {
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### 8.5 难度对比
+### 9.5 难度对比
 
 | 转译路径 | 核心工作 | 难度 |
 | :--- | :--- | :--- |
@@ -642,11 +993,11 @@ fn update(model: Model, msg: anytype) struct { Model, []titan.Cmd } {
 
 **结论**: 函数式风格让 TON 转译的难度从 "不可能" 变成 "困难但可行"。
 
-## 9. 破局之道: 实现策略
+## 10. 破局之道: 实现策略
 
 虽然难，但不是不可能。**正是因为难，如果做出来，护城河极深**。
 
-### 9.1 方案 A: 双层转译 (Transpiler Approach)
+### 10.1 方案 A: 双层转译 (Transpiler Approach)
 
 **不要试图直接生成 TVM 机器码**。利用现有工具链。
 
@@ -665,7 +1016,7 @@ fn update(model: Model, msg: anytype) struct { Model, []titan.Cmd } {
 **优势**: 工程量可控
 **劣势**: 只能支持部分语言特性，无法 100% 覆盖
 
-### 9.2 方案 B: Actor Model 天然契合 (理论创新)
+### 10.2 方案 B: Actor Model 天然契合 (理论创新)
 
 **关键洞察**: TON 的架构本质上就是 **Actor 模型**。
 
@@ -723,7 +1074,7 @@ fn handle_deposit(state: State, msg: Deposit) State {
 
 **这才是 Titan 的真正威力**。
 
-### 9.3 实现路线图
+### 10.3 实现路线图
 
 ```
 Phase 1: 简单场景 (MVP)
@@ -743,11 +1094,11 @@ Phase 3: Actor DSL (理论创新)
 └── 成为写 TON 合约最优雅的语言
 ```
 
-## 10. 结论
+## 11. 结论
 
 TON 适配层本质上是一个 **"Zig to Tact Cross-Compiler"**。
 
-### 10.1 难度评估总结
+### 11.1 难度评估总结
 
 | 方面 | 难度 | 说明 |
 | :--- | :--- | :--- |
@@ -756,7 +1107,7 @@ TON 适配层本质上是一个 **"Zig to Tact Cross-Compiler"**。
 | 错误处理 (Saga) | S 级 | 分布式事务补偿逻辑 |
 | **综合难度** | **地狱级** | 相当于写分布式数据库引擎 |
 
-### 10.2 战略建议
+### 11.2 战略建议
 
 **短期** (不推荐):
 - 工程量大，ROI 低
@@ -768,7 +1119,7 @@ TON 适配层本质上是一个 **"Zig to Tact Cross-Compiler"**。
 - 函数式编程 + Actor 模型可能是 TON 开发的最优范式
 - 价值不可估量
 
-### 10.3 核心洞察
+### 11.3 核心洞察
 
 > **"用 Zig 硬刚 TON 是 S 级难度；用函数式思维适配 TON 是 B+ 级难度。"**
 
@@ -776,6 +1127,8 @@ TON 适配层本质上是一个 **"Zig to Tact Cross-Compiler"**。
 1. 解决了 TON 的开发难题
 2. 证明了函数式编程在异步区块链时代的优越性
 3. 这将是完美的学术与商业结合的故事
+
+>> use zig impl function for tact
 
 **战略建议**:
 > 先用 Solana/Wasm 证明框架成功，拿到融资/收入后，再组建特种部队攻克 TON。
