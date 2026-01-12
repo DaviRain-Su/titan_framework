@@ -229,7 +229,8 @@ pub const storage_write = if (@hasDecl(impl, "storage_write")) impl.storage_writ
 
 **关键决策**:
 - **Tier 1 先行**: 用 Solana + Near 证明 "Write Once, Compile Anywhere"
-- **Tier 3 延后**: TON/EVM Native 作为融资后的"特种部队"任务
+- **Tier 3 延后**: TON 作为融资后的"特种部队"任务
+- **EVM Native 已有参考实现**: [zig-to-yul](https://github.com/DaviRain-Su/zig-to-yul) v0.1.0
 
 ### Phase 1: V1 (当前) - Tier 1 核心
 - [x] 设计: `solana` 后端规范 (009)
@@ -248,8 +249,9 @@ pub const storage_write = if (@hasDecl(impl, "storage_write")) impl.storage_writ
 ### Phase 3: V3 (全链覆盖) - Tier 2 + Tier 3
 - [x] 设计: `ton` 转译规范 (011) ⚠️ Tier 3
 - [x] 设计: `ckb` 后端规范 (019)
-- [x] 设计: `evm_native` 转译规范 (020) ⚠️ Tier 3
-- [ ] 实现: 转译器 CLI 工具 (需专门团队)
+- [x] 设计: `evm_native` 转译规范 (020)
+- [x] 实现: `evm_native` 参考实现 ([zig-to-yul](https://github.com/DaviRain-Su/zig-to-yul) v0.1.0) ✅
+- [ ] 实现: `ton` 转译器 CLI (需专门团队) ⚠️ Tier 3
 - [ ] 实现: RISC-V 后端
 
 ## 7. 新增后端指南

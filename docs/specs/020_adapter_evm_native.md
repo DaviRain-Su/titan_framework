@@ -1,9 +1,78 @@
 # 规范 020: EVM 适配器套件 (EVM Adapter Suite)
 
-> 状态: 规划中 (V3 Target)
+> 状态: **已有参考实现** (v0.1.0)
 > 核心策略: **双引擎架构 (Dual-Engine Architecture)**。
 > 目标: 既能通过转译覆盖所有 EVM 链，又能通过专用后端深入支持高性能 zkEVM。
-> 参考实现: [zig-to-yul](https://github.com/DaviRain-Su/zig-to-yul)
+> 参考实现: [zig-to-yul](https://github.com/DaviRain-Su/zig-to-yul) - **已实现核心功能**
+
+## 已实现功能概览 (zig-to-yul v0.1.0)
+
+`zig-to-yul` 项目已经实现了 Zig -> Yul -> EVM Bytecode 的完整编译流水线。
+
+### 核心能力
+
+| 模块 | 状态 | 说明 |
+| :--- | :---: | :--- |
+| **编译流水线** | ✅ | Lexer → Parser → Semantic Analysis → CodeGen → Yul |
+| **EVM SDK** | ✅ | `evm.types`, `evm.storage`, `evm.event`, `evm.abi` |
+| **Gas 估算** | ✅ | 支持 profile overrides |
+| **Yul Profiling** | ✅ | 指令计数器聚合 |
+| **ABI 生成** | ✅ | JSON ABI + Source Maps |
+| **交易签名** | ✅ | Legacy + EIP-1559 + Keystore |
+| **跨平台** | ✅ | Linux, macOS, Windows |
+
+### CLI 命令
+
+```bash
+# 编译 Zig 到 Yul
+z2y compile contract.zig -o contract.yul
+
+# 生成 EVM Bytecode (需要 solc)
+z2y build contract.zig -o contract.bin
+
+# Gas 估算
+z2y estimate contract.zig
+
+# 性能分析
+z2y profile contract.zig
+```
+
+### 合约示例 (已实现的语法)
+
+```zig
+const evm = @import("evm");
+
+pub const Token = struct {
+    total_supply: u256,
+    balances: evm.Mapping(evm.Address, u256),
+
+    pub fn transfer(self: *Token, to: evm.Address, amount: u256) bool {
+        const sender = evm.caller();
+        const sender_balance = self.balances.get(sender);
+        if (sender_balance < amount) return false;
+
+        self.balances.set(sender, sender_balance - amount);
+        self.balances.set(to, self.balances.get(to) + amount);
+        return true;
+    }
+
+    pub fn balanceOf(self: *Token, account: evm.Address) u256 {
+        return self.balances.get(account);
+    }
+};
+```
+
+### EVM 命名空间 API
+
+| API | 说明 |
+| :--- | :--- |
+| `evm.caller()` | 获取 msg.sender |
+| `evm.callvalue()` | 获取 msg.value |
+| `evm.sload(slot)` | 读取存储 |
+| `evm.sstore(slot, value)` | 写入存储 |
+| `evm.Mapping(K, V)` | 映射类型 |
+| `evm.revert()` | 回滚交易 |
+| `evm.return_data(data)` | 返回数据 |
 
 ## 0. 战略背景：为什么 Yul 是 EVM 的"汇编通道"
 
@@ -350,16 +419,29 @@ Zig -> Yul 和 Zig -> Fift 的实现策略完全对称：
 - `RouterGenerator` - 生成函数分发
 - `CodeEmitter` - 输出目标代码
 
-## 5. 实施难度评估
+## 5. 实施状态评估
 
-| 阶段 | 工作内容 | 难度 |
+### 5.1 zig-to-yul 已完成 (v0.1.0)
+
+| 阶段 | 工作内容 | 状态 |
+| :--- | :--- | :---: |
+| 词法/语法分析 | Lexer, Parser | ✅ 已完成 |
+| 语义分析 | 类型检查, 符号表 | ✅ 已完成 |
+| 代码生成 | Zig AST → Yul | ✅ 已完成 |
+| EVM SDK | types, storage, event, abi | ✅ 已完成 |
+| Gas 工具 | 估算, Profiling | ✅ 已完成 |
+| 交易签名 | Legacy, EIP-1559, Keystore | ✅ 已完成 |
+| 跨平台 | Linux, macOS, Windows | ✅ 已完成 |
+
+### 5.2 Titan 集成路线图
+
+| 阶段 | 工作内容 | 预计工作量 |
 | :--- | :--- | :--- |
-| **Week 1** | 实现基础 `YulBuilder` (算术、存储) | 中等 |
-| **Week 2** | 实现 `Dispatcher` 生成器 | 中等 |
-| **Week 3** | 实现完整控制流 (if/for/while) | 中高 |
-| **Week 4** | 集成 solc，端到端测试 | 中等 |
+| **Phase 1** | 将 zig-to-yul 集成到 Titan build system | 1-2 周 |
+| **Phase 2** | 统一 API (与 Solana/Near 适配器对齐) | 2-3 周 |
+| **Phase 3** | 添加 zkSync EraVM 后端 | 3-4 周 |
 
-**相比 TON 的优势**: EVM 是同步模型，无需 CPS 变换，难度显著降低。
+**相比 TON 的优势**: EVM 是同步模型，无需 CPS 变换，且 **核心实现已完成**。
 
 ## 6. 结论
 
