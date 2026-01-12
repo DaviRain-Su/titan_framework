@@ -165,8 +165,64 @@ Zig comptime 元编程引擎
 
 ---
 
+## 商业演进路线 (Business Evolution)
+
+> **终极定位**: Web3 的 Unity 引擎 / Compiler-as-a-Service
+
+```
+阶段一: 工具 (Tool)
+├── 产品: 开源 CLI (titan-cli)
+├── 定价: 免费
+├── 目标: 圈粉，建立开发者共识
+└── 收入: 无 (纯投入期)
+       │
+       ▼
+阶段二: SaaS (Software-as-a-Service)
+├── 产品: Titan Cloud (云端编译 + 一键部署)
+├── 定价: 个人免费 / 团队 $20/人/月 / 企业定制
+├── 目标: 解决环境配置难、多链部署麻烦的问题
+└── 收入: $500K ARR
+       │
+       ▼
+阶段三: 标准 (Standard)
+├── 产品: Titan Security Audit (自动化审计服务)
+├── 定价: $5K-50K/次
+├── 目标: 利用编译器掌控力，做静态分析审计
+└── 收入: $2M ARR
+       │
+       ▼
+阶段四: 生态 (Ecosystem)
+├── 产品: Enterprise Bridge + Titan Network
+├── 定价: 企业解决方案 (数十万美金) + 协议费用
+├── 目标: 成为 Web2 巨头进入 Web3 的独家桥梁
+└── 收入: $10M+ ARR
+```
+
+### 四层商业形态
+
+| Layer | 产品 | 模式 | 口号 |
+| :---: | :--- | :--- | :--- |
+| **1** | Titan Studio | SaaS | "Write Once, Deploy Everywhere" |
+| **2** | Titan Standard Library | 审计授权 | "The Standard for Secure Contracts" |
+| **3** | Enterprise Bridge | B2B 咨询 | "Bring your Swift/Go teams to Web3" |
+| **4** | Titan Network | 协议抽成 | "The Interoperability Layer" |
+
+详见: [商业愿景 Section 9](docs/architecture/business_vision.md#9-libtitan-商业形态-web3-的-unity-引擎)
+
+---
+
 ## 历史记录
 
+- **2026-01-12**: **新增四层商业形态** (business_vision.md Section 9)
+  - 定位升级: Web3 的 Unity 引擎 / Compiler-as-a-Service
+  - 四层商业模型: Studio → Standard Library → Enterprise → Network
+  - 演进路线: 工具 → SaaS → 标准 → 生态
+- **2026-01-12**: **新增五大语言阵营** (D-015 Section 8.2)
+  - 移动端大军 (Swift/Kotlin/Dart)
+  - 系统级新贵 (Nim/Odin/V)
+  - Web 巨头 (AssemblyScript)
+  - 游戏嵌入式 (Lua/TinyGo)
+  - AI 浪潮 (Mojo)
 - **2026-01-12**: **新增 libtitan C ABI 战略** (D-015 Section 8)
   - 核弹级升级: 从"开发框架"升级为"通用区块链运行时引擎"
   - C ABI 导出: `export fn titan_*` 接口
