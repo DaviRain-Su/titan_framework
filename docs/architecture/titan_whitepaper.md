@@ -15924,6 +15924,753 @@ pub fn sys_cross_chain_call(
 
 ---
 
+### 17.20 务实路径：从编译器到适配器 (Pragmatic Engineering Path)
+
+> **关键转折**: 我们不需要重写编译器，我们需要做的是 **Web3 的 HAL (硬件抽象层)**。
+>
+> 既然手里已经有了 **Solana SDK (Zig)** 和 **NEAR SDK (Zig)**，
+> 那么我们要做的不是"指令翻译"，而是**"系统调用标准化"**。
+
+#### 17.20.1 思路转变：从"翻译官"到"适配器"
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    两种抽象路径对比                                           │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  路径 A: ISA 抽象 (编译器方案) - 17.18/17.19 描述的                         │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │   Python `a + b`                                                    │   │
+│  │        │                                                            │   │
+│  │        ▼                                                            │   │
+│  │   AST Parser → Titan IR → Code Generator                           │   │
+│  │        │                                                            │   │
+│  │        ▼                                                            │   │
+│  │   EVM `ADD` Opcode                                                 │   │
+│  │                                                                     │   │
+│  │   难度: ★★★★★ (需要实现完整编译器)                                 │   │
+│  │   周期: 12-18 个月                                                  │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  路径 B: OS 抽象 (适配器方案) - 本节描述的 ✅                               │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │   Titan.Asset.transfer(to, amount)                                 │   │
+│  │        │                                                            │   │
+│  │        ▼                                                            │   │
+│  │   VTable Dispatch (编译时确定)                                      │   │
+│  │        │                                                            │   │
+│  │        ├──► solana_sdk.system_instruction.transfer()               │   │
+│  │        └──► near_sdk.transfer()                                    │   │
+│  │                                                                     │   │
+│  │   难度: ★★☆☆☆ (利用现有 SDK)                                       │   │
+│  │   周期: 2-4 周 MVP                                                  │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  核心洞察:                                                                  │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  这就像 POSIX 标准:                                                 │   │
+│  │  Linux 和 macOS 底层内核完全不同，但它们都支持 write() 和 open()。  │   │
+│  │                                                                     │   │
+│  │  Titan OS 在工程上的抽象，应该做成 Web3 的 POSIX 层。               │   │
+│  │  不是翻译代码，而是标准化系统调用。                                 │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 17.20.2 工程架构：VTable 驱动模型
+
+**核心设计**：利用 Zig 的 `struct` 和 `comptime` 实现零运行时开销的多态。
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Titan OS VTable 驱动架构                                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │                    Layer 1: 业务逻辑层 (Application)                   │ │
+│  │                                                                       │ │
+│  │  fn run_arbitrage(chain_a: AssetInterface, chain_b: AssetInterface)  │ │
+│  │      try chain_a.transfer("Vault_A", 100);                           │ │
+│  │      const balance = try chain_b.get_balance("Vault_B");             │ │
+│  │  }                                                                    │ │
+│  │                                                                       │ │
+│  │  // 业务逻辑完全不知道底层是 Solana 还是 NEAR                         │ │
+│  │                                                                       │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                   │                                         │
+│                                   │ AssetInterface                          │
+│                                   ▼                                         │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │                    Layer 2: Titan 标准接口层 (Syscall)                 │ │
+│  │                                                                       │ │
+│  │  pub const AssetInterface = struct {                                  │ │
+│  │      ptr: *anyopaque,                                                 │ │
+│  │      transferFn: *const fn(*anyopaque, []const u8, u64) !void,       │ │
+│  │      balanceFn: *const fn(*anyopaque, []const u8) !u64,              │ │
+│  │                                                                       │ │
+│  │      pub fn transfer(self, to, amount) !void {                       │ │
+│  │          return self.transferFn(self.ptr, to, amount);               │ │
+│  │      }                                                                │ │
+│  │  };                                                                   │ │
+│  │                                                                       │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                   │                                         │
+│                                   │ VTable Dispatch                         │
+│                    ┌──────────────┼──────────────┐                         │
+│                    │              │              │                          │
+│                    ▼              ▼              ▼                          │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │                    Layer 3: 驱动层 (Drivers)                           │ │
+│  │                                                                       │ │
+│  │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐       │ │
+│  │  │ SolanaDriver    │  │ NearDriver      │  │ EVMDriver       │       │ │
+│  │  │                 │  │                 │  │                 │       │ │
+│  │  │ fn transfer()   │  │ fn transfer()   │  │ fn transfer()   │       │ │
+│  │  │   solana_sdk.   │  │   near_sdk.     │  │   ethers.       │       │ │
+│  │  │   transfer()    │  │   ft_transfer() │  │   sendTx()      │       │ │
+│  │  │                 │  │                 │  │                 │       │ │
+│  │  └────────┬────────┘  └────────┬────────┘  └────────┬────────┘       │ │
+│  │           │                    │                    │                 │ │
+│  └───────────┼────────────────────┼────────────────────┼─────────────────┘ │
+│              │                    │                    │                   │
+│              ▼                    ▼                    ▼                   │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │                    Layer 4: 现有 SDK 层 (Existing SDKs)                │ │
+│  │                                                                       │ │
+│  │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐       │ │
+│  │  │ solana-sdk-zig  │  │ near-sdk-zig    │  │ eth-abi-zig     │       │ │
+│  │  │ (现有库)        │  │ (现有库)        │  │ (现有库)        │       │ │
+│  │  └─────────────────┘  └─────────────────┘  └─────────────────┘       │ │
+│  │                                                                       │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 17.20.3 代码实现：Titan 标准系统调用
+
+**第一步：定义标准接口 (The Titan Standard)**
+
+```zig
+// ============================================================================
+// core/syscalls.zig - Titan 系统调用标准
+// ============================================================================
+
+/// 资产操作接口 (Asset Interface)
+/// 对应 Linux 的 read/write 系统调用
+pub const AssetInterface = struct {
+    ptr: *anyopaque,
+
+    // VTable - 虚函数表
+    transferFn: *const fn (ptr: *anyopaque, to: []const u8, amount: u64) anyerror!void,
+    balanceFn: *const fn (ptr: *anyopaque, address: []const u8) anyerror!u64,
+    mintFn: *const fn (ptr: *anyopaque, to: []const u8, amount: u64) anyerror!void,
+    burnFn: *const fn (ptr: *anyopaque, amount: u64) anyerror!void,
+
+    // 封装调用，让上层代码写起来像面向对象
+    pub fn transfer(self: AssetInterface, to: []const u8, amount: u64) !void {
+        return self.transferFn(self.ptr, to, amount);
+    }
+
+    pub fn get_balance(self: AssetInterface, address: []const u8) !u64 {
+        return self.balanceFn(self.ptr, address);
+    }
+
+    pub fn mint(self: AssetInterface, to: []const u8, amount: u64) !void {
+        return self.mintFn(self.ptr, to, amount);
+    }
+
+    pub fn burn(self: AssetInterface, amount: u64) !void {
+        return self.burnFn(self.ptr, amount);
+    }
+};
+
+/// 存储操作接口 (Storage Interface)
+/// 对应 Linux 的 open/close/fstat 系统调用
+pub const StorageInterface = struct {
+    ptr: *anyopaque,
+
+    readFn: *const fn (ptr: *anyopaque, key: []const u8) anyerror![]const u8,
+    writeFn: *const fn (ptr: *anyopaque, key: []const u8, value: []const u8) anyerror!void,
+    deleteFn: *const fn (ptr: *anyopaque, key: []const u8) anyerror!void,
+    existsFn: *const fn (ptr: *anyopaque, key: []const u8) anyerror!bool,
+
+    pub fn read(self: StorageInterface, key: []const u8) ![]const u8 {
+        return self.readFn(self.ptr, key);
+    }
+
+    pub fn write(self: StorageInterface, key: []const u8, value: []const u8) !void {
+        return self.writeFn(self.ptr, key, value);
+    }
+
+    pub fn delete(self: StorageInterface, key: []const u8) !void {
+        return self.deleteFn(self.ptr, key);
+    }
+
+    pub fn exists(self: StorageInterface, key: []const u8) !bool {
+        return self.existsFn(self.ptr, key);
+    }
+};
+
+/// 进程操作接口 (Process Interface)
+/// 对应 Linux 的 fork/exec/kill 系统调用
+pub const ProcessInterface = struct {
+    ptr: *anyopaque,
+
+    deployFn: *const fn (ptr: *anyopaque, bytecode: []const u8) anyerror!TitanAddress,
+    callFn: *const fn (ptr: *anyopaque, addr: TitanAddress, method: []const u8, args: []const u8) anyerror![]const u8,
+    destroyFn: *const fn (ptr: *anyopaque, addr: TitanAddress) anyerror!void,
+
+    pub fn deploy(self: ProcessInterface, bytecode: []const u8) !TitanAddress {
+        return self.deployFn(self.ptr, bytecode);
+    }
+
+    pub fn call(self: ProcessInterface, addr: TitanAddress, method: []const u8, args: []const u8) ![]const u8 {
+        return self.callFn(self.ptr, addr, method, args);
+    }
+
+    pub fn destroy(self: ProcessInterface, addr: TitanAddress) !void {
+        return self.destroyFn(self.ptr, addr);
+    }
+};
+
+/// 网络操作接口 (Network Interface)
+/// 对应 Linux 的 socket/connect/send 系统调用
+pub const NetworkInterface = struct {
+    ptr: *anyopaque,
+
+    sendTxFn: *const fn (ptr: *anyopaque, tx: *const Transaction) anyerror!TxHash,
+    waitConfirmFn: *const fn (ptr: *anyopaque, hash: TxHash) anyerror!TxReceipt,
+    queryFn: *const fn (ptr: *anyopaque, query: []const u8) anyerror![]const u8,
+
+    pub fn send_transaction(self: NetworkInterface, tx: *const Transaction) !TxHash {
+        return self.sendTxFn(self.ptr, tx);
+    }
+
+    pub fn wait_confirmation(self: NetworkInterface, hash: TxHash) !TxReceipt {
+        return self.waitConfirmFn(self.ptr, hash);
+    }
+
+    pub fn query(self: NetworkInterface, query_str: []const u8) ![]const u8 {
+        return self.queryFn(self.ptr, query_str);
+    }
+};
+```
+
+**第二步：实现 Solana 驱动**
+
+```zig
+// ============================================================================
+// drivers/solana_driver.zig - Solana 驱动实现
+// ============================================================================
+
+const std = @import("std");
+const solana = @import("solana_sdk"); // 现有的 solana-sdk-zig
+const syscalls = @import("../core/syscalls.zig");
+
+pub const SolanaDriver = struct {
+    rpc_client: solana.RpcClient,
+    payer: solana.Keypair,
+    program_id: solana.Pubkey,
+
+    pub fn init(rpc_url: []const u8, payer_keypair: []const u8) !SolanaDriver {
+        return .{
+            .rpc_client = try solana.RpcClient.init(rpc_url),
+            .payer = try solana.Keypair.fromSecretKey(payer_keypair),
+            .program_id = solana.Pubkey.default(),
+        };
+    }
+
+    // ========== AssetInterface 实现 ==========
+
+    fn transfer_impl(ctx: *anyopaque, to: []const u8, amount: u64) !void {
+        const self: *SolanaDriver = @ptrCast(@alignCast(ctx));
+
+        // 调用现有的 solana-sdk-zig
+        const to_pubkey = try solana.Pubkey.fromBase58(to);
+        const ix = solana.SystemProgram.transfer(
+            self.payer.pubkey(),
+            to_pubkey,
+            amount,
+        );
+
+        var tx = solana.Transaction.init();
+        try tx.add_instruction(ix);
+        tx.sign(&[_]solana.Keypair{self.payer});
+
+        _ = try self.rpc_client.sendAndConfirmTransaction(tx);
+    }
+
+    fn balance_impl(ctx: *anyopaque, address: []const u8) !u64 {
+        const self: *SolanaDriver = @ptrCast(@alignCast(ctx));
+        const pubkey = try solana.Pubkey.fromBase58(address);
+        return self.rpc_client.getBalance(pubkey);
+    }
+
+    fn mint_impl(ctx: *anyopaque, to: []const u8, amount: u64) !void {
+        const self: *SolanaDriver = @ptrCast(@alignCast(ctx));
+        // 调用 SPL Token mint_to
+        const to_pubkey = try solana.Pubkey.fromBase58(to);
+        const ix = solana.spl.Token.mintTo(
+            self.program_id,
+            to_pubkey,
+            self.payer.pubkey(),
+            amount,
+        );
+        // ... 发送交易
+        _ = self;
+        _ = ix;
+    }
+
+    fn burn_impl(ctx: *anyopaque, amount: u64) !void {
+        _ = ctx;
+        _ = amount;
+        // 调用 SPL Token burn
+    }
+
+    /// 导出标准 AssetInterface
+    pub fn asset_interface(self: *SolanaDriver) syscalls.AssetInterface {
+        return .{
+            .ptr = self,
+            .transferFn = transfer_impl,
+            .balanceFn = balance_impl,
+            .mintFn = mint_impl,
+            .burnFn = burn_impl,
+        };
+    }
+
+    // ========== StorageInterface 实现 ==========
+
+    fn storage_read_impl(ctx: *anyopaque, key: []const u8) ![]const u8 {
+        const self: *SolanaDriver = @ptrCast(@alignCast(ctx));
+        // 从 PDA 读取数据
+        const pda = try solana.Pubkey.findProgramAddress(
+            &[_][]const u8{key},
+            self.program_id,
+        );
+        const account = try self.rpc_client.getAccountInfo(pda.pubkey);
+        return account.data;
+    }
+
+    fn storage_write_impl(ctx: *anyopaque, key: []const u8, value: []const u8) !void {
+        _ = ctx;
+        _ = key;
+        _ = value;
+        // 创建或更新 PDA
+    }
+
+    /// 导出标准 StorageInterface
+    pub fn storage_interface(self: *SolanaDriver) syscalls.StorageInterface {
+        return .{
+            .ptr = self,
+            .readFn = storage_read_impl,
+            .writeFn = storage_write_impl,
+            .deleteFn = undefined, // Solana 不支持真正删除
+            .existsFn = undefined,
+        };
+    }
+};
+```
+
+**第三步：实现 NEAR 驱动**
+
+```zig
+// ============================================================================
+// drivers/near_driver.zig - NEAR 驱动实现
+// ============================================================================
+
+const std = @import("std");
+const near = @import("near_sdk"); // 现有的 near-sdk-zig
+const syscalls = @import("../core/syscalls.zig");
+
+pub const NearDriver = struct {
+    account_id: []const u8,
+    private_key: []const u8,
+    rpc_url: []const u8,
+
+    pub fn init(account_id: []const u8, private_key: []const u8, rpc_url: []const u8) NearDriver {
+        return .{
+            .account_id = account_id,
+            .private_key = private_key,
+            .rpc_url = rpc_url,
+        };
+    }
+
+    // ========== AssetInterface 实现 ==========
+    // NEAR 的逻辑完全不同（异步、Promise），但在这一层被抹平了
+
+    fn transfer_impl(ctx: *anyopaque, to: []const u8, amount: u64) !void {
+        const self: *NearDriver = @ptrCast(@alignCast(ctx));
+
+        // NEAR 原生 token 转账
+        const action = near.Action.transfer(amount);
+        const tx = near.Transaction{
+            .signer_id = self.account_id,
+            .receiver_id = to,
+            .actions = &[_]near.Action{action},
+        };
+
+        // 签名并发送
+        const signed_tx = try near.sign_transaction(tx, self.private_key);
+        _ = try near.rpc.broadcast_tx_commit(self.rpc_url, signed_tx);
+    }
+
+    fn balance_impl(ctx: *anyopaque, address: []const u8) !u64 {
+        const self: *NearDriver = @ptrCast(@alignCast(ctx));
+        const account = try near.rpc.view_account(self.rpc_url, address);
+        // NEAR 余额是 u128，需要转换
+        return @truncate(account.amount);
+    }
+
+    fn mint_impl(ctx: *anyopaque, to: []const u8, amount: u64) !void {
+        const self: *NearDriver = @ptrCast(@alignCast(ctx));
+        // NEAR FT 标准的 ft_transfer
+        _ = try near.rpc.call_function(
+            self.rpc_url,
+            self.account_id, // 假设是 token contract
+            "ft_mint",
+            .{ .receiver_id = to, .amount = amount },
+        );
+    }
+
+    /// 导出标准 AssetInterface
+    pub fn asset_interface(self: *NearDriver) syscalls.AssetInterface {
+        return .{
+            .ptr = self,
+            .transferFn = transfer_impl,
+            .balanceFn = balance_impl,
+            .mintFn = mint_impl,
+            .burnFn = undefined,
+        };
+    }
+
+    // ========== StorageInterface 实现 ==========
+
+    fn storage_read_impl(ctx: *anyopaque, key: []const u8) ![]const u8 {
+        const self: *NearDriver = @ptrCast(@alignCast(ctx));
+        // NEAR 的 view_state
+        return try near.rpc.view_state(self.rpc_url, self.account_id, key);
+    }
+
+    fn storage_write_impl(ctx: *anyopaque, key: []const u8, value: []const u8) !void {
+        const self: *NearDriver = @ptrCast(@alignCast(ctx));
+        // 通过合约调用写入
+        _ = try near.rpc.call_function(
+            self.rpc_url,
+            self.account_id,
+            "storage_write",
+            .{ .key = key, .value = value },
+        );
+    }
+
+    pub fn storage_interface(self: *NearDriver) syscalls.StorageInterface {
+        return .{
+            .ptr = self,
+            .readFn = storage_read_impl,
+            .writeFn = storage_write_impl,
+            .deleteFn = undefined,
+            .existsFn = undefined,
+        };
+    }
+};
+```
+
+#### 17.20.4 上层应用：真正的 OS 体验
+
+```zig
+// ============================================================================
+// app/main.zig - 上层应用示例
+// ============================================================================
+
+const std = @import("std");
+const SolanaDriver = @import("drivers/solana_driver.zig").SolanaDriver;
+const NearDriver = @import("drivers/near_driver.zig").NearDriver;
+const AssetInterface = @import("core/syscalls.zig").AssetInterface;
+
+pub fn main() !void {
+    // 1. 启动时加载驱动 (这一步通常由 OS 启动引导完成)
+    var sol_driver = try SolanaDriver.init(
+        "https://api.mainnet-beta.solana.com",
+        @embedFile("keypair.json"),
+    );
+
+    var near_driver = NearDriver.init(
+        "alice.near",
+        @embedFile("near_key.json"),
+        "https://rpc.mainnet.near.org",
+    );
+
+    // 2. 将驱动向上转化为统一接口
+    const sol_assets = sol_driver.asset_interface();
+    const near_assets = near_driver.asset_interface();
+
+    // 3. 业务逻辑 (完全不知道底层是 Solana 还是 NEAR)
+    try run_arbitrage_bot(sol_assets, near_assets);
+}
+
+/// 通用套利机器人逻辑
+/// 注意：它接收的是 AssetInterface，完全不依赖具体 SDK
+fn run_arbitrage_bot(chain_a: AssetInterface, chain_b: AssetInterface) !void {
+    // 检查 A 链余额
+    const balance_a = try chain_a.get_balance("Vault_A_Address");
+    std.debug.print("Chain A balance: {}\n", .{balance_a});
+
+    // 从 A 链转账
+    if (balance_a >= 100) {
+        try chain_a.transfer("Bridge_Contract", 100);
+        std.debug.print("Transferred 100 from Chain A\n", .{});
+    }
+
+    // 在 B 链操作
+    const balance_b = try chain_b.get_balance("Vault_B_Address");
+    if (balance_b < 100) {
+        std.debug.print("Not enough balance on Chain B!\n", .{});
+        return;
+    }
+
+    // 执行套利
+    try chain_b.transfer("Target_Address", balance_b);
+    std.debug.print("Arbitrage complete!\n", .{});
+}
+
+/// 另一个示例：跨链 DeFi 操作
+fn cross_chain_swap(
+    source: AssetInterface,
+    target: AssetInterface,
+    amount: u64,
+) !void {
+    // 1. 从源链提取
+    try source.transfer("Bridge_Source", amount);
+
+    // 2. 等待桥接 (简化，实际需要监听事件)
+    std.time.sleep(30 * std.time.ns_per_s);
+
+    // 3. 在目标链接收
+    const received = try target.get_balance("Bridge_Target");
+    std.debug.print("Received {} on target chain\n", .{received});
+}
+```
+
+#### 17.20.5 三大工程难点及解决方案
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    务实路径的三大工程难点                                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  难点 #1: 地址格式的统一度量衡 (Universal Address Format)                    │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  问题:                                                              │   │
+│  │  • Solana: Base58 (32 bytes) - "Hn4d...xyz"                        │   │
+│  │  • NEAR: String - "alice.near"                                     │   │
+│  │  • EVM: Hex (20 bytes) - "0x1234...abcd"                           │   │
+│  │  • TON: Base64 - "EQD..."                                          │   │
+│  │                                                                     │   │
+│  │  解决方案: TitanAddress 联合体                                       │   │
+│  │  ┌───────────────────────────────────────────────────────────────┐ │   │
+│  │  │  pub const TitanAddress = union(enum) {                       │ │   │
+│  │  │      solana: [32]u8,                                          │ │   │
+│  │  │      near: []const u8,                                        │ │   │
+│  │  │      evm: [20]u8,                                             │ │   │
+│  │  │      ton: [36]u8,                                             │ │   │
+│  │  │                                                               │ │   │
+│  │  │      pub fn from_string(chain: ChainType, s: []const u8) !@This()│ │   │
+│  │  │      pub fn to_string(self: @This()) []const u8               │ │   │
+│  │  │      pub fn to_bytes(self: @This()) []const u8                │ │   │
+│  │  │  };                                                           │ │   │
+│  │  └───────────────────────────────────────────────────────────────┘ │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  难点 #2: 异步模型的统一 (Async Unification)                                 │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  问题:                                                              │   │
+│  │  • Solana: 发交易通常是"发了就等结果" (同步阻塞)                    │   │
+│  │  • NEAR: 分片异步，发了交易可能要等几个块后的 Receipt               │   │
+│  │  • TON: Actor 模型，完全异步，无同步调用                            │   │
+│  │                                                                     │   │
+│  │  解决方案: TitanFuture 系统                                          │   │
+│  │  ┌───────────────────────────────────────────────────────────────┐ │   │
+│  │  │  pub const TitanFuture(T) = struct {                          │ │   │
+│  │  │      state: enum { pending, resolved, rejected },             │ │   │
+│  │  │      result: ?T,                                              │ │   │
+│  │  │      error_msg: ?[]const u8,                                  │ │   │
+│  │  │                                                               │ │   │
+│  │  │      pub fn await(self: *@This()) !T {                        │ │   │
+│  │  │          while (self.state == .pending) {                     │ │   │
+│  │  │              // 轮询或回调                                     │ │   │
+│  │  │          }                                                    │ │   │
+│  │  │          return self.result orelse error.Rejected;            │ │   │
+│  │  │      }                                                        │ │   │
+│  │  │                                                               │ │   │
+│  │  │      pub fn then(self, callback: fn(T) void) void             │ │   │
+│  │  │  };                                                           │ │   │
+│  │  │                                                               │ │   │
+│  │  │  // 上层调用: const receipt = try titan.transfer(...).await();│ │   │
+│  │  └───────────────────────────────────────────────────────────────┘ │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  难点 #3: 错误处理的标准化 (Errno)                                           │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  问题:                                                              │   │
+│  │  • Solana: 错误码 0x123, "custom error 5"                          │   │
+│  │  • NEAR: "Not enough gas", "ExecutionError::..."                   │   │
+│  │  • EVM: "revert", "out of gas", Panic codes                        │   │
+│  │                                                                     │   │
+│  │  解决方案: TitanError 标准错误码 (类似 Linux errno)                  │   │
+│  │  ┌───────────────────────────────────────────────────────────────┐ │   │
+│  │  │  pub const TitanError = error {                               │ │   │
+│  │  │      // 通用错误 (0-99)                                        │ │   │
+│  │  │      InsufficientBalance,     // ENOENT - 余额不足             │ │   │
+│  │  │      PermissionDenied,        // EACCES - 权限拒绝             │ │   │
+│  │  │      InvalidAddress,          // EINVAL - 地址无效             │ │   │
+│  │  │      Timeout,                 // ETIMEDOUT - 超时              │ │   │
+│  │  │                                                               │ │   │
+│  │  │      // 网络错误 (100-199)                                     │ │   │
+│  │  │      NetworkUnavailable,      // ENETUNREACH                   │ │   │
+│  │  │      TransactionFailed,       // 交易失败                      │ │   │
+│  │  │      BlockConfirmationFailed, // 确认失败                      │ │   │
+│  │  │                                                               │ │   │
+│  │  │      // 资源错误 (200-299)                                     │ │   │
+│  │  │      OutOfGas,                // 计算资源耗尽                   │ │   │
+│  │  │      AccountNotFound,         // 账户不存在                    │ │   │
+│  │  │      ContractPaused,          // 合约暂停                      │ │   │
+│  │  │  };                                                           │ │   │
+│  │  │                                                               │ │   │
+│  │  │  // 驱动负责将底层错误映射到标准错误                            │ │   │
+│  │  │  fn map_solana_error(code: u32) TitanError { ... }            │ │   │
+│  │  │  fn map_near_error(msg: []const u8) TitanError { ... }        │ │   │
+│  │  └───────────────────────────────────────────────────────────────┘ │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 17.20.6 路径对比：编译器 vs 适配器
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    两种路径的最终对比                                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  维度              编译器路径 (17.18/17.19)      适配器路径 (17.20) ✅       │
+│  ─────────────────────────────────────────────────────────────────────────  │
+│  实现难度          ★★★★★                        ★★☆☆☆                      │
+│  开发周期          12-18 个月                    2-4 周 MVP                   │
+│  依赖              需要实现完整编译器            利用现有 SDK                 │
+│  性能              理论最优 (裸字节码)           实际足够 (SDK 开销)          │
+│  灵活性            高 (任意语言)                 中 (限于有 SDK 的链)         │
+│  维护成本          高 (编译器演进)               低 (SDK 更新)                │
+│  风险              技术风险大                    技术风险小                   │
+│                                                                             │
+│  结论:                                                                      │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  适配器路径是 MVP 阶段的正确选择。                                  │   │
+│  │                                                                     │   │
+│  │  先用 VTable + 现有 SDK 快速验证价值，                              │   │
+│  │  等生态成熟后，再考虑编译器路径作为性能优化。                       │   │
+│  │                                                                     │   │
+│  │  这就像 Linux 初期用 C 写驱动，                                     │   │
+│  │  而不是一开始就追求"纯汇编最优性能"。                               │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 17.20.7 实施路线图
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    务实路径实施路线图                                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Phase 1: MVP (2-4 周)                                                      │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  □ 定义 Titan 标准接口 (AssetInterface, StorageInterface)           │   │
+│  │  □ 实现 Solana Driver (基于 solana-sdk-zig)                         │   │
+│  │  □ 实现 NEAR Driver (基于 near-sdk-zig)                             │   │
+│  │  □ 编写示例应用 (跨链转账)                                          │   │
+│  │  □ 基础测试                                                         │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  Phase 2: 完善 (4-8 周)                                                     │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  □ 实现 TitanAddress 统一地址                                       │   │
+│  │  □ 实现 TitanFuture 异步模型                                        │   │
+│  │  □ 实现 TitanError 标准错误码                                       │   │
+│  │  □ 添加 EVM Driver (Ethereum/L2)                                    │   │
+│  │  □ 添加 ProcessInterface / NetworkInterface                         │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  Phase 3: 生产化 (8-12 周)                                                  │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  □ 添加 TON Driver                                                  │   │
+│  │  □ 实现驱动热加载 (Plugin System)                                   │   │
+│  │  □ 性能优化 (连接池、批量请求)                                      │   │
+│  │  □ 监控和日志系统                                                   │   │
+│  │  □ 文档和 SDK                                                       │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  Phase 4: 进阶 (12+ 周, 可选)                                               │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  □ 编译器路径探索 (ISA 抽象)                                        │   │
+│  │  □ Polyglot Shell (Python/TS 绑定)                                  │   │
+│  │  □ 形式化验证集成                                                   │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 17.20.8 总结：Web3 的 POSIX
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    务实路径的核心价值                                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  我们不需要重写编译器。                                                      │
+│  我们需要做的是 Web3 的 HAL (Hardware Abstraction Layer)。                  │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  现有的 Solana/NEAR SDK  =  设备驱动 (Device Drivers)               │   │
+│  │  Titan 接口层            =  内核系统调用 (Kernel Syscalls)          │   │
+│  │  Zig                     =  粘合剂 (Comptime + C ABI)               │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  这在工程上是立即可行的，                                                    │
+│  而且对于开发者来说，体验和编译器方案几乎一样好——                           │
+│  反正他们都是调 API。                                                       │
+│                                                                             │
+│  一句话总结:                                                                 │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  "Titan OS = Web3 的 POSIX 标准。                                   │   │
+│  │   不同的链是不同的硬件，                                            │   │
+│  │   但它们都支持 titan.transfer() 和 titan.storage.write()。"         │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
 ## 18. 终极总结 (Conclusion)
 
 ### Titan Framework 是什么？
