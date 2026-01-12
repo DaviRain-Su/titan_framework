@@ -14587,6 +14587,740 @@ pub const OfflineSigningFlow = struct {
 
 ---
 
+### 17.18 Polyglot Transpiler: 多语言转译架构 (Multi-Language Transpilation)
+
+#### 17.18.1 核心概念：转译 vs FFI
+
+**关键区别**：Titan 的多语言支持是**编译时转译**，不是运行时 FFI。
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    转译 vs FFI 的根本区别                                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  传统 FFI (Foreign Function Interface):                                    │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │   Python Code ────► Python Runtime ◄────┐                          │   │
+│  │                          │              │                           │   │
+│  │                          ▼              │ Runtime Bridge            │   │
+│  │                    FFI Binding ─────────┤                           │   │
+│  │                          │              │                           │   │
+│  │                          ▼              │                           │   │
+│  │                    C Library ◄──────────┘                          │   │
+│  │                                                                     │   │
+│  │   问题: 运行时开销 + GC 暂停 + 跨语言类型转换                        │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  Titan 转译 (Transpilation):                                               │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │   Python Code ────► AST Parser ────► Zig IR ────► Target Code       │   │
+│  │        │                                              │             │   │
+│  │        │              编译时完成                       │             │   │
+│  │        │              无运行时开销                     │             │   │
+│  │        ▼                                              ▼             │   │
+│  │   Source File                                    Bytecode           │   │
+│  │   (开发时)                                       (部署时)           │   │
+│  │                                                                     │   │
+│  │   优势: 零运行时开销 + 无 GC + 类型在编译时验证                      │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 17.18.2 Polyglot Transpiler 架构
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Polyglot Transpiler 完整架构                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │                         Layer 1: Source Languages                     │ │
+│  │  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐         │ │
+│  │  │ Python  │ │ TypeScript│ │  Swift  │ │  Go     │ │  Rust   │         │ │
+│  │  │ Subset  │ │ Subset  │ │ Subset  │ │ Subset  │ │ Subset  │         │ │
+│  │  └────┬────┘ └────┬────┘ └────┬────┘ └────┬────┘ └────┬────┘         │ │
+│  │       │           │           │           │           │               │ │
+│  │       ▼           ▼           ▼           ▼           ▼               │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                    │                                       │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │                         Layer 2: AST Parsing                          │ │
+│  │                                                                       │ │
+│  │  ┌─────────────────────────────────────────────────────────────────┐ │ │
+│  │  │            tree-sitter / Zig 第三方 AST 库                      │ │ │
+│  │  │                                                                 │ │ │
+│  │  │  • tree-sitter-python    → Python AST                           │ │ │
+│  │  │  • tree-sitter-typescript → TypeScript AST                      │ │ │
+│  │  │  • tree-sitter-swift     → Swift AST                            │ │ │
+│  │  │  • tree-sitter-go        → Go AST                               │ │ │
+│  │  │                                                                 │ │ │
+│  │  │  Zig 实现: comptime 解析，零运行时依赖                          │ │ │
+│  │  └─────────────────────────────────────────────────────────────────┘ │ │
+│  │                                                                       │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                    │                                       │
+│                                    ▼                                       │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │                         Layer 3: Titan IR (中间表示)                   │ │
+│  │                                                                       │ │
+│  │  ┌─────────────────────────────────────────────────────────────────┐ │ │
+│  │  │                    Unified Titan AST                            │ │ │
+│  │  │                                                                 │ │ │
+│  │  │  pub const TitanIR = struct {                                  │ │ │
+│  │  │      functions: []Function,                                    │ │ │
+│  │  │      structs: []StructDef,                                     │ │ │
+│  │  │      storage_vars: []StorageVar,                               │ │ │
+│  │  │      events: []EventDef,                                       │ │ │
+│  │  │  };                                                            │ │ │
+│  │  │                                                                 │ │ │
+│  │  │  // 类型系统统一映射                                            │ │ │
+│  │  │  Python int   → TitanIR.u256                                   │ │ │
+│  │  │  TS number    → TitanIR.u256                                   │ │ │
+│  │  │  Swift Int    → TitanIR.u256                                   │ │ │
+│  │  │  Go big.Int   → TitanIR.u256                                   │ │ │
+│  │  │                                                                 │ │ │
+│  │  └─────────────────────────────────────────────────────────────────┘ │ │
+│  │                                                                       │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                    │                                       │
+│                                    ▼                                       │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │                         Layer 4: Target Codegen                       │ │
+│  │                                                                       │ │
+│  │  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐     │ │
+│  │  │  Zig Code   │ │  Yul Code   │ │  Tact Code  │ │ Rust (Wasm) │     │ │
+│  │  │  Generator  │ │  Generator  │ │  Generator  │ │  Generator  │     │ │
+│  │  └──────┬──────┘ └──────┬──────┘ └──────┬──────┘ └──────┬──────┘     │ │
+│  │         │               │               │               │             │ │
+│  │         ▼               ▼               ▼               ▼             │ │
+│  │     ┌───────┐       ┌───────┐       ┌───────┐       ┌───────┐        │ │
+│  │     │ SBF   │       │ EVM   │       │ TVM   │       │ Wasm  │        │ │
+│  │     │Solana │       │ L1/L2 │       │ TON   │       │ Near  │        │ │
+│  │     └───────┘       └───────┘       └───────┘       └───────┘        │ │
+│  │                                                                       │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 17.18.3 语言子集策略 (Contract-Oriented Subset)
+
+**核心原则**：不支持完整语言，只支持**合约导向子集**。
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    语言子集设计原则                                          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  类比: Vyper vs Python                                                      │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │   Python (完整语言):                                                 │   │
+│  │   • 动态类型                                                        │   │
+│  │   • GC (垃圾回收)                                                   │   │
+│  │   • 多线程                                                          │   │
+│  │   • 反射/元编程                                                     │   │
+│  │   • 无限递归                                                        │   │
+│  │   • 动态导入                                                        │   │
+│  │                                                                     │   │
+│  │   Vyper (合约子集):                                                 │   │
+│  │   • 静态类型 ✓                                                      │   │
+│  │   • 无 GC (显式内存) ✓                                              │   │
+│  │   • 无多线程 ✓                                                      │   │
+│  │   • 无反射 ✓                                                        │   │
+│  │   • 有界循环 ✓                                                      │   │
+│  │   • 确定性执行 ✓                                                    │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  Titan 多语言子集统一规则:                                                  │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  ✅ 支持:                                                           │   │
+│  │  ├── 基础类型 (int, bool, bytes, address)                          │   │
+│  │  ├── 结构体/类 (无继承或单继承)                                    │   │
+│  │  ├── 函数 (纯函数优先)                                              │   │
+│  │  ├── 有界循环 (for i in range(N))                                  │   │
+│  │  ├── 条件分支 (if/else)                                             │   │
+│  │  ├── 错误处理 (Result/Option 模式)                                  │   │
+│  │  └── 装饰器/属性 (映射到合约语义)                                   │   │
+│  │                                                                     │   │
+│  │  ❌ 禁止:                                                           │   │
+│  │  ├── 动态类型/Any                                                   │   │
+│  │  ├── 垃圾回收器                                                     │   │
+│  │  ├── 线程/协程                                                      │   │
+│  │  ├── 无界递归                                                       │   │
+│  │  ├── 运行时反射                                                     │   │
+│  │  ├── 动态导入/eval                                                  │   │
+│  │  └── 随机数/IO (非区块链原语)                                       │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 17.18.4 各语言子集设计
+
+```zig
+// ============================================================================
+// Titan Polyglot Subset Definitions
+// ============================================================================
+
+/// Python 合约子集 (类似 Vyper)
+pub const PythonContractSubset = struct {
+    // 支持的类型
+    pub const supported_types = .{
+        .int,       // → u256
+        .bool,      // → bool
+        .bytes,     // → []u8
+        .str,       // → []u8 (UTF-8)
+        .List,      // → []T (固定大小)
+        .Dict,      // → mapping
+        .Tuple,     // → struct
+    };
+
+    // 支持的语法
+    pub const supported_syntax = .{
+        .function_def,
+        .class_def,        // 映射到 contract
+        .if_statement,
+        .for_statement,    // 必须是 range(N) 形式
+        .return_statement,
+        .assert_statement, // 映射到 require
+        .decorator,        // @external, @view, @payable
+    };
+
+    // 禁止的语法
+    pub const forbidden_syntax = .{
+        .async_def,        // 无协程
+        .yield_statement,  // 无生成器
+        .import_statement, // 无动态导入
+        .eval,             // 无 eval
+        .exec,             // 无 exec
+        .global,           // 无全局变量修改
+    };
+};
+
+/// TypeScript 合约子集 (类似 AssemblyScript)
+pub const TypeScriptContractSubset = struct {
+    pub const supported_types = .{
+        .number,    // → u256 (整数)
+        .bigint,    // → u256
+        .boolean,   // → bool
+        .Uint8Array,// → []u8
+        .string,    // → []u8 (UTF-8)
+        .Array,     // → []T (固定大小)
+        .Map,       // → mapping
+    };
+
+    // 必须使用 strict mode
+    pub const require_strict_mode = true;
+
+    // 禁止的特性
+    pub const forbidden_features = .{
+        .any,              // 禁止 any 类型
+        .unknown,          // 禁止 unknown 类型
+        .Promise,          // 禁止 async/await
+        .Symbol,           // 禁止 Symbol
+        .Proxy,            // 禁止 Proxy
+        .Reflect,          // 禁止 Reflect
+        .eval,             // 禁止 eval
+        .Function_new,     // 禁止 new Function
+    };
+};
+
+/// Go 合约子集
+pub const GoContractSubset = struct {
+    pub const supported_packages = .{
+        "math/big",        // big.Int → u256
+        "encoding/binary", // 序列化
+        "errors",          // 错误处理
+    };
+
+    pub const forbidden_packages = .{
+        "net",             // 无网络
+        "os",              // 无文件系统
+        "reflect",         // 无反射
+        "unsafe",          // 无 unsafe
+        "runtime",         // 无运行时操作
+        "sync",            // 无并发原语
+    };
+};
+```
+
+#### 17.18.5 AST 解析策略
+
+**方案一：tree-sitter 集成**
+
+```zig
+// ============================================================================
+// tree-sitter 集成方案
+// ============================================================================
+
+const c = @cImport({
+    @cInclude("tree_sitter/api.h");
+    @cInclude("tree_sitter/parser.h");
+});
+
+/// tree-sitter 解析器封装
+pub fn TreeSitterParser(comptime language: Language) type {
+    return struct {
+        parser: *c.TSParser,
+
+        pub fn init() !@This() {
+            const parser = c.ts_parser_new() orelse return error.ParserInitFailed;
+
+            const lang_fn = switch (language) {
+                .Python => c.tree_sitter_python,
+                .TypeScript => c.tree_sitter_typescript,
+                .Go => c.tree_sitter_go,
+                .Swift => c.tree_sitter_swift,
+            };
+
+            if (!c.ts_parser_set_language(parser, lang_fn())) {
+                return error.LanguageSetFailed;
+            }
+
+            return .{ .parser = parser };
+        }
+
+        pub fn parse(self: *@This(), source: []const u8) !*c.TSTree {
+            return c.ts_parser_parse_string(
+                self.parser,
+                null,
+                source.ptr,
+                @intCast(source.len),
+            ) orelse error.ParseFailed;
+        }
+
+        pub fn toTitanIR(self: *@This(), tree: *c.TSTree) !TitanIR {
+            const root = c.ts_tree_root_node(tree);
+            return self.convertNode(root);
+        }
+    };
+}
+```
+
+**方案二：纯 Zig AST 解析**
+
+```zig
+// ============================================================================
+// 纯 Zig AST 解析器 (comptime 友好)
+// ============================================================================
+
+/// Python 子集词法分析器
+pub const PythonLexer = struct {
+    source: []const u8,
+    pos: usize = 0,
+
+    pub const Token = union(enum) {
+        def,
+        class_,
+        if_,
+        for_,
+        return_,
+        assert,
+        identifier: []const u8,
+        number: i128,
+        string: []const u8,
+        operator: Operator,
+        indent,
+        dedent,
+        newline,
+        eof,
+    };
+
+    pub fn next(self: *@This()) Token {
+        self.skipWhitespace();
+        if (self.pos >= self.source.len) return .eof;
+
+        // 关键字检测
+        if (self.matchKeyword("def")) return .def;
+        if (self.matchKeyword("class")) return .class_;
+        if (self.matchKeyword("if")) return .if_;
+        if (self.matchKeyword("for")) return .for_;
+        if (self.matchKeyword("return")) return .return_;
+        if (self.matchKeyword("assert")) return .assert;
+
+        // 标识符
+        if (std.ascii.isAlphabetic(self.source[self.pos])) {
+            return .{ .identifier = self.readIdentifier() };
+        }
+
+        // 数字
+        if (std.ascii.isDigit(self.source[self.pos])) {
+            return .{ .number = self.readNumber() };
+        }
+
+        // ...
+    }
+};
+
+/// Python 子集语法分析器
+pub const PythonParser = struct {
+    lexer: PythonLexer,
+
+    pub fn parseContract(self: *@This()) !TitanIR {
+        var ir = TitanIR{};
+
+        while (true) {
+            const token = self.lexer.next();
+            switch (token) {
+                .class_ => {
+                    // class ContractName:
+                    const contract = try self.parseClass();
+                    ir.contracts.append(contract);
+                },
+                .def => {
+                    // 顶层函数
+                    const func = try self.parseFunction();
+                    ir.functions.append(func);
+                },
+                .eof => break,
+                else => return error.UnexpectedToken,
+            }
+        }
+
+        return ir;
+    }
+
+    fn parseClass(self: *@This()) !Contract {
+        // class Counter:
+        //     value: int
+        //
+        //     @external
+        //     def increment(self) -> None:
+        //         self.value += 1
+
+        const name = try self.expectIdentifier();
+        try self.expect(.colon);
+
+        var contract = Contract{ .name = name };
+
+        // 解析类体
+        while (self.currentIndent() > 0) {
+            const token = self.lexer.peek();
+            switch (token) {
+                .identifier => {
+                    // 状态变量: value: int
+                    const var_def = try self.parseStorageVar();
+                    contract.storage_vars.append(var_def);
+                },
+                .at => {
+                    // 装饰器: @external, @view
+                    const decorator = try self.parseDecorator();
+                    const func = try self.parseFunction();
+                    func.visibility = decorator.toVisibility();
+                    contract.functions.append(func);
+                },
+                .def => {
+                    // 方法
+                    const func = try self.parseFunction();
+                    contract.functions.append(func);
+                },
+                else => break,
+            }
+        }
+
+        return contract;
+    }
+};
+```
+
+#### 17.18.6 三大技术挑战及解决方案
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Polyglot Transpiler 三大挑战                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  挑战 #1: GC 问题                                                           │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  问题:                                                              │   │
+│  │  Python/TS/Go 等语言依赖 GC，区块链 VM 不支持 GC                    │   │
+│  │                                                                     │   │
+│  │  解决方案: 区域内存分配器 (Arena Allocator)                          │   │
+│  │  ┌───────────────────────────────────────────────────────────────┐ │   │
+│  │  │  # Python 源码                                                │ │   │
+│  │  │  def process():                                               │ │   │
+│  │  │      data = [1, 2, 3, 4, 5]  # 动态分配                       │ │   │
+│  │  │      return sum(data)                                         │ │   │
+│  │  │                                                               │ │   │
+│  │  │  // 转译后 Zig                                                │ │   │
+│  │  │  fn process(arena: *ArenaAllocator) u256 {                    │ │   │
+│  │  │      const data = arena.alloc(u256, 5);                       │ │   │
+│  │  │      // 函数返回时 arena 整体释放，无需 GC                      │ │   │
+│  │  │      return sum(data);                                         │ │   │
+│  │  │  }                                                             │ │   │
+│  │  └───────────────────────────────────────────────────────────────┘ │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  挑战 #2: 运行时膨胀                                                        │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  问题:                                                              │   │
+│  │  完整语言运行时 (Python 3MB+, Node.js 10MB+) 远超合约大小限制        │   │
+│  │                                                                     │   │
+│  │  解决方案: 零运行时设计                                              │   │
+│  │  • 所有类型检查在转译时完成                                         │   │
+│  │  • 所有多态在 comptime 展开                                         │   │
+│  │  • 无反射、无动态派发                                               │   │
+│  │  • 最终输出纯 Zig/Yul/Tact，不携带源语言运行时                      │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  挑战 #3: 类型系统映射                                                       │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  问题:                                                              │   │
+│  │  不同语言的类型语义差异巨大                                         │   │
+│  │  Python int: 任意精度 | JS number: IEEE 754 | Go int: 平台相关     │   │
+│  │                                                                     │   │
+│  │  解决方案: Titan 标准类型系统                                        │   │
+│  │  ┌───────────────────────────────────────────────────────────────┐ │   │
+│  │  │  源语言类型         →  Titan IR 类型    →  目标类型            │ │   │
+│  │  │  ─────────────────────────────────────────────────────────    │ │   │
+│  │  │  Python int         →  TitanU256       →  u256 (Yul)         │ │   │
+│  │  │  TS BigInt          →  TitanU256       →  u256 (Yul)         │ │   │
+│  │  │  Go big.Int         →  TitanU256       →  u256 (Yul)         │ │   │
+│  │  │  Python bytes       →  TitanBytes      →  bytes (Yul)        │ │   │
+│  │  │  Python list[T]     →  TitanArray<T>   →  T[] (Yul)          │ │   │
+│  │  │  Python dict[K,V]   →  TitanMapping    →  mapping(K=>V)      │ │   │
+│  │  └───────────────────────────────────────────────────────────────┘ │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 17.18.7 完整转译示例
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Python → Yul → EVM 完整示例                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Step 1: Python 源码 (用户编写)                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  @contract                                                          │   │
+│  │  class Counter:                                                     │   │
+│  │      value: int                                                     │   │
+│  │                                                                     │   │
+│  │      @external                                                      │   │
+│  │      def increment(self) -> None:                                   │   │
+│  │          self.value += 1                                            │   │
+│  │                                                                     │   │
+│  │      @view                                                          │   │
+│  │      def get_value(self) -> int:                                    │   │
+│  │          return self.value                                          │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                     │                                       │
+│                                     ▼                                       │
+│  Step 2: Titan IR (中间表示)                                                │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  TitanIR {                                                          │   │
+│  │      .contracts = [{                                                │   │
+│  │          .name = "Counter",                                         │   │
+│  │          .storage = [{ .name = "value", .type = .u256, .slot = 0 }],│   │
+│  │          .functions = [                                             │   │
+│  │              {                                                      │   │
+│  │                  .name = "increment",                               │   │
+│  │                  .selector = 0xd09de08a,                            │   │
+│  │                  .visibility = .external,                           │   │
+│  │                  .mutability = .mutable,                            │   │
+│  │                  .body = [.sstore(.slot(0), .add(.sload(0), 1))],   │   │
+│  │              },                                                     │   │
+│  │              {                                                      │   │
+│  │                  .name = "get_value",                               │   │
+│  │                  .selector = 0x20965255,                            │   │
+│  │                  .visibility = .external,                           │   │
+│  │                  .mutability = .view,                               │   │
+│  │                  .body = [.return(.sload(0))],                      │   │
+│  │              },                                                     │   │
+│  │          ],                                                         │   │
+│  │      }],                                                            │   │
+│  │  }                                                                  │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                     │                                       │
+│                                     ▼                                       │
+│  Step 3: Yul 代码 (中间目标)                                                │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  object "Counter" {                                                 │   │
+│  │      code {                                                         │   │
+│  │          datacopy(0, dataoffset("runtime"), datasize("runtime"))   │   │
+│  │          return(0, datasize("runtime"))                             │   │
+│  │      }                                                              │   │
+│  │      object "runtime" {                                             │   │
+│  │          code {                                                     │   │
+│  │              switch selector()                                      │   │
+│  │              case 0xd09de08a /* increment */ {                      │   │
+│  │                  sstore(0, add(sload(0), 1))                        │   │
+│  │              }                                                      │   │
+│  │              case 0x20965255 /* get_value */ {                      │   │
+│  │                  mstore(0, sload(0))                                │   │
+│  │                  return(0, 32)                                      │   │
+│  │              }                                                      │   │
+│  │              default { revert(0, 0) }                               │   │
+│  │          }                                                          │   │
+│  │      }                                                              │   │
+│  │  }                                                                  │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                     │                                       │
+│                                     ▼                                       │
+│  Step 4: EVM Bytecode (最终产物)                                            │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  0x608060405234801561001057600080fd5b506004361061002b5760003560    │   │
+│  │  e01c8063d09de08a14610030578063209652551461003a575b600080fd5b61    │   │
+│  │  003860048036038101906100339190610070565b610054565b005b610042    │   │
+│  │  610066565b60405161004f919061009c565b60405180910390f35b600160    │   │
+│  │  00540160005481905550565b60005481565b... (继续)                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 17.18.8 Zig Comptime 在转译中的优势
+
+```zig
+// ============================================================================
+// Comptime 转译优化器
+// ============================================================================
+
+/// 编译时类型推断
+pub fn transpile(comptime source_lang: Language, source: []const u8) !TitanIR {
+    // 在编译时选择正确的解析器
+    const Parser = switch (source_lang) {
+        .Python => PythonParser,
+        .TypeScript => TypeScriptParser,
+        .Go => GoParser,
+        .Swift => SwiftParser,
+    };
+
+    var parser = Parser.init(source);
+    const ir = try parser.parse();
+
+    // 编译时验证语言子集合规性
+    comptime {
+        for (ir.functions) |func| {
+            if (func.uses_forbidden_feature) {
+                @compileError("Function uses forbidden feature: " ++ func.name);
+            }
+        }
+    }
+
+    return ir;
+}
+
+/// 编译时代码生成
+pub fn generate(comptime target: Target, ir: TitanIR) []const u8 {
+    return switch (target) {
+        .Yul => comptime YulGenerator.generate(ir),
+        .Zig => comptime ZigGenerator.generate(ir),
+        .Tact => comptime TactGenerator.generate(ir),
+    };
+}
+
+/// 完整的编译时管道
+pub fn compileContract(
+    comptime source_lang: Language,
+    comptime target: Target,
+    source: []const u8,
+) !CompiledContract {
+    // 步骤 1: 解析
+    const ir = try transpile(source_lang, source);
+
+    // 步骤 2: 优化 (编译时)
+    const optimized_ir = comptime optimize(ir);
+
+    // 步骤 3: 代码生成
+    const target_code = generate(target, optimized_ir);
+
+    // 步骤 4: 编译到字节码
+    const bytecode = switch (target) {
+        .Yul => try yul_to_evm(target_code),
+        .Zig => try zig_to_sbf(target_code),
+        .Tact => try tact_to_tvm(target_code),
+    };
+
+    return .{
+        .source_lang = source_lang,
+        .target = target,
+        .bytecode = bytecode,
+        .abi = generateABI(optimized_ir),
+    };
+}
+```
+
+#### 17.18.9 战略意义：语言无关的 Web3
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Polyglot Transpiler 战略意义                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  现状 (2024):                                                               │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  想开发 Ethereum?  → 必须学 Solidity                                │   │
+│  │  想开发 Solana?    → 必须学 Rust + Anchor                           │   │
+│  │  想开发 TON?       → 必须学 FunC/Tact                               │   │
+│  │  想开发 Sui?       → 必须学 Move                                    │   │
+│  │                                                                     │   │
+│  │  结果: 开发者被链锁定，市场碎片化                                   │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  Titan Polyglot 愿景:                                                       │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  Python 开发者   ──┐                                                │   │
+│  │  TypeScript 开发者 ├──► Titan Transpiler ──► 任意链部署             │   │
+│  │  Go 开发者       ──┤                                                │   │
+│  │  Swift 开发者    ──┘                                                │   │
+│  │                                                                     │   │
+│  │  用你熟悉的语言，部署到任何链                                       │   │
+│  │  不是 "Write once, run anywhere"                                    │   │
+│  │  而是 "Write in anything, run everywhere"                           │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  市场扩张矩阵:                                                               │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  语言        全球开发者    当前 Web3 开发者    扩张潜力             │   │
+│  │  ───────────────────────────────────────────────────────────        │   │
+│  │  Python      10M+          ~50K               200x                  │   │
+│  │  JavaScript  17M+          ~100K              170x                  │   │
+│  │  Go          2M+           ~20K               100x                  │   │
+│  │  Swift       3M+           ~5K                600x                  │   │
+│  │  Rust        2M+           ~80K               25x                   │   │
+│  │                                                                     │   │
+│  │  Titan Polyglot 可触达: 34M+ 开发者                                 │   │
+│  │  当前 Web3 开发者总量:   ~500K                                      │   │
+│  │  扩张倍数: 68x                                                      │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  一句话总结:                                                                 │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  "Titan Polyglot Transpiler 让全世界 3400 万开发者                  │   │
+│  │   无需学习任何新语言，即可成为 Web3 开发者。"                       │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
 ## 18. 终极总结 (Conclusion)
 
 ### Titan Framework 是什么？
