@@ -1094,11 +1094,222 @@ Phase 3: Actor DSL (理论创新)
 └── 成为写 TON 合约最优雅的语言
 ```
 
-## 11. 结论
+## 11. Zig Comptime DSL 实现方案 (The Killer Feature)
 
-TON 适配层本质上是一个 **"Zig to Tact Cross-Compiler"**。
+比起"转译器"，更精确的定位是：**嵌入式领域特定语言 (Embedded DSL)**。
 
-### 11.1 难度评估总结
+利用 Zig 极其强大的 **`comptime` (编译时元编程)** 能力，在 Zig 语法之上构建一层"糖衣"，让用户完全感觉不到 Fift 或 Cell 的存在。
+
+### 11.1 目标体验：用户视角的代码
+
+假设我们要写一个简单的 **Counter (计数器)** 合约：
+
+```zig
+// contract.zig
+const std = @import("std");
+const ton = @import("ton_sdk"); // Titan TON SDK
+
+// 1. 定义状态 (像 Solidity 的状态变量)
+const Data = struct {
+    counter: u32,
+    owner: ton.Address,
+};
+
+// 2. 定义合约逻辑
+pub const CounterContract = struct {
+    // 注入 SDK 上下文
+    usingnamespace ton.Contract(Data);
+
+    // 初始化函数 (Constructor)
+    pub fn init(ctx: *Context, owner: ton.Address) !void {
+        ctx.data.counter = 0;
+        ctx.data.owner = owner;
+    }
+
+    // 接收内部消息 (Public Function)
+    pub fn increment(ctx: *Context, amount: u32) !void {
+        ctx.data.counter += amount;
+    }
+
+    // Getter (View Function)
+    pub fn get_counter(ctx: *Context) u32 {
+        return ctx.data.counter;
+    }
+};
+
+// 3. 生成入口
+pub fn main() !void {
+    try ton.generate(CounterContract);
+}
+```
+
+**体验对标**: 完全像在写 NEAR 或 Solana (Anchor) 的合约。
+
+### 11.2 SDK 幕后魔法：三大黑科技
+
+#### 魔法一：自动状态映射 (Auto Storage Mapping)
+
+**问题**: TON 开发者必须手动 pack/unpack Cell。
+**解决**: 利用 Zig 的 `@typeInfo` 反射能力。
+
+```zig
+// SDK 内部实现
+fn generateLoadCode(comptime T: type) []const u8 {
+    var code: []const u8 = "begins_parsing "; // Fift 伪指令
+
+    inline for (std.meta.fields(T)) |field| {
+        code = code ++ switch (field.type) {
+            u32 => "32 u@+ ",        // 读取 32 位
+            u64 => "64 u@+ ",        // 读取 64 位
+            ton.Address => "load_address ",
+            else => @compileError("Unsupported type: " ++ @typeName(field.type)),
+        };
+    }
+    return code;
+}
+
+// 当用户定义 struct { counter: u32 }
+// SDK 在编译时自动生成读取这个 Cell 的 Fift 代码
+// 用户完全无感
+```
+
+#### 魔法二：上下文追踪 (Context Tracking)
+
+**用户感觉**: 只是修改了 `ctx.data.counter += 1`。
+**SDK 操作**:
+
+```zig
+// ctx.data 实际上是内存中的镜像
+// 当函数结束时，SDK 自动注入：
+
+fn epilogue(comptime T: type) []const u8 {
+    return comptime blk: {
+        var code: []const u8 = "";
+        // 1. 读取 ctx.data 的最新值
+        // 2. 调用 generateStoreCode()
+        code = code ++ generateStoreCode(T);
+        // 3. 生成 c4 pop (更新合约持久化存储)
+        code = code ++ "c4 pop ";
+        break :blk code;
+    };
+}
+```
+
+#### 魔法三：自动路由 (Auto Router)
+
+**问题**: Solana/Anchor 需要写 `match instruction { ... }`。
+**解决**: 遍历合约的所有 `pub fn` 自动生成路由表。
+
+```zig
+// SDK 内部实现
+pub fn generate(comptime ContractType: type) !void {
+    // 生成 Fift 头
+    const writer = std.io.getStdOut().writer();
+    try writer.print("PROGRAM{{\n", .{});
+
+    // 生成路由表 (Router)
+    inline for (std.meta.declarations(ContractType)) |decl| {
+        if (decl.is_pub and @typeInfo(@TypeOf(@field(ContractType, decl.name))) == .Fn) {
+            const op_code = comptime hashFunctionName(decl.name);
+            try writer.print("DUP {d} EQINT IFJMP:<{{ {s} }}>\\n", .{ op_code, decl.name });
+        }
+    }
+
+    // 遍历所有函数生成具体逻辑
+    inline for (std.meta.declarations(ContractType)) |decl| {
+        if (decl.is_pub) {
+            try generateFunctionBody(ContractType, decl.name, writer);
+        }
+    }
+
+    try writer.print("}}END\\n", .{});
+}
+```
+
+### 11.3 这个方案的核心优势
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Zig Comptime DSL 优势                         │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  1. 抹平心智负担                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │  TON 底层: 基于栈 (Push/Pop) ──► 反人类                  │   │
+│  │  人类思维: 基于变量 (Struct)  ──► 自然                   │   │
+│  │                                                         │   │
+│  │  SDK 让开发者回到 "定义结构体 -> 修改结构体" 的舒适区   │   │
+│  │  这正是 Anchor 对 Solana 做的事！                       │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│  2. 静态类型检查                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │  如果用户试图把 u32 赋值给 Address                       │   │
+│  │  Zig 编译器在 **编译阶段** 就会报错                      │   │
+│  │  生成的 Fift 代码在类型上永远正确                        │   │
+│  │  杜绝运行时错误!                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│  3. 开发工具复用 (LSP)                                          │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │  用户写的是标准 Zig 代码                                 │   │
+│  │  VS Code 的 ZLS 插件完美工作:                           │   │
+│  │  • 代码自动补全  ✓                                      │   │
+│  │  • 点击跳转定义  ✓                                      │   │
+│  │  • 实时语法报错  ✓                                      │   │
+│  │                                                         │   │
+│  │  比在记事本里写 Fift 脚本强一万倍!                       │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 11.4 实施难度评估
+
+| 阶段 | 工作内容 | 难度 |
+| :--- | :--- | :--- |
+| **Week 1** | 实现 `Store/Load` 自动生成器 (struct → Fift 存取指令) | 中等 |
+| **Week 2** | 实现 `Router` 生成器 (OpCode → 函数跳转) | 中等 |
+| **Week 3** | 实现基础逻辑指令映射 (`+`, `-`, `if` → Fift) | 中高 |
+| **Week 4+** | 完善错误处理、测试、文档 | 中等 |
+
+**关键技能要求**: 精通 Zig 的 `comptime`、`@typeInfo`、`inline for` 等元编程特性。
+
+### 11.5 为什么 Zig 是最佳选择？
+
+| 语言 | 元编程能力 | 适合度 |
+| :--- | :--- | :--- |
+| **Zig** | `comptime` 编译时执行任意代码 | ⭐⭐⭐⭐⭐ |
+| Rust | 宏系统 (proc_macro) 复杂难用 | ⭐⭐⭐ |
+| TypeScript | 运行时反射，无编译时生成 | ⭐⭐ |
+| Go | 几乎无元编程能力 | ⭐ |
+
+**Zig 的 comptime 是杀手锏**:
+- 比 Rust 宏更强、更易读
+- 可以在编译时执行任意逻辑
+- 生成的代码零运行时开销
+
+### 11.6 最终效果
+
+```
+用户写的是 Zig (舒适、现代、类型安全)
+         │
+         ▼ comptime 魔法
+生成的是 Fift (TON 原生、可调试)
+         │
+         ▼ 官方工具链
+运行的是 TVM (高性能)
+```
+
+**这将是 TON 生态中第一个"现代化"的开发框架。**
+
+现在的 Tact 虽然在尝试做这件事，但 Zig 的工程化能力会让 Titan SDK 更加稳健和轻量。
+
+## 12. 结论
+
+TON 适配层本质上是一个 **"Zig to Tact Cross-Compiler"**，或更精确地说，是一个 **Zig Comptime Embedded DSL**。
+
+### 12.1 难度评估总结
 
 | 方面 | 难度 | 说明 |
 | :--- | :--- | :--- |
@@ -1107,7 +1318,7 @@ TON 适配层本质上是一个 **"Zig to Tact Cross-Compiler"**。
 | 错误处理 (Saga) | S 级 | 分布式事务补偿逻辑 |
 | **综合难度** | **地狱级** | 相当于写分布式数据库引擎 |
 
-### 11.2 战略建议
+### 12.2 战略建议
 
 **短期** (不推荐):
 - 工程量大，ROI 低
@@ -1119,9 +1330,9 @@ TON 适配层本质上是一个 **"Zig to Tact Cross-Compiler"**。
 - 函数式编程 + Actor 模型可能是 TON 开发的最优范式
 - 价值不可估量
 
-### 11.3 核心洞察
+### 12.3 核心洞察
 
-> **"用 Zig 硬刚 TON 是 S 级难度；用函数式思维适配 TON 是 B+ 级难度。"**
+> **"用 Zig 硬刚 TON 是 S 级难度；用 Zig comptime DSL 适配 TON 是 B+ 级难度。"**
 
 如果能做出一个 **"函数式 Titan to Tact"** 的编译器：
 1. 解决了 TON 的开发难题
