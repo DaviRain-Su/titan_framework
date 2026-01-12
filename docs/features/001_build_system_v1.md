@@ -14,18 +14,49 @@
 
 ```bash
 # 新增选项: target_chain
-# 类型: enum { solana, near, generic_wasm, mock }
+# 类型: enum (见下方完整列表)
 # 默认: mock (本地测试)
 
-# 示例 1: 编译 Solana 内核
-zig build -Dtarget_chain=solana -Doptimize=ReleaseSmall
+# ===== V1 目标 =====
+zig build -Dtarget_chain=solana -Doptimize=ReleaseSmall  # Solana .so
+zig build -Dtarget_chain=mock                             # 本地测试
+zig build test                                            # 运行测试
 
-# 示例 2: 编译 Near 合约
-zig build -Dtarget_chain=near
+# ===== V2 目标 =====
+zig build -Dtarget_chain=near                 # Near .wasm
+zig build -Dtarget_chain=cosmwasm             # CosmWasm .wasm
+zig build -Dtarget_chain=substrate            # Polkadot/Ink! .wasm
+zig build -Dtarget_chain=stylus               # Arbitrum Stylus .wasm
+zig build -Dtarget_chain=generic_wasm         # 通用 Wasm
 
-# 示例 3: 运行本地单元测试
-zig build test
+# ===== V3 目标 (需转译器) =====
+zig build -Dtarget_chain=ckb                  # Nervos CKB .elf
+# TON 和 EVM Native 需要使用专用转译器 CLI
 ```
+
+### 2.1 target_chain 完整枚举
+
+```zig
+pub const TargetChain = enum {
+    // V1
+    solana,       // Solana SBF
+    mock,         // 本地测试
+
+    // V2
+    near,         // Near Protocol
+    cosmwasm,     // Cosmos 生态
+    substrate,    // Polkadot 生态
+    stylus,       // Arbitrum L2
+    generic_wasm, // 通用 Wasm32
+
+    // V3
+    ton,          // TON (转译)
+    ckb,          // Nervos CKB
+    evm_native,   // 原生 EVM (转译)
+};
+```
+
+详细的后端映射见 [022_backend_registry.md](../../specs/022_backend_registry.md)。
 
 ## 3. 实现细节
 

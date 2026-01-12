@@ -36,6 +36,7 @@
 | **019** | [Nervos 适配器](019_adapter_ckb.md) | 基于 Cell 模型的 Extended UTXO 适配规范。 |
 | **020** | [原生 EVM 适配器](020_adapter_evm_native.md) | Zig 到 Yul 的源码转译规范。 |
 | **021** | [Polkadot 适配器](021_adapter_polkadot.md) | Substrate Contracts (ink!) Seal API 与 SCALE 编码规范。 |
+| **022** | [后端注册表](022_backend_registry.md) | 所有编译后端的状态、映射与实现路线图。 |
 
 ## 高级设计 (Advanced Designs)
 
