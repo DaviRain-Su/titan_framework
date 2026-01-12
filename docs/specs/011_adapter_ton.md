@@ -270,11 +270,383 @@ send(SendParameters{
 2.  **不支持裸内存访问**: `allocator` 在 TON 上是**不可用**的。用户必须使用高级数据结构 (`ArrayList` 等)，这些会被映射为 Tact 的数组。
 3.  **标准库受限**: 只有 `titan.lib` 中的子集（如 Math）可用。
 
-## 7. 破局之道: 如果非要支持
+## 7. 三大阻抗失配详解 (The Three Impedance Mismatches)
+
+转译器的核心难点不是"写不出来"，而是存在巨大的**阻抗失配 (Impedance Mismatch)**。
+
+### 7.1 阻抗失配 #1: 同步思维 vs 异步宇宙 (Control Flow)
+
+**这是最反直觉的一点。**
+
+#### 问题本质
+
+| 范式 | Zig/Solana/EVM | TON (Tact) |
+| :--- | :--- | :--- |
+| 调用方式 | 同步调用，等待返回 | 异步消息，发完就结束 |
+| 原子性 | 原子事务，全成功或全回滚 | 无原子性，每条消息独立 |
+| 代码结构 | 线性顺序执行 | 碎片化事件处理 |
+
+#### 示例: 购买道具逻辑
+
+**Zig 原始代码 (线性的美好世界)**:
+```zig
+fn buy_item(user: User, item_id: u64) !void {
+    // 1. 扣用户的钱 (跨合约调用)
+    const success = try usdt_contract.transfer(user, my_address, 100);
+
+    // 2. 如果扣款成功，给道具 (本地逻辑)
+    if (success) {
+        self.inventory[item_id] = user;
+    }
+}
+```
+
+**问题**: Tact 根本做不到"等待转账结果"！
+
+**转译器必须自动拆分成两段独立的 Tact 代码**:
+```typescript
+// ========== 生成的 Tact 代码 ==========
+
+// 第一段: 发起请求
+receive(msg: BuyItem) {
+    // 保存中间状态 (item_id 必须记住!)
+    self.pending_purchases.set(msg.query_id, PendingPurchase{
+        user: msg.user,
+        item_id: msg.item_id,
+    });
+
+    // 发送消息给 USDT 合约
+    send(SendParameters{
+        to: USDT_ADDRESS,
+        value: ton("0.1"),
+        body: Transfer{
+            amount: 100,
+            query_id: msg.query_id  // 用于关联回调
+        }.toCell()
+    });
+    // ❌ 函数在这里强制结束！不能写 if (success)
+}
+
+// 第二段: 处理回调 (由转译器自动生成)
+receive(msg: TransferNotification) {
+    // 找回之前保存的状态
+    let pending = self.pending_purchases.get(msg.query_id);
+    if (pending != null) {
+        // 只有收到 USDT 合约的回信，才能执行发货逻辑
+        self.inventory.set(pending.item_id, pending.user);
+        self.pending_purchases.delete(msg.query_id);
+    }
+}
+```
+
+#### 转译器核心挑战: CPS 变换
+
+转译器必须实现 **Continuation Passing Style (CPS) 变换**:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    CPS 变换流程                                  │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Zig 源码分析:                                                  │
+│  ┌─────────────────────────────────────────────┐               │
+│  │ fn buy_item() {                              │               │
+│  │     result = await call();  ◄── 检测跨合约调用│               │
+│  │     if (result) { ... }     ◄── 依赖调用结果 │               │
+│  │ }                                            │               │
+│  └─────────────────────────────────────────────┘               │
+│                          │                                      │
+│                          ▼                                      │
+│  依赖图分析:                                                    │
+│  ┌─────────────────────────────────────────────┐               │
+│  │  [调用点] ────depends on────► [后续逻辑]     │               │
+│  │     │                              │         │               │
+│  │     │                              │         │               │
+│  │  切割点                        需要保存的状态 │               │
+│  └─────────────────────────────────────────────┘               │
+│                          │                                      │
+│                          ▼                                      │
+│  代码生成:                                                      │
+│  ┌──────────────────┐    ┌──────────────────┐                  │
+│  │ receive(Request) │    │ receive(Callback)│                  │
+│  │ • 保存状态       │    │ • 恢复状态       │                  │
+│  │ • 发送消息       │    │ • 执行后续逻辑   │                  │
+│  └──────────────────┘    └──────────────────┘                  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**难度评估**: S 级 - 需要完整的数据流分析和代码生成器
+
+### 7.2 阻抗失配 #2: 堆内存 vs Cell 树 (Memory Model)
+
+#### 问题本质
+
+| 范式 | Zig/LLVM | TON (TVM) |
+| :--- | :--- | :--- |
+| 内存模型 | 线性连续字节 (Heap) | 树状 Cell 结构 (BoC) |
+| 访问方式 | 指针 + 偏移量 | Cell 解包/打包 |
+| 修改方式 | 直接修改内存地址 | 创建新 Cell，替换引用 |
+
+#### Cell 树的读写代价
+
+**Zig 的直接修改**:
+```zig
+// 对 CPU 来说就是几个汇编指令
+state.players.get(id).score += 1;
+```
+
+**TON 的 Cell 操作**:
+```
+读取流程:
+1. 从根 Cell 开始
+2. 解析引用链找到 players 子树
+3. 在子树中查找 id 对应的 Cell
+4. 解包 Cell 获取 score 值
+
+修改流程:
+1. 创建新的 score Cell
+2. 创建新的 Player Cell (引用新 score)
+3. 创建新的 players 子树 (引用新 Player)
+4. 创建新的根 Cell (引用新 players)
+5. 替换合约存储根引用
+
+Gas 成本: 每层 Cell 嵌套都要付费!
+```
+
+#### 转译器优化挑战
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Cell 树优化问题                               │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  朴素转译 (Bad):                     优化转译 (Good):           │
+│                                                                 │
+│       Root                                Root                  │
+│        │                                   │                    │
+│    ┌───┴───┐                           ┌───┴───┐               │
+│    │       │                           │       │               │
+│  players config                      players config            │
+│    │                                   │                        │
+│  ┌─┴─┐                              ┌──┴──┐                    │
+│  │   │                              │     │                    │
+│ p1   p2                           [p1,p2,p3,p4]                │
+│  │   │                              (扁平 map)                  │
+│ ┌┴┐ ┌┴┐                                                        │
+│ │ │ │ │                                                        │
+│ ...深度嵌套...                       Gas: O(1) 查找            │
+│                                                                 │
+│ Gas: O(n) 遍历深度                                             │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**转译器必须理解 BoC 序列化规则**，生成扁平化的数据结构以降低 Gas 成本。
+
+**难度评估**: A 级 - 需要深入理解 TON 的存储计费模型
+
+### 7.3 阻抗失配 #3: 自动回滚 vs Saga 模式 (Error Handling)
+
+#### 问题本质
+
+| 范式 | Solana/EVM | TON |
+| :--- | :--- | :--- |
+| 错误处理 | 整个交易原子回滚 | 每条消息独立，不会回滚 |
+| 一致性 | 强一致性 | 最终一致性 |
+| 补偿逻辑 | 自动 | 必须手动实现 |
+
+#### 灾难场景
+
+```
+用户想买道具:
+Step 1: 扣款 100 USDT     ✓ 成功 (已经扣了!)
+Step 2: 发放道具          ✗ 失败 (库存不足)
+
+EVM/Solana: 整个交易回滚，用户钱还在
+TON: Step 1 不会回滚！用户钱扣了，道具没拿到！
+```
+
+#### 转译器必须自动生成 Saga 补偿逻辑
+
+**Zig 源码**:
+```zig
+fn buy_item(user: User, item_id: u64) !void {
+    try usdt.transfer(user, self, 100);  // Step 1
+    try self.give_item(user, item_id);   // Step 2
+}
+```
+
+**转译器生成的 Tact 代码 (含补偿逻辑)**:
+```typescript
+// 状态机: Pending -> Step1Done -> Completed / Compensating -> Compensated
+
+receive(msg: BuyItem) {
+    self.saga_state = SagaState.Pending;
+    self.saga_data = SagaData{ user: msg.user, item_id: msg.item_id };
+
+    // Step 1: 发起扣款
+    send(To: USDT, body: Transfer{ ... });
+}
+
+receive(msg: TransferOK) {
+    self.saga_state = SagaState.Step1Done;
+
+    // Step 2: 尝试发货
+    if (self.inventory.get(self.saga_data.item_id) == null) {
+        // 库存不足! 触发补偿
+        self.saga_state = SagaState.Compensating;
+        send(To: USDT, body: Refund{ amount: 100, to: self.saga_data.user });
+        return;
+    }
+
+    self.inventory.set(self.saga_data.item_id, self.saga_data.user);
+    self.saga_state = SagaState.Completed;
+}
+
+receive(msg: RefundOK) {
+    self.saga_state = SagaState.Compensated;
+    // 补偿完成，用户钱已退回
+}
+```
+
+**难度评估**: S 级 - 相当于实现一个分布式事务引擎
+
+### 7.4 难度总结
+
+| 阻抗失配 | 核心挑战 | 难度 | 自动化可行性 |
+| :--- | :--- | :--- | :--- |
+| #1 控制流 | CPS 变换 + 状态管理 | S | 困难但可行 |
+| #2 内存模型 | BoC 优化 + Gas 估算 | A | 可行 |
+| #3 错误处理 | Saga 模式自动生成 | S | 非常困难 |
+
+**综合评估**: 让编译器自动处理这三个问题，难度堪比写一个分布式数据库引擎。
+
+## 8. 为什么函数式编程可能是答案
+
+### 8.1 Zig vs 函数式: 谁更适合 TON?
+
+用 **Zig (命令式语言)** 去适配 **TON (异步 Actor 模型)** 是非常痛苦的。
+
+但 **函数式编程** 有奇效。
+
+### 8.2 函数式架构与 TON 的同构性
+
+```
+函数式编程核心:
+Msg -> Model -> (Model, Cmd)
+
+│  Model: 状态 (不可变)
+│  Msg:   输入消息
+│  Cmd:   要发出的异步指令 (副作用)
+
+TON Actor 模型:
+Message -> State -> (State, OutMessages)
+
+│  State:       合约状态
+│  Message:     收到的消息
+│  OutMessages: 要发送的消息
+
+发现: 它们是同构的 (Isomorphic)!
+```
+
+### 8.3 函数式风格的 Titan for TON
+
+```zig
+// 假设: 函数式风格的 Titan DSL
+
+// 定义消息类型
+const BuyItem = titan.Message(struct { user: Address, item_id: u64 });
+const TransferOK = titan.Message(struct { query_id: u64 });
+
+// 定义状态
+const Model = struct {
+    inventory: HashMap(u64, Address),
+    pending: HashMap(u64, PendingPurchase),
+};
+
+// 纯函数: 状态转换 + 命令生成
+fn update(model: Model, msg: anytype) struct { Model, []titan.Cmd } {
+    return switch (@TypeOf(msg)) {
+        BuyItem => .{
+            // 更新状态: 记录待处理购买
+            model.with(.{ .pending = model.pending.put(msg.query_id, .{
+                .user = msg.user,
+                .item_id = msg.item_id,
+            })}),
+            // 生成命令: 发送转账消息 (不执行，只声明)
+            &[_]titan.Cmd{
+                titan.Cmd.send(USDT, Transfer{ .amount = 100 }),
+            },
+        },
+        TransferOK => .{
+            // 更新状态: 完成购买
+            const pending = model.pending.get(msg.query_id);
+            model.with(.{
+                .inventory = model.inventory.put(pending.item_id, pending.user),
+                .pending = model.pending.remove(msg.query_id),
+            }),
+            // 无额外命令
+            &[_]titan.Cmd{},
+        },
+        else => .{ model, &[_]titan.Cmd{} },
+    };
+}
+```
+
+### 8.4 编译到不同目标的策略
+
+**同一套业务逻辑，编译成两种完全不同的运行范式**:
+
+| 目标链 | 运行范式 | 编译策略 |
+| :--- | :--- | :--- |
+| Solana | 指令式 (Imperative) | `update` 内联展开，`Cmd` 立即执行 |
+| TON | 响应式 (Reactive/Actor) | `update` 映射为 `receive()`，`Cmd` 映射为 `send()` |
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│               函数式 Titan 的双目标编译                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│                     ┌─────────────────┐                         │
+│                     │  Titan 源码     │                         │
+│                     │  (函数式风格)   │                         │
+│                     └────────┬────────┘                         │
+│                              │                                  │
+│              ┌───────────────┴───────────────┐                  │
+│              │                               │                  │
+│              ▼                               ▼                  │
+│     ┌─────────────────┐             ┌─────────────────┐         │
+│     │  Solana 后端    │             │   TON 后端      │         │
+│     ├─────────────────┤             ├─────────────────┤         │
+│     │ • 内联 update   │             │ • update→receive│         │
+│     │ • Cmd 立即执行  │             │ • Cmd→send()    │         │
+│     │ • 线性控制流    │             │ • 自动状态保存  │         │
+│     └────────┬────────┘             └────────┬────────┘         │
+│              │                               │                  │
+│              ▼                               ▼                  │
+│         ┌────────┐                      ┌────────┐              │
+│         │  .so   │                      │ .tact  │              │
+│         │  (SBF) │                      │ (TVM)  │              │
+│         └────────┘                      └────────┘              │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 8.5 难度对比
+
+| 转译路径 | 核心工作 | 难度 |
+| :--- | :--- | :--- |
+| **Zig → Tact** | 把"同步逻辑"硬拆成"异步碎片" | **S 级** |
+| **函数式 Titan → Tact** | 把"声明式指令"映射成"Tact 消息" | **B+ 级** |
+
+**结论**: 函数式风格让 TON 转译的难度从 "不可能" 变成 "困难但可行"。
+
+## 9. 破局之道: 实现策略
 
 虽然难，但不是不可能。**正是因为难，如果做出来，护城河极深**。
 
-### 7.1 方案 A: 双层转译 (Transpiler Approach)
+### 9.1 方案 A: 双层转译 (Transpiler Approach)
 
 **不要试图直接生成 TVM 机器码**。利用现有工具链。
 
@@ -293,7 +665,7 @@ send(SendParameters{
 **优势**: 工程量可控
 **劣势**: 只能支持部分语言特性，无法 100% 覆盖
 
-### 7.2 方案 B: Actor Model 天然契合 (理论创新)
+### 9.2 方案 B: Actor Model 天然契合 (理论创新)
 
 **关键洞察**: TON 的架构本质上就是 **Actor 模型**。
 
@@ -351,7 +723,7 @@ fn handle_deposit(state: State, msg: Deposit) State {
 
 **这才是 Titan 的真正威力**。
 
-### 7.3 实现路线图
+### 9.3 实现路线图
 
 ```
 Phase 1: 简单场景 (MVP)
@@ -371,19 +743,39 @@ Phase 3: Actor DSL (理论创新)
 └── 成为写 TON 合约最优雅的语言
 ```
 
-## 8. 结论
+## 10. 结论
 
 TON 适配层本质上是一个 **"Zig to Tact Cross-Compiler"**。
+
+### 10.1 难度评估总结
+
+| 方面 | 难度 | 说明 |
+| :--- | :--- | :--- |
+| 控制流转换 (CPS) | S 级 | 同步→异步，自动状态管理 |
+| 内存模型 (BoC) | A 级 | Cell 树优化，Gas 控制 |
+| 错误处理 (Saga) | S 级 | 分布式事务补偿逻辑 |
+| **综合难度** | **地狱级** | 相当于写分布式数据库引擎 |
+
+### 10.2 战略建议
 
 **短期** (不推荐):
 - 工程量大，ROI 低
 - 会拖慢 Titan 早期进度
-- 建议作为 "Tier 3" 延后
+- 建议作为 **Tier 3** 延后
 
 **长期** (巨大机会):
 - 一旦攻克，成为连接 "Ethereum/Solana 宇宙" 和 "Telegram 宇宙" 的唯一桥梁
 - 函数式编程 + Actor 模型可能是 TON 开发的最优范式
 - 价值不可估量
+
+### 10.3 核心洞察
+
+> **"用 Zig 硬刚 TON 是 S 级难度；用函数式思维适配 TON 是 B+ 级难度。"**
+
+如果能做出一个 **"函数式 Titan to Tact"** 的编译器：
+1. 解决了 TON 的开发难题
+2. 证明了函数式编程在异步区块链时代的优越性
+3. 这将是完美的学术与商业结合的故事
 
 **战略建议**:
 > 先用 Solana/Wasm 证明框架成功，拿到融资/收入后，再组建特种部队攻克 TON。
