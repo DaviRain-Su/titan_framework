@@ -1,0 +1,370 @@
+# 架构决策: 为什么选择 Zig (Why Zig)
+
+> 状态: **已批准 (Approved)**
+> 类型: 架构决策记录 (ADR)
+> 决策: 选择 Zig 作为 Titan OS 的核心实现语言
+
+## 1. 背景
+
+Titan OS 的核心目标是构建一个**跨链抽象操作系统**：
+
+- **Write Once, Compile Anywhere**: 一份代码编译到 Solana (SBF)、Near (Wasm)、EVM 等
+- **零成本抽象**: 没有运行时开销
+- **极致控制**: 精确控制内存布局、类型大小、编译输出
+
+这要求我们选择一门能够进行**深度元编程**且**没有隐式运行时**的系统编程语言。
+
+## 2. 候选语言
+
+| 语言 | 优势 | 劣势 |
+| :--- | :--- | :--- |
+| **Rust** | 内存安全、生态成熟、区块链社区广泛 | 元编程能力有限、隐式运行时、编译慢 |
+| **Zig** | comptime 元编程、零运行时、交叉编译、编译快 | 生态较小、语言尚未 1.0 |
+| **C** | 极致控制、无运行时 | 内存不安全、缺乏现代抽象 |
+| **C++** | 模板元编程 | 复杂度高、编译慢、历史包袱 |
+
+## 3. 决策: 选择 Zig
+
+**Zig 是构建跨链抽象层的最优选择。**
+
+原因如下：
+
+## 4. 核心优势对比
+
+### 4.1 `comptime` vs Rust Macros: 降维打击
+
+这是最核心的差距。
+
+**问题场景**: 定义一个"通用整数"类型，在 EVM 上是 `u256`，在 Solana 上是 `u64`。
+
+#### Zig 的方式 (`comptime`)
+
+Zig 可以在编译阶段运行普通代码，**直接返回类型**：
+
+```zig
+// Zig: 像写普通代码一样写类型逻辑
+fn IntType(comptime target: Target) type {
+    return switch (target) {
+        .evm => u256,      // 直接返回类型！
+        .solana => u64,
+        .wasm => u128,
+    };
+}
+
+// 编译时确定 MyInt 是什么
+const MyInt = IntType(build_options.target);
+
+// 使用时完全透明
+var balance: MyInt = 100;
+balance += 50;  // 编译器知道这是 u64 还是 u256
+```
+
+**关键**: `comptime` 函数可以返回 `type`，这在 Rust 中是**不可能的**。
+
+#### Rust 的方式 (Macros/Traits)
+
+Rust 不能在函数里返回"类型"，必须使用条件编译或复杂的泛型：
+
+```rust
+// 方式 A: cfg 标记 - 会像病毒一样扩散
+#[cfg(feature = "evm")]
+type MyInt = U256;
+
+#[cfg(not(feature = "evm"))]
+type MyInt = u64;
+
+// 方式 B: 泛型约束 - 类型体操噩梦
+trait BlockchainInt: Add + Sub + Mul + Div + Ord + Clone + ... {
+    fn from_u64(v: u64) -> Self;
+    fn to_bytes(&self) -> Vec<u8>;
+    // ... 几十个方法
+}
+
+struct Contract<I: BlockchainInt> {
+    balance: I,
+    // 每个字段都要带泛型
+}
+
+impl<I: BlockchainInt> Contract<I> {
+    // 每个方法都要带泛型约束
+    fn transfer(&mut self, amount: I) { ... }
+}
+```
+
+**问题**:
+- `cfg` 标记会扩散到每个文件，维护成本极高
+- 泛型约束会导致**类型体操地狱**，代码可读性急剧下降
+- 无法在运行时根据类型做不同的编译优化
+
+#### 对比总结
+
+| 特性 | Zig comptime | Rust Macros/Generics |
+| :--- | :--- | :--- |
+| 返回类型 | ✅ 直接返回 `type` | ❌ 不支持 |
+| 代码复杂度 | 低，像普通代码 | 高，需要宏或泛型 |
+| 类型推导 | 编译器完全理解 | 宏展开后才能分析 |
+| IDE 支持 | 完整 | 宏内部无高亮/补全 |
+| 调试 | 可设断点 | 宏难以调试 |
+
+### 4.2 零运行时 vs 隐式运行时
+
+要适配 EVM 这种极端受限的虚拟机（栈很浅、没有堆、Gas 昂贵），需要对生成的代码有**绝对控制权**。
+
+#### Rust 的隐式运行时
+
+即使使用 `#![no_std]`，Rust 的 `core` 库仍包含隐式假设：
+
+```rust
+// Rust no_std 仍然需要这些
+#![no_std]
+
+// panic 处理 - 必须提供
+#[panic_handler]
+fn panic(_info: &PanicInfo) -> ! { loop {} }
+
+// 内存分配 - 即使不用也可能被引入
+#[global_allocator]
+static ALLOCATOR: MyAllocator = ...;
+
+// 格式化 - core::fmt 会引入大量代码
+use core::fmt::Write;
+```
+
+**问题**:
+- `panic` 处理逻辑会被编译进去
+- `fmt` 相关代码很难完全剔除
+- 生成的 Wasm/EVM 字节码体积大，Gas 消耗高
+
+#### Zig 的真正裸奔
+
+Zig 默认就是 freestanding，没有任何隐式依赖：
+
+```zig
+// Zig: 真正的零依赖
+const std = @import("std");
+
+// 你可以选择完全不用标准库
+// 甚至不需要 panic handler（编译器会警告但允许）
+
+pub fn main() void {
+    // 这里的代码编译出来就是纯粹的机器码
+    // 没有任何运行时开销
+}
+
+// 自定义 panic 行为
+pub fn panic(msg: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {
+    // EVM 上: 直接 revert
+    // Solana 上: 调用 sol_panic_
+    @trap();
+}
+```
+
+**优势**:
+- 精确控制每一个字节
+- EVM 上可以生成最小的字节码
+- 没有"死代码"问题
+
+#### 对比总结
+
+| 特性 | Zig | Rust (no_std) |
+| :--- | :--- | :--- |
+| 默认运行时 | 无 | core 库 |
+| panic 处理 | 可选 | 必须提供 |
+| 格式化代码 | 按需引入 | 容易意外引入 |
+| 二进制大小 | 极小 | 较大 |
+| EVM 适配 | 容易 | 困难 |
+
+### 4.3 内存布局的显式控制
+
+跨链开发中，数据序列化是核心问题：
+- Solana 用 Borsh
+- Ethereum 用 ABI (32 字节对齐)
+- Near 用 JSON 或 Borsh
+
+#### Zig 的精确控制
+
+```zig
+// Zig: 精确控制每个字节的布局
+
+// Packed struct - 无填充，按顺序排列
+const BorshLayout = packed struct {
+    amount: u64,      // 8 bytes
+    recipient: [32]u8, // 32 bytes
+    // 总共正好 40 bytes
+};
+
+// Extern struct - C ABI 兼容
+const CABILayout = extern struct {
+    amount: u64,
+    recipient: [32]u8,
+};
+
+// 可以在 comptime 检查大小
+comptime {
+    if (@sizeOf(BorshLayout) != 40) {
+        @compileError("Layout size mismatch!");
+    }
+}
+
+// 根据目标链选择布局
+const TransferData = switch (build_options.target) {
+    .solana => BorshLayout,
+    .evm => EVMABILayout,  // 32 字节对齐
+    .near => BorshLayout,
+};
+```
+
+#### Rust 的布局控制
+
+```rust
+// Rust: 需要属性标记，且限制更多
+
+#[repr(C)]  // C 布局
+struct CABILayout {
+    amount: u64,
+    recipient: [u8; 32],
+}
+
+#[repr(packed)]  // Packed 布局 - 但有 UB 风险！
+struct PackedLayout {
+    amount: u64,
+    recipient: [u8; 32],
+}
+
+// 访问 packed struct 的字段是 unsafe 的
+let amount = unsafe { packed.amount };  // UB 风险
+
+// 无法在编译时根据 target 切换布局
+// 必须用 cfg 或泛型
+```
+
+**问题**:
+- `#[repr(packed)]` 访问字段是 unsafe 的
+- 无法像 Zig 那样在 comptime 根据目标切换布局
+- 需要依赖 `serde` 等外部库，移植到 EVM 困难
+
+### 4.4 交叉编译的丝滑度
+
+Titan OS 需要编译到多个目标：SBF、Wasm、EVM。
+
+#### Zig 的一站式体验
+
+```bash
+# Zig 编译器是单一二进制，内置所有目标
+# 不需要安装任何额外工具链
+
+# 编译到 Solana SBF
+zig build -Dtarget=bpfel-unknown-none
+
+# 编译到 WebAssembly
+zig build -Dtarget=wasm32-freestanding
+
+# 编译到 RISC-V (CKB)
+zig build -Dtarget=riscv64-unknown-none
+
+# 编译到本地测试
+zig build
+```
+
+**优势**:
+- 单一 50MB 二进制，包含所有功能
+- 无需安装 LLVM、Clang、特定工具链
+- 版本一致性保证
+
+#### Rust 的工具链地狱
+
+```bash
+# Rust 每个目标需要单独安装
+
+# Solana - 需要安装 solana-toolchain
+sh -c "$(curl -sSfL https://release.solana.com/stable/install)"
+# 还需要安装 BPF SDK
+cargo install --git https://github.com/solana-labs/solana
+
+# Wasm - 需要安装 wasm target
+rustup target add wasm32-unknown-unknown
+# 可能还需要 wasm-pack, wasm-bindgen
+
+# Near - 需要 near-sdk
+cargo install near-cli
+
+# EVM - 需要 Solang 或魔改 LLVM
+# 或者用 foundry, hardhat 等完全不同的工具
+```
+
+**问题**:
+- 每个链需要不同的工具链
+- 版本兼容性问题频发
+- 新开发者配置环境需要数小时
+
+### 4.5 编译速度
+
+| 项目规模 | Zig | Rust |
+| :--- | :--- | :--- |
+| 小型合约 | < 1s | 5-10s |
+| 中型项目 | 2-5s | 30s-2min |
+| 大型项目 | 10-30s | 5-15min |
+
+Zig 的增量编译和简单的编译模型使得开发迭代更快。
+
+## 5. Rust 的优势（公平起见）
+
+Rust 也有其优势，但这些在 Titan OS 的场景下不是决定性因素：
+
+| Rust 优势 | 在 Titan 场景的权重 |
+| :--- | :--- |
+| 内存安全保证 | 中等 - Zig 也有 safety 检查 |
+| 成熟生态 | 中等 - 我们需要从零构建抽象层 |
+| 区块链社区 | 低 - 我们定义新范式 |
+| 异步支持 | 低 - 区块链是同步执行 |
+
+## 6. 总结比喻
+
+**Rust** 是一套精密的**模具**：
+- 你往里面倒钢水，出来的零件非常标准、坚固
+- 但模具形状改起来很累
+- 适合：编写**具体的**某条链的合约
+
+**Zig** 是一台**3D 打印机**：
+- 你可以随意输入图纸（comptime 逻辑）
+- 它可以打印出完全不同形状的零件
+- 适合：构建**能生成不同合约的框架**
+
+## 7. 决策结论
+
+| 方面 | 决策 |
+| :--- | :--- |
+| **核心语言** | Zig |
+| **元编程** | 利用 comptime 实现跨链类型抽象 |
+| **运行时** | 真正的零运行时，无隐式依赖 |
+| **编译** | 单一 zig 二进制，内置所有目标 |
+
+## 8. 风险与缓解
+
+| 风险 | 缓解措施 |
+| :--- | :--- |
+| Zig 尚未 1.0 | 锁定特定版本 (0.15.x)，跟踪上游变化 |
+| 生态较小 | 自建核心库，减少外部依赖 |
+| 社区认知度低 | 提供详细文档和教程 |
+| 人才招聘 | Zig 语法简单，C/Rust 开发者易上手 |
+
+## 9. 相关文档
+
+| 文档 | 关系 |
+| :--- | :--- |
+| [system_overview.md](system_overview.md) | 整体愿景 |
+| [013_universal_type_system.md](../design/013_universal_type_system.md) | comptime 类型抽象的具体实现 |
+| [022_backend_registry.md](../specs/022_backend_registry.md) | 多目标编译的具体配置 |
+
+## 10. 结论
+
+> **"Zig 之于 Titan OS，正如 C 之于 Linux。"**
+
+选择 Zig 不是因为它"更好"，而是因为它的**设计哲学**与 Titan OS 的目标**完美契合**：
+
+- **comptime** 使得"一份代码，多链编译"成为可能
+- **零运行时** 使得 EVM 这种极端环境也能适配
+- **显式控制** 使得跨链序列化成为可能
+- **一站式编译** 使得开发者体验极佳
+
+这是一个**架构层面的必然选择**，而非偏好。

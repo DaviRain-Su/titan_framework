@@ -4,7 +4,16 @@
 
 ## 统一设计原则
 
-所有规范遵循 Linux 的“**一切皆资源/IO**”抽象：链上对象被视为资源，通过统一 IO 语义访问。详见 `docs/architecture/master_architecture.md` 中的资源模型说明。
+所有规范遵循 Linux 的"**一切皆资源/IO**"抽象：链上对象被视为资源，通过统一 IO 语义访问。详见 `docs/architecture/master_architecture.md` 中的资源模型说明。
+
+## 架构决策 (Architecture Decisions)
+
+| 文档 | 描述 |
+| :--- | :--- |
+| [系统概览](../architecture/system_overview.md) | Titan OS 愿景与核心哲学。 |
+| [总体架构](../architecture/master_architecture.md) | V1/V2/V3 演进路线与分层架构。 |
+| [技术栈](../architecture/technical_stack.md) | 层级架构与技术选型。 |
+| [**为什么选择 Zig**](../architecture/why_zig.md) | 语言选型决策：comptime、零运行时、交叉编译优势。 |
 
 ## 核心规范 (Core Specs)
 
