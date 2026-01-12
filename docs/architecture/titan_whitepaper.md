@@ -12202,6 +12202,717 @@ test "StateAccessor" {
 
 ---
 
+### 17.14 Titan Concurrency Model (TCM) - 分布式并发架构
+
+> **核心洞察**: Titan OS 没有传统 Linux 的"线程级并发"问题，但面临更复杂的"分布式状态并发"挑战。
+
+#### 17.14.1 并发模型对比：Linux vs Titan
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│               Linux 并发 vs Titan 并发 - 本质区别                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Linux 内核 (单机并发):                                                     │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │   Thread A ──┐                                                      │   │
+│  │              ├──► 0x1234 (共享内存) ◄─── 需要 Mutex/Spinlock        │   │
+│  │   Thread B ──┘                                                      │   │
+│  │                                                                     │   │
+│  │   问题: 数据竞争 (Data Race), 死锁 (Deadlock)                       │   │
+│  │   解决: pthread_mutex_lock(), spinlock_t, semaphore                 │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  Titan OS (分布式并发):                                                     │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │   AI Agent A ──┐      ┌─────────┐                                   │   │
+│  │                ├──►   │ Account │ ◄─── Runtime 自动锁定             │   │
+│  │   AI Agent B ──┘      │ (链上)  │                                   │   │
+│  │                       └─────────┘                                   │   │
+│  │                            │                                        │   │
+│  │   跨链意图 ────────────────┼─────────────► 状态不一致风险           │   │
+│  │                            │                                        │   │
+│  │   问题: 状态漂移 (State Drift), 部分执行 (Partial Execution)        │   │
+│  │   解决: OCC (乐观并发控制), Saga Pattern, 版本化 PDA                │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 17.14.2 各链并发模型差异
+
+| 链 | 并发模型 | 锁机制 | Titan 对策 |
+|:---|:---------|:-------|:-----------|
+| **EVM** | 单线程串行 | 无需 (天然原子) | 无特殊处理 |
+| **Solana** | 账户所有权并行 (Sealevel) | Runtime 自动锁 | 状态分片避免热点 |
+| **TON** | Actor 异步消息 | 消息队列隔离 | 消息顺序协调 |
+| **Near** | Sharded 并行 | 跨分片异步 | 回执确认机制 |
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    三种并发模型的本质                                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  EVM (串行):                                                                │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │   TX1 ──► TX2 ──► TX3 ──► TX4    (排队执行，绝对安全)               │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  Solana Sealevel (账户并行):                                                │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │   TX1 (写 Account A) ────────────────────►                          │   │
+│  │   TX2 (写 Account B) ────────────────────►  可并行                  │   │
+│  │   TX3 (写 Account A) ────► 等待 TX1 完成    串行化                  │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  TON Actor (异步消息):                                                      │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │   Contract A ─── msg1 ───►  ┌───────────┐                           │   │
+│  │                             │ Contract B │ ─── msg2 ───► Contract C │   │
+│  │   Contract D ─── msg3 ───►  │ (Mailbox)  │                          │   │
+│  │                             └───────────┘                           │   │
+│  │                                                                     │   │
+│  │   问题: msg1 和 msg3 谁先到达 Contract B？ (不确定!)                │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 17.14.3 Titan 没有的问题：共享内存竞争
+
+```zig
+// ========================================================================
+// Linux 内核开发者的噩梦 - Titan 开发者无需面对
+// ========================================================================
+
+// Linux 内核代码 (C) - 必须手动管理锁
+// struct shared_data {
+//     spinlock_t lock;
+//     int value;
+// };
+//
+// void update_value(struct shared_data *data, int new_val) {
+//     spin_lock(&data->lock);      // 必须加锁
+//     data->value = new_val;
+//     spin_unlock(&data->lock);    // 必须解锁
+//     // 忘记解锁 = 死锁!
+// }
+
+// Titan OS (Zig) - 无需手动锁
+pub const SharedState = struct {
+    value: u64,
+
+    // Solana Runtime 自动处理并发
+    // 如果两个交易都要写这个 Account，Runtime 会自动排队
+    pub fn update(self: *Self, new_val: u64) void {
+        self.value = new_val;  // 直接写，无需 mutex
+    }
+};
+
+// 为什么 Titan 不需要锁？
+// 1. EVM: 单线程执行，天然串行
+// 2. Solana: 交易头声明账户，Runtime 自动排队
+// 3. TON: Actor 模型，每个合约有独立邮箱
+```
+
+**结论**: 在 Titan OS 的 Zig 内核代码中，**永远不需要写 `mutex.lock()` 或 `spinlock`**。
+
+#### 17.14.4 Titan 面临的挑战：分布式状态并发
+
+##### 挑战 A: Solana 热点账户问题 (Hot Account)
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    热点账户：并行退化为串行                                   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  场景: 全局配置账户 (Global_Config)                                         │
+│                                                                             │
+│   AI Agent 1 ──┐                                                            │
+│   AI Agent 2 ──┼──► Global_Config ◄─── 所有人都要读写                      │
+│   AI Agent 3 ──┤                                                            │
+│   ...          │    Solana Runtime: "检测到冲突，排队执行"                   │
+│   AI Agent N ──┘                                                            │
+│                                                                             │
+│   结果: 1000 TPS 退化为 ~50 TPS (严重瓶颈!)                                 │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Titan 解决方案: 状态分片 (State Sharding)**
+
+```zig
+// ========================================================================
+// 错误做法: 单一全局账户
+// ========================================================================
+pub const BadDesign = struct {
+    // 所有 AI 共享一个 Registry - 热点!
+    global_registry: *Account,
+};
+
+// ========================================================================
+// 正确做法: 状态分片到 PDA
+// ========================================================================
+pub const GoodDesign = struct {
+    // 每个 AI 有独立的 PDA，互不干扰
+    pub fn getAgentPDA(agent_id: [32]u8) [32]u8 {
+        return derivePDA(&.{
+            "agent_state",
+            agent_id[0..],
+        });
+    }
+
+    // AI 1 写 PDA_1，AI 2 写 PDA_2 - 完美并行!
+};
+
+// 状态分片策略
+pub const ShardingStrategy = enum {
+    PerUser,        // 每用户一个 PDA (最常用)
+    PerAsset,       // 每资产一个 PDA
+    PerTimeSlot,    // 每时间段一个 PDA (适合日志)
+    Consistent,     // 一致性哈希分片 (高级)
+};
+```
+
+##### 挑战 B: 跨链状态不一致 (Cross-Chain Race)
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    跨链竞态：部分执行灾难                                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  意图: 在 ETH 上卖出 100 USDC，在 SOL 上买入 0.5 SOL                        │
+│                                                                             │
+│  正常流程:                                                                  │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  ETH: sell(100 USDC) ✓ ──────────────────────► 成功                 │   │
+│  │  SOL: buy(0.5 SOL)   ✓ ──────────────────────► 成功                 │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  灾难场景:                                                                  │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  ETH: sell(100 USDC) ✓ ──────────────────────► 成功 (钱已扣)        │   │
+│  │  SOL: buy(0.5 SOL)   ✗ ──────────────────────► 失败 (网络拥堵)      │   │
+│  │                                                                     │   │
+│  │  结果: 100 USDC 没了，0.5 SOL 没到！                                │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**为什么 2PC (两阶段提交) 在区块链不可行？**
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    2PC 在区块链上的失败                                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  传统 2PC (数据库):                                                         │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  Phase 1 (Prepare):                                                 │   │
+│  │    协调者 ──► 参与者: "准备提交，锁住资源"                          │   │
+│  │    参与者 ──► 协调者: "已锁定，等待指令"                            │   │
+│  │                                                                     │   │
+│  │  Phase 2 (Commit):                                                  │   │
+│  │    协调者 ──► 参与者: "提交!" 或 "回滚!"                            │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  区块链的问题:                                                              │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  • 无法"锁住"链上资源等待 - 交易要么执行，要么不执行                │   │
+│  │  • 跨链无可信协调者 - 谁来做 Phase 2 的决策？                       │   │
+│  │  • 区块确认时间不确定 - 可能等几秒到几分钟                          │   │
+│  │                                                                     │   │
+│  │  结论: 2PC 在区块链场景 = ❌ 不可行                                 │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Titan 解决方案: Saga Pattern (补偿事务)**
+
+```zig
+// ========================================================================
+// Saga Pattern: 每一步都有补偿操作
+// ========================================================================
+pub const CrossChainSaga = struct {
+    steps: []SagaStep,
+
+    pub const SagaStep = struct {
+        chain: ChainType,
+        action: Action,
+        compensation: Action,  // 回滚操作
+        status: Status,
+
+        pub const Status = enum {
+            Pending,
+            Executed,
+            Compensated,
+            Failed,
+        };
+    };
+
+    // 执行 Saga
+    pub fn execute(self: *Self) !void {
+        var executed_steps: usize = 0;
+
+        for (self.steps) |*step| {
+            const result = try self.executeStep(step);
+            if (result == .Success) {
+                step.status = .Executed;
+                executed_steps += 1;
+            } else {
+                // 失败！回滚已执行的步骤
+                try self.compensate(executed_steps);
+                return error.SagaFailed;
+            }
+        }
+    }
+
+    // 补偿（回滚）
+    fn compensate(self: *Self, count: usize) !void {
+        // 逆序执行补偿操作
+        var i = count;
+        while (i > 0) {
+            i -= 1;
+            const step = &self.steps[i];
+            if (step.status == .Executed) {
+                try self.executeCompensation(step);
+                step.status = .Compensated;
+            }
+        }
+    }
+};
+
+// 使用示例
+const swap_saga = CrossChainSaga{
+    .steps = &[_]SagaStep{
+        .{
+            .chain = .Ethereum,
+            .action = .{ .Sell = .{ .token = "USDC", .amount = 100 } },
+            .compensation = .{ .Refund = .{ .token = "USDC", .amount = 100 } },
+            .status = .Pending,
+        },
+        .{
+            .chain = .Solana,
+            .action = .{ .Buy = .{ .token = "SOL", .amount = 0.5 } },
+            .compensation = .{ .Noop = {} },  // 买入失败不需要补偿
+            .status = .Pending,
+        },
+    },
+};
+```
+
+##### 挑战 C: Solver 竞争 (Solver Racing)
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Solver 竞争：算力浪费问题                                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  AI 发出意图: "帮我执行这个模型推理，报酬 10 USDC"                          │
+│                                                                             │
+│   Solver A ──┐                                                              │
+│   Solver B ──┼──► 同时听到 ──► 同时计算 ──► 同时提交                       │
+│   Solver C ──┤                                                              │
+│   ...        │                                                              │
+│   Solver N ──┘                                                              │
+│                                                                             │
+│   结果: 只有 1 个成功获得奖励，N-1 个白算了！                               │
+│                                                                             │
+│   问题:                                                                     │
+│   • 算力浪费 (N-1 份无效计算)                                               │
+│   • Gas 浪费 (N-1 个失败交易)                                               │
+│   • 网络拥堵                                                                │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Titan 解决方案: 乐观锁 + Leader Election**
+
+```zig
+// ========================================================================
+// Solver 协调机制
+// ========================================================================
+pub const SolverCoordinator = struct {
+    // 方案 1: 乐观锁 (Optimistic Locking)
+    pub const OptimisticLock = struct {
+        intent_id: [32]u8,
+        version: u64,
+        claimed_by: ?PublicKey,
+
+        // Solver 尝试认领任务
+        pub fn claim(self: *Self, solver: PublicKey) !bool {
+            const current_version = self.version;
+
+            // CAS (Compare-And-Swap) 操作
+            if (self.claimed_by == null) {
+                // 原子性地更新
+                self.claimed_by = solver;
+                self.version = current_version + 1;
+                return true;
+            }
+            return false;  // 已被其他 Solver 认领
+        }
+    };
+
+    // 方案 2: VRF 随机选举 (Verifiable Random Function)
+    pub const VRFElection = struct {
+        // 使用 VRF 随机选择一个 Solver
+        // 保证公平性和不可预测性
+        pub fn electLeader(
+            intent_hash: [32]u8,
+            candidates: []const PublicKey,
+        ) PublicKey {
+            // VRF 产生可验证的随机数
+            const random = VRF.generate(intent_hash);
+            const winner_idx = random % candidates.len;
+            return candidates[winner_idx];
+        }
+    };
+
+    // 方案 3: 质押竞拍 (Stake-Based Auction)
+    pub const StakeAuction = struct {
+        // 质押最多的 Solver 获得执行权
+        // 失败则罚没质押
+        pub fn selectSolver(bids: []const Bid) PublicKey {
+            var max_stake: u64 = 0;
+            var winner: PublicKey = undefined;
+
+            for (bids) |bid| {
+                if (bid.stake > max_stake) {
+                    max_stake = bid.stake;
+                    winner = bid.solver;
+                }
+            }
+            return winner;
+        }
+    };
+};
+```
+
+#### 17.14.5 Titan State Manager (TSM) - 核心并发控制器
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│               Titan State Manager (TSM) 架构                                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  TSM 是 Titan OS 的核心并发控制组件，类似数据库的 MVCC                      │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │                    ┌─────────────────┐                              │   │
+│  │                    │   TSM (Kernel)  │                              │   │
+│  │                    └────────┬────────┘                              │   │
+│  │                             │                                       │   │
+│  │           ┌─────────────────┼─────────────────┐                     │   │
+│  │           │                 │                 │                     │   │
+│  │           ▼                 ▼                 ▼                     │   │
+│  │   ┌───────────────┐ ┌───────────────┐ ┌───────────────┐            │   │
+│  │   │ Version Ctrl  │ │ Conflict Det  │ │ Saga Engine   │            │   │
+│  │   │ (版本控制)    │ │ (冲突检测)    │ │ (补偿事务)    │            │   │
+│  │   └───────────────┘ └───────────────┘ └───────────────┘            │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+```zig
+// ========================================================================
+// Titan State Manager (TSM) - 乐观并发控制实现
+// ========================================================================
+pub fn TitanStateManager(comptime StateType: type) type {
+    return struct {
+        const Self = @This();
+
+        // 版本化状态
+        pub const VersionedState = struct {
+            data: StateType,
+            version: u64,
+            last_modified_tx: [32]u8,
+            lamport_ts: u64,  // 逻辑时间戳
+        };
+
+        // ====================================================================
+        // OCC (乐观并发控制) 核心流程
+        // ====================================================================
+
+        // Phase 1: 读取 (Read)
+        pub fn read(self: *Self, key: []const u8) !ReadResult {
+            const state = try self.storage.get(key);
+            return .{
+                .data = state.data,
+                .version = state.version,  // 记录读取时的版本
+            };
+        }
+
+        // Phase 2: 执行 (Execute) - 在本地计算
+        // (用户代码在这里执行，不涉及 TSM)
+
+        // Phase 3: 验证并提交 (Validate & Commit)
+        pub fn commit(
+            self: *Self,
+            key: []const u8,
+            new_data: StateType,
+            expected_version: u64,
+        ) !CommitResult {
+            // 检查版本是否被修改
+            const current = try self.storage.get(key);
+
+            if (current.version != expected_version) {
+                // 版本冲突！有人在我们之前修改了
+                return .{
+                    .success = false,
+                    .error_type = .VersionConflict,
+                    .current_version = current.version,
+                };
+            }
+
+            // 版本匹配，提交更新
+            try self.storage.put(key, .{
+                .data = new_data,
+                .version = expected_version + 1,
+                .last_modified_tx = self.current_tx_hash,
+                .lamport_ts = self.lamport_clock.tick(),
+            });
+
+            return .{
+                .success = true,
+                .new_version = expected_version + 1,
+            };
+        }
+
+        // ====================================================================
+        // 自动重试机制
+        // ====================================================================
+        pub fn executeWithRetry(
+            self: *Self,
+            key: []const u8,
+            operation: fn (StateType) StateType,
+            max_retries: u32,
+        ) !StateType {
+            var retries: u32 = 0;
+
+            while (retries < max_retries) {
+                // 读取当前状态
+                const read_result = try self.read(key);
+
+                // 执行操作
+                const new_data = operation(read_result.data);
+
+                // 尝试提交
+                const commit_result = try self.commit(
+                    key,
+                    new_data,
+                    read_result.version,
+                );
+
+                if (commit_result.success) {
+                    return new_data;
+                }
+
+                // 冲突，重试
+                retries += 1;
+            }
+
+            return error.MaxRetriesExceeded;
+        }
+    };
+}
+```
+
+#### 17.14.6 跨链因果排序：Lamport 时间戳
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│               跨链事件排序问题                                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  问题: 不同链的时钟不同步，如何确定事件顺序？                               │
+│                                                                             │
+│  ETH Block 100 的时间戳: 1704067200                                         │
+│  SOL Slot 200 的时间戳:  1704067201                                         │
+│                                                                             │
+│  哪个先发生？不能简单比较时间戳！(各链时钟可能有偏差)                       │
+│                                                                             │
+│  解决方案: Lamport 逻辑时钟                                                 │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  规则 1: 本地事件，时钟 +1                                          │   │
+│  │  规则 2: 发送消息时，附带当前时钟                                   │   │
+│  │  规则 3: 收到消息时，取 max(本地时钟, 消息时钟) + 1                 │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+```zig
+// ========================================================================
+// Lamport 逻辑时钟 - 跨链因果排序
+// ========================================================================
+pub const LamportClock = struct {
+    timestamp: u64,
+    node_id: [32]u8,  // 用于打破平局
+
+    // 本地事件
+    pub fn tick(self: *Self) u64 {
+        self.timestamp += 1;
+        return self.timestamp;
+    }
+
+    // 发送消息
+    pub fn send(self: *Self) CrossChainEvent {
+        return .{
+            .lamport_ts = self.tick(),
+            .sender = self.node_id,
+        };
+    }
+
+    // 收到消息
+    pub fn receive(self: *Self, event: CrossChainEvent) void {
+        self.timestamp = @max(self.timestamp, event.lamport_ts) + 1;
+    }
+
+    // 因果关系判断
+    pub fn happensBefore(a: CrossChainEvent, b: CrossChainEvent) bool {
+        if (a.lamport_ts < b.lamport_ts) return true;
+        if (a.lamport_ts > b.lamport_ts) return false;
+        // 相等时用 node_id 打破平局 (保证全序)
+        return std.mem.lessThan(u8, &a.sender, &b.sender);
+    }
+};
+
+// 跨链事件记录
+pub const CrossChainEvent = struct {
+    lamport_ts: u64,
+    chain_id: ChainType,
+    tx_hash: [32]u8,
+    sender: [32]u8,
+    event_type: EventType,
+
+    pub const EventType = enum {
+        IntentSubmitted,
+        IntentExecuted,
+        IntentCompensated,
+        StateUpdated,
+    };
+};
+```
+
+#### 17.14.7 TON Actor 模型特殊处理
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│               TON Actor 并发：消息顺序不确定性                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  TON 的特殊性:                                                              │
+│  • 每个合约是独立的 Actor                                                   │
+│  • 合约之间通过异步消息通信                                                 │
+│  • 消息可能乱序到达 (与 EVM/Solana 不同!)                                   │
+│                                                                             │
+│  场景:                                                                      │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  Contract A 发送:                                                   │   │
+│  │    msg1 (set_value = 100) ──────────────►  ┌───────────┐           │   │
+│  │    msg2 (set_value = 200) ──────────────►  │ Contract B │           │   │
+│  │                                            └───────────┘           │   │
+│  │                                                                     │   │
+│  │  可能的接收顺序:                                                    │   │
+│  │    情况 1: msg1, msg2 → value = 200 ✓                              │   │
+│  │    情况 2: msg2, msg1 → value = 100 ✗ (不是预期结果!)              │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Titan 对 TON 的处理策略:**
+
+```zig
+// ========================================================================
+// TON 消息顺序保证
+// ========================================================================
+pub const TONMessageOrdering = struct {
+    // 策略 1: 序列号 (Sequence Number)
+    pub const SequencedMessage = struct {
+        seq_no: u64,       // 单调递增
+        payload: []const u8,
+
+        // 接收方只处理 seq_no == expected_seq 的消息
+        // 其他消息暂存等待
+    };
+
+    // 策略 2: 依赖声明 (Dependency Declaration)
+    pub const DependentMessage = struct {
+        msg_id: [32]u8,
+        depends_on: ?[32]u8,  // 必须在此消息之后处理
+        payload: []const u8,
+    };
+
+    // 策略 3: 幂等操作设计 (Idempotent Design)
+    // 设计成"无论执行几次、什么顺序，结果都一样"
+    pub const IdempotentOperation = struct {
+        // 不好: set_value(100), set_value(200) - 顺序敏感
+        // 好:   set_value_if_greater(100), set_value_if_greater(200)
+        //       无论顺序，最终都是 200
+
+        pub fn setValueIfGreater(current: u64, new: u64) u64 {
+            return @max(current, new);  // 幂等！
+        }
+    };
+};
+```
+
+#### 17.14.8 并发模型总结对比
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│               Linux vs Titan 并发总结                                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  特性              │ Linux 传统并发      │ Titan OS 分布式并发     │   │
+│  ├─────────────────────────────────────────────────────────────────────┤   │
+│  │  竞争资源          │ CPU 周期, RAM 地址  │ Account 所有权, 跨链状态│   │
+│  │  锁机制            │ Mutex, Spinlock     │ Runtime 自动 + OCC      │   │
+│  │                    │ (开发者手动写)      │ (框架自动处理)          │   │
+│  │  主要风险          │ Memory Corruption   │ State Drift             │   │
+│  │                    │ Deadlock            │ Partial Execution       │   │
+│  │  原子性保证        │ CPU 指令 (CAS)      │ Saga Pattern            │   │
+│  │  时序保证          │ 内存屏障            │ Lamport Timestamp       │   │
+│  │  隔离单元          │ 进程/线程           │ Account/Actor           │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  Titan 开发者的心智模型:                                                    │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  • 不需要写 mutex.lock() - Runtime 帮你处理                         │   │
+│  │  • 需要考虑状态分片 - 避免热点账户                                  │   │
+│  │  • 跨链操作用 Saga - 不是 2PC                                       │   │
+│  │  • 用版本号检测冲突 - OCC 优于悲观锁                                │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**给 Solana Core Team 的话术:**
+
+> "Unlike Linux, where we manage thread contention on a single CPU, Titan abstracts away **distributed state concurrency**.
+>
+> For local parallelization, we rely on Solana's Sealevel runtime - developers never write mutexes. But we implement an **Optimistic Concurrency Control (OCC)** layer in our Zig kernel using **versioned PDAs** to detect conflicts.
+>
+> For cross-chain operations, we use the **Saga pattern** (not 2PC, which is impossible on-chain) with **Lamport timestamps** for causal ordering.
+>
+> For solver coordination, we implement **VRF-based leader election** to prevent racing.
+>
+> In essence: **We trade pthread_mutex for versioned PDAs, and 2PC for Sagas.**"
+
+---
+
 ## 18. 终极总结 (Conclusion)
 
 ### Titan Framework 是什么？
