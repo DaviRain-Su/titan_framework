@@ -18108,6 +18108,693 @@ operations within Solana's transaction limits.
 3. **扩展生态合作**: 与 Light Protocol、Arcium 等建立技术连接
 4. **构建护城河**: "Solana 上最快的 ZK 验证器"品牌定位
 
+### 18.12 进阶方案: Titan Dark Pool (客户端验证 Privacy AMM)
+
+> **核心洞察**: 链下执行 + 链上验证 = 突破 CU 限制 + 真正隐私
+
+#### 18.12.1 架构哲学：Client-Side Validation (CSV)
+
+**问题**: 传统 AMM 把所有计算放链上，消耗大量 CU，且交易完全透明。
+
+**解决方案**: 借鉴 Bitcoin RGB 协议思想 —— **客户端验证**：
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    传统 AMM vs Client-Side Validation AMM                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  传统 AMM (Raydium/Orca)              Client-Side Validation AMM            │
+│  ─────────────────────────            ──────────────────────────────        │
+│                                                                             │
+│  ┌─────────────────────┐              ┌─────────────────────┐               │
+│  │     用户发送        │              │     用户本地        │               │
+│  │   swap(100 USDC)    │              │   执行 swap 计算    │               │
+│  └──────────┬──────────┘              │   生成 ZK 证明      │               │
+│             │                         └──────────┬──────────┘               │
+│             ▼                                    │                          │
+│  ┌─────────────────────┐                         ▼                          │
+│  │     链上计算        │              ┌─────────────────────┐               │
+│  │  • 读取 reserve_x   │              │   提交 ZK Proof     │               │
+│  │  • 读取 reserve_y   │              │   (只有证明，无金额) │               │
+│  │  • 计算 dx, dy      │              └──────────┬──────────┘               │
+│  │  • 更新 reserves    │                         │                          │
+│  │  • 转账 tokens      │                         ▼                          │
+│  │  ~80,000 CU         │              ┌─────────────────────┐               │
+│  └──────────┬──────────┘              │   链上仅验证证明    │               │
+│             │                         │   ~140,000 CU       │               │
+│             ▼                         │   (固定，不随复杂度  │               │
+│  链上状态完全公开                      │    增加)            │               │
+│  • 所有人看到你换了多少                └──────────┬──────────┘               │
+│  • MEV 机器人可以抢跑                            │                          │
+│                                                  ▼                          │
+│                                       链上只存状态承诺                       │
+│                                       • 无人知道池子真实余额                 │
+│                                       • 无人知道你换了多少                   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**关键洞察**:
+
+| 维度 | 传统 AMM | CSV AMM |
+|:-----|:---------|:--------|
+| CU 消耗 | 随逻辑复杂度线性增长 | **固定** (只验证证明) |
+| 隐私 | 完全透明 | **完全隐藏** |
+| MEV | 高度暴露 | **不可能** |
+| 链上存储 | 完整状态 | **仅状态承诺** |
+| 扩展性 | 受限于 CU | **链下无限** |
+
+#### 18.12.2 状态承诺模型
+
+**链上只存储最小数据**:
+
+```zig
+/// 链上状态 - 极简设计
+pub const DarkPoolState = packed struct {
+    /// 池子状态 Merkle Root (包含 reserve_x, reserve_y, k 的承诺)
+    pool_state_root: [32]u8,
+
+    /// 用户余额 Merkle Root (所有用户的加密余额)
+    balance_root: [32]u8,
+
+    /// Nullifier Set Root (已使用的 nullifier，防止双花)
+    nullifier_root: [32]u8,
+
+    /// 最近一次更新的区块高度
+    last_update_slot: u64,
+
+    /// 累计交易数 (不暴露金额)
+    tx_count: u64,
+
+    // 总大小: 32 + 32 + 32 + 8 + 8 = 112 bytes
+    // 对比传统 AMM: ~500+ bytes (两个 reserve + fees + authority + ...)
+};
+
+/// 这就是链上存储的全部内容
+/// 真实的池子状态 (reserve_x, reserve_y) 只存在于:
+/// 1. 做市商本地
+/// 2. 用户本地 (从做市商获取)
+/// 3. ZK 证明中 (作为私有输入)
+```
+
+**状态转换模型**:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         状态承诺转换流程                                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  链下 (Client Side)                    链上 (On-Chain)                      │
+│  ──────────────────                    ─────────────────                    │
+│                                                                             │
+│  State_old = {                         只存储:                              │
+│    reserve_x: 1000,                    root_old = hash(State_old)           │
+│    reserve_y: 2000,                                                         │
+│    user_balance: 50,                                                        │
+│  }                                                                          │
+│       │                                                                     │
+│       │ 用户执行 swap(10 X → ? Y)                                           │
+│       │                                                                     │
+│       ▼                                                                     │
+│  State_new = {                                                              │
+│    reserve_x: 1010,        ────────────────────────────────────────────►   │
+│    reserve_y: 1980.2,                                                       │
+│    user_balance: 40,                   验证 ZK Proof:                       │
+│  }                                     • root_old 正确                      │
+│       │                                • 状态转换符合 AMM 公式              │
+│       │ 生成 ZK Proof                  • 用户有足够余额                     │
+│       │ π = Prove(State_old,           • root_new 正确计算                  │
+│       │          State_new,                    │                            │
+│       │          witness)                      ▼                            │
+│       │                                更新链上:                            │
+│       └───────────────────────────►    root_new = hash(State_new)           │
+│                                                                             │
+│  关键: State 内容链上完全不可见，只有 root 可见                             │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.12.3 ZK 电路设计: PrivateSwap
+
+**电路需要证明什么**:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         PrivateSwap ZK 电路                                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  公共输入 (Public Inputs) - 链上可见:                                       │
+│  ────────────────────────────────────                                       │
+│  • old_pool_root:     [32]u8    // 旧状态承诺                               │
+│  • new_pool_root:     [32]u8    // 新状态承诺                               │
+│  • old_balance_root:  [32]u8    // 旧用户余额树根                           │
+│  • new_balance_root:  [32]u8    // 新用户余额树根                           │
+│  • nullifier:         [32]u8    // 防止重放                                 │
+│                                                                             │
+│  私有输入 (Private Inputs) - 只有用户知道:                                  │
+│  ─────────────────────────────────────────                                  │
+│  • user_secret:       [32]u8    // 用户私钥                                 │
+│  • amount_in:         u64       // 输入金额 (隐藏!)                         │
+│  • amount_out:        u64       // 输出金额 (隐藏!)                         │
+│  • old_reserve_x:     u64       // 旧 X 储备                                │
+│  • old_reserve_y:     u64       // 旧 Y 储备                                │
+│  • user_balance_x:    u64       // 用户 X 余额                              │
+│  • user_balance_y:    u64       // 用户 Y 余额                              │
+│  • merkle_proofs:     [...]     // Merkle 证明路径                          │
+│                                                                             │
+│  电路约束 (Constraints):                                                    │
+│  ─────────────────────                                                      │
+│  1. 身份验证:                                                               │
+│     nullifier = hash(user_secret, old_pool_root)                           │
+│                                                                             │
+│  2. 余额验证 (Merkle Proof):                                                │
+│     verify_merkle(old_balance_root, user_leaf, merkle_proof) == true       │
+│                                                                             │
+│  3. 充足余额:                                                               │
+│     user_balance_x >= amount_in                                            │
+│                                                                             │
+│  4. AMM 不变量 (Constant Product):                                          │
+│     new_reserve_x = old_reserve_x + amount_in                              │
+│     new_reserve_y = old_reserve_y - amount_out                             │
+│     new_reserve_x * new_reserve_y >= old_reserve_x * old_reserve_y         │
+│     // k 只能增加，不能减少 (防止恶意提取)                                  │
+│                                                                             │
+│  5. 新状态正确性:                                                           │
+│     new_pool_root = hash(new_reserve_x, new_reserve_y)                     │
+│     new_balance_root = update_merkle(                                      │
+│       old_balance_root,                                                     │
+│       user_index,                                                           │
+│       new_user_balance                                                      │
+│     )                                                                       │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Circom 电路示例** (简化版):
+
+```circom
+pragma circom 2.1.0;
+
+include "poseidon.circom";
+include "merkle_tree.circom";
+include "comparators.circom";
+
+template PrivateSwap(TREE_DEPTH) {
+    // ========================================
+    // Public Inputs (链上可见)
+    // ========================================
+    signal input old_pool_root;
+    signal input new_pool_root;
+    signal input old_balance_root;
+    signal input new_balance_root;
+    signal input nullifier;
+
+    // ========================================
+    // Private Inputs (只有用户知道)
+    // ========================================
+    signal input user_secret;
+    signal input amount_in;
+    signal input amount_out;
+    signal input old_reserve_x;
+    signal input old_reserve_y;
+    signal input user_balance_x;
+    signal input user_balance_y;
+    signal input user_index;
+    signal input pool_merkle_proof[TREE_DEPTH];
+    signal input balance_merkle_proof[TREE_DEPTH];
+
+    // ========================================
+    // Constraint 1: Nullifier 正确性
+    // ========================================
+    component nullifier_hash = Poseidon(2);
+    nullifier_hash.inputs[0] <== user_secret;
+    nullifier_hash.inputs[1] <== old_pool_root;
+    nullifier === nullifier_hash.out;
+
+    // ========================================
+    // Constraint 2: 用户有足够余额
+    // ========================================
+    component balance_check = GreaterEqThan(64);
+    balance_check.in[0] <== user_balance_x;
+    balance_check.in[1] <== amount_in;
+    balance_check.out === 1;
+
+    // ========================================
+    // Constraint 3: AMM 不变量 (k 不能减少)
+    // ========================================
+    signal new_reserve_x;
+    signal new_reserve_y;
+    new_reserve_x <== old_reserve_x + amount_in;
+    new_reserve_y <== old_reserve_y - amount_out;
+
+    signal old_k;
+    signal new_k;
+    old_k <== old_reserve_x * old_reserve_y;
+    new_k <== new_reserve_x * new_reserve_y;
+
+    component k_check = GreaterEqThan(128);
+    k_check.in[0] <== new_k;
+    k_check.in[1] <== old_k;
+    k_check.out === 1;
+
+    // ========================================
+    // Constraint 4: 新池子状态根正确
+    // ========================================
+    component new_pool_hash = Poseidon(2);
+    new_pool_hash.inputs[0] <== new_reserve_x;
+    new_pool_hash.inputs[1] <== new_reserve_y;
+    new_pool_root === new_pool_hash.out;
+
+    // ... (余额树更新验证省略)
+}
+
+component main {public [
+    old_pool_root,
+    new_pool_root,
+    old_balance_root,
+    new_balance_root,
+    nullifier
+]} = PrivateSwap(20);  // 20 层 Merkle 树，支持 100 万用户
+```
+
+#### 18.12.4 链上验证器 (Zig 实现)
+
+**极简链上程序 - 只做验证**:
+
+```zig
+const sdk = @import("solana_program_sdk");
+const groth16 = @import("groth16.zig");
+
+// ============================================================
+// 链上状态 - 只有 112 bytes
+// ============================================================
+pub const DarkPoolState = packed struct {
+    pool_state_root: [32]u8,
+    balance_root: [32]u8,
+    nullifier_root: [32]u8,
+    last_update_slot: u64,
+    tx_count: u64,
+};
+
+// ============================================================
+// 指令: PrivateSwap
+// ============================================================
+pub fn processPrivateSwap(
+    accounts: []sdk.Account.Info,
+    instruction_data: []const u8,
+) sdk.ProgramResult {
+    const pool_account = accounts[0];
+    const nullifier_account = accounts[1];
+
+    // ========================================
+    // Step 1: 解析公共输入 (160 bytes)
+    // ========================================
+    // [0..32]:   old_pool_root
+    // [32..64]:  new_pool_root
+    // [64..96]:  old_balance_root
+    // [96..128]: new_balance_root
+    // [128..160]: nullifier
+    // [160..416]: Groth16 Proof (256 bytes)
+    if (instruction_data.len < 416) {
+        return .InvalidInstructionData;
+    }
+
+    const public_inputs = instruction_data[0..160];
+    const proof_bytes = instruction_data[160..416];
+
+    // ========================================
+    // Step 2: 验证旧状态根匹配链上状态
+    // ========================================
+    const state = @ptrCast(*const DarkPoolState, pool_account.data().ptr);
+
+    // old_pool_root 必须匹配当前链上状态
+    if (!std.mem.eql(u8, public_inputs[0..32], &state.pool_state_root)) {
+        sdk.log.sol_log("Pool root mismatch");
+        return .InvalidArgument;
+    }
+
+    // old_balance_root 必须匹配
+    if (!std.mem.eql(u8, public_inputs[64..96], &state.balance_root)) {
+        sdk.log.sol_log("Balance root mismatch");
+        return .InvalidArgument;
+    }
+
+    // ========================================
+    // Step 3: 检查 Nullifier 未使用
+    // ========================================
+    const nullifier = public_inputs[128..160];
+    // ... (Sparse Merkle Tree 检查或直接账户检查)
+
+    // ========================================
+    // Step 4: ZK 证明验证 (核心 - Zig 优势)
+    // ========================================
+    sdk.log.sol_log("Verifying ZK proof...");
+    sdk.log.sol_log_compute_units_();
+
+    // 加载硬编码的验证密钥 (编译时嵌入)
+    const vk = comptime loadVerifyingKey();
+    const verifier = groth16.Groth16Verifier.init(vk);
+
+    // 解析公共输入为标量数组
+    const pub_scalars = parsePublicInputs(public_inputs);
+
+    // 验证！
+    const proof = groth16.parseProof(proof_bytes) catch {
+        return .InvalidArgument;
+    };
+
+    const is_valid = verifier.verify(proof, &pub_scalars) catch {
+        sdk.log.sol_log("Verification error");
+        return .Custom(1);
+    };
+
+    sdk.log.sol_log_compute_units_();
+
+    if (!is_valid) {
+        sdk.log.sol_log("Invalid proof");
+        return .Custom(2);
+    }
+
+    // ========================================
+    // Step 5: 更新链上状态 (仅更新 roots)
+    // ========================================
+    const state_mut = @ptrCast(*DarkPoolState, pool_account.data_mut().ptr);
+
+    // 更新到新的状态根
+    @memcpy(&state_mut.pool_state_root, public_inputs[32..64]);
+    @memcpy(&state_mut.balance_root, public_inputs[96..128]);
+    state_mut.last_update_slot = sdk.clock.slot();
+    state_mut.tx_count += 1;
+
+    // ========================================
+    // Step 6: 记录 Nullifier (防止重放)
+    // ========================================
+    // 更新 nullifier Merkle tree...
+
+    sdk.log.sol_log("Private swap completed!");
+    return .ok;
+}
+
+// ============================================================
+// CU 分析
+// ============================================================
+// 传统 AMM swap: ~80,000 CU
+//   - 读取 2 个 reserve: ~2,000 CU
+//   - 计算 dx/dy: ~5,000 CU
+//   - 更新 reserves: ~10,000 CU
+//   - 2 次 Token transfer: ~60,000 CU
+//
+// Titan Dark Pool swap: ~145,000 CU (固定)
+//   - 解析输入: ~500 CU
+//   - 状态验证: ~1,000 CU
+//   - ZK 证明验证: ~140,000 CU
+//   - 更新 roots: ~3,000 CU
+//   - Nullifier 记录: ~500 CU
+//
+// 但是！Dark Pool 的 CU 是固定的：
+//   - 无论 swap 多复杂 (多跳、聚合) 都是 ~145k CU
+//   - 传统 AMM 的 3-hop swap 要 ~240k CU
+//   - 传统 AMM 的 5-hop swap 要 ~400k CU (可能超限)
+//   - Dark Pool 的 5-hop swap 还是 ~145k CU (链下计算)
+```
+
+#### 18.12.5 完整工作流程
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Titan Dark Pool 完整交易流程                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Phase 1: 状态同步 (Off-Chain)                                              │
+│  ──────────────────────────────                                             │
+│                                                                             │
+│  ┌─────────────┐      获取最新状态       ┌─────────────────────┐           │
+│  │    用户     │ ◄────────────────────── │   Relayer/做市商    │           │
+│  │  (Client)   │                         │  (持有完整状态)     │           │
+│  └──────┬──────┘                         └─────────────────────┘           │
+│         │                                                                   │
+│         │ 收到: {reserve_x, reserve_y, user_balance, merkle_proofs}        │
+│         │                                                                   │
+│  Phase 2: 本地计算 (Off-Chain)                                              │
+│  ────────────────────────────                                               │
+│         │                                                                   │
+│         ▼                                                                   │
+│  ┌─────────────────────────────────────────────────────────────┐           │
+│  │  用户本地执行:                                               │           │
+│  │                                                              │           │
+│  │  1. 计算 swap:                                               │           │
+│  │     amount_out = (reserve_y * amount_in) /                   │           │
+│  │                  (reserve_x + amount_in)                     │           │
+│  │                                                              │           │
+│  │  2. 更新状态:                                                │           │
+│  │     new_reserve_x = reserve_x + amount_in                    │           │
+│  │     new_reserve_y = reserve_y - amount_out                   │           │
+│  │     new_user_balance_x = balance_x - amount_in               │           │
+│  │     new_user_balance_y = balance_y + amount_out              │           │
+│  │                                                              │           │
+│  │  3. 计算新的 Merkle roots                                    │           │
+│  │                                                              │           │
+│  │  4. 生成 ZK Proof (最耗时，但在本地，不受 CU 限制)          │           │
+│  │     proof = snarkjs.groth16.prove(circuit, witness)          │           │
+│  │                                                              │           │
+│  └─────────────────────────────────────────────────────────────┘           │
+│         │                                                                   │
+│         │ 生成: {public_inputs, proof, nullifier}                          │
+│         │                                                                   │
+│  Phase 3: 链上验证 (On-Chain)                                               │
+│  ───────────────────────────                                                │
+│         │                                                                   │
+│         ▼                                                                   │
+│  ┌─────────────────────────────────────────────────────────────┐           │
+│  │                    Solana Transaction                        │           │
+│  │  ┌───────────────────────────────────────────────────────┐  │           │
+│  │  │  Instruction: PrivateSwap                              │  │           │
+│  │  │  Data: [public_inputs (160B) | proof (256B)]          │  │           │
+│  │  │                                                        │  │           │
+│  │  │  Titan Dark Pool Program (Zig):                       │  │           │
+│  │  │    ├─ 验证 old_root 匹配链上           (~1k CU)       │  │           │
+│  │  │    ├─ 验证 nullifier 未使用            (~2k CU)       │  │           │
+│  │  │    ├─ Groth16 证明验证                (~140k CU)      │  │           │
+│  │  │    └─ 更新链上 roots                   (~2k CU)       │  │           │
+│  │  │                                                        │  │           │
+│  │  │  Total: ~145,000 CU (固定)                            │  │           │
+│  │  └───────────────────────────────────────────────────────┘  │           │
+│  └─────────────────────────────────────────────────────────────┘           │
+│         │                                                                   │
+│         │ 交易成功                                                          │
+│         │                                                                   │
+│  Phase 4: 状态广播 (Off-Chain)                                              │
+│  ────────────────────────────                                               │
+│         │                                                                   │
+│         ▼                                                                   │
+│  ┌─────────────┐      广播新状态         ┌─────────────────────┐           │
+│  │    用户     │ ─────────────────────►  │   Relayer/做市商    │           │
+│  │             │                         │  (更新本地状态)     │           │
+│  └─────────────┘                         └─────────────────────┘           │
+│                                                                             │
+│  关键点:                                                                    │
+│  • 链上看不到 amount_in, amount_out                                        │
+│  • 链上看不到 reserve_x, reserve_y                                         │
+│  • 链上看不到用户余额                                                       │
+│  • 链上只看到 "状态从 root_A 变成了 root_B"                                │
+│  • MEV 机器人: "???"                                                        │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.12.6 与 HumidiFi 的对比
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│              HumidiFi (WET) vs Titan Dark Pool 定位对比                      │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│                    HumidiFi                    Titan Dark Pool              │
+│                    ────────                    ───────────────              │
+│                                                                             │
+│  类型              Prop AMM                    Privacy AMM                  │
+│                    (自营做市商 AMM)             (隐私 AMM)                   │
+│                                                                             │
+│  保护谁            做市商                       用户                         │
+│                    (隐藏做市策略)               (隐藏交易意图)               │
+│                                                                             │
+│  价格计算          链下 (做市商服务器)          链下 (用户本地)              │
+│                                                                             │
+│  链上数据          完全透明                     完全隐藏                     │
+│                    (谁换了多少全公开)           (只有状态承诺)               │
+│                                                                             │
+│  MEV 防护          部分                         完全                         │
+│                    (做市商不被夹)               (所有人不被夹)               │
+│                                                                             │
+│  信任假设          信任做市商                   信任 ZK 数学                 │
+│                    (他们可能作恶)               (无需信任)                   │
+│                                                                             │
+│  技术核心          链下订单簿 + 链上结算        ZK 证明 + 状态承诺           │
+│                                                                             │
+│  定位              "机构暗池"                   "用户暗池"                   │
+│                    (华尔街上链)                 (隐私权利)                   │
+│                                                                             │
+│  Slogan            "Better price, less         "No one knows what           │
+│                     slippage"                   you traded"                 │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**市场定位话术**:
+
+> "HumidiFi proved Solana needs Dark Pools. But they only protected the market makers.
+> **Titan Dark Pool protects YOU.**
+>
+> HumidiFi moves pricing off-chain for efficiency.
+> We move **everything** off-chain for **privacy**.
+>
+> They hide the orderbook.
+> We hide **your trade**.
+>
+> Welcome to the True Dark Pool."
+
+#### 18.12.7 MVP 实现路线图
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                   Titan Dark Pool MVP 路线图 (3 周)                          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Week 1: ZK 电路                                                            │
+│  ─────────────────────────────────────────────────────────────────────────  │
+│  Day 1-2: 电路设计                                                          │
+│     • 定义公共/私有输入                                                     │
+│     • Poseidon hash 电路                                                    │
+│     • Merkle proof 验证电路                                                 │
+│                                                                             │
+│  Day 3-4: AMM 约束                                                          │
+│     • Constant product 验证                                                 │
+│     • 余额充足性检查                                                        │
+│     • 状态转换正确性                                                        │
+│                                                                             │
+│  Day 5-7: Trusted Setup & 测试                                              │
+│     • Powers of Tau ceremony                                                │
+│     • 生成测试向量                                                          │
+│     • 电路约束数优化                                                        │
+│                                                                             │
+│  Week 2: 链上程序 & 客户端                                                  │
+│  ─────────────────────────────────────────────────────────────────────────  │
+│  Day 8-9: Zig 链上程序                                                      │
+│     • DarkPoolState 账户结构                                                │
+│     • PrivateSwap 指令处理                                                  │
+│     • Groth16 验证器集成                                                    │
+│                                                                             │
+│  Day 10-11: 客户端 SDK                                                      │
+│     • 状态同步协议                                                          │
+│     • 证明生成封装 (调用 snarkjs)                                           │
+│     • 交易构造与提交                                                        │
+│                                                                             │
+│  Day 12-14: 集成测试                                                        │
+│     • Devnet 部署                                                           │
+│     • 端到端测试                                                            │
+│     • Bug 修复                                                              │
+│                                                                             │
+│  Week 3: Demo & 优化                                                        │
+│  ─────────────────────────────────────────────────────────────────────────  │
+│  Day 15-17: Benchmark                                                       │
+│     • CU 消耗测量                                                           │
+│     • 与 Raydium 对比                                                       │
+│     • 性能报告撰写                                                          │
+│                                                                             │
+│  Day 18-19: Demo 完善                                                       │
+│     • 简易 CLI 界面                                                         │
+│     • 状态可视化                                                            │
+│     • 文档完善                                                              │
+│                                                                             │
+│  Day 20-21: 提交                                                            │
+│     • 代码整理                                                              │
+│     • Demo 视频录制                                                         │
+│     • Hackathon 提交                                                        │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.12.8 技术优势总结
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    为什么 Titan Dark Pool 能赢                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  1. 架构创新: Client-Side Validation                                        │
+│     ├─ 突破 CU 限制 (链下计算无上限)                                        │
+│     ├─ 真正隐私 (链上只有状态承诺)                                          │
+│     └─ 完全抗 MEV (无信息泄露)                                              │
+│                                                                             │
+│  2. Zig 性能优势                                                            │
+│     ├─ Groth16 验证器比 Rust 省 30% CU                                      │
+│     ├─ 精确内存布局控制                                                     │
+│     └─ comptime 预计算优化                                                  │
+│                                                                             │
+│  3. 市场定位差异化                                                          │
+│     ├─ HumidiFi: 保护做市商 → Titan: 保护用户                               │
+│     ├─ HumidiFi: 信任做市商 → Titan: 信任数学                               │
+│     └─ "The True Dark Pool" 叙事                                            │
+│                                                                             │
+│  4. 生态契合                                                                │
+│     ├─ 完美结合 Light Protocol ZK 基础设施                                  │
+│     ├─ 可扩展到 Arcium MPC 增强                                             │
+│     └─ Solana 隐私赛道的稀缺性                                              │
+│                                                                             │
+│  5. 实用价值                                                                │
+│     ├─ 大户交易不被追踪                                                     │
+│     ├─ 算法交易策略保护                                                     │
+│     └─ 真正的金融隐私                                                       │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.12.9 Pitch 升级版
+
+**项目名**: Titan Dark Pool
+**Tagline**: "The True Dark Pool of Solana"
+
+**30 秒 Pitch**:
+> "HumidiFi showed Solana needs Dark Pools. But they protect market makers, not users.
+>
+> **Titan Dark Pool** uses **Client-Side Validation** — all AMM logic runs off-chain,
+> only a ZK proof hits the chain.
+>
+> Result? **Complete privacy. Zero MEV. Fixed CU cost.**
+>
+> Built with **Zig** for maximum verification performance.
+>
+> Welcome to **The True Dark Pool**."
+
+**2 分钟 Pitch**:
+> "Solana 的 DeFi 有一个公开的秘密：你的每一笔交易都在裸奔。
+>
+> MEV 机器人看着你，夹你。大户害怕被追踪，不敢交易。
+>
+> HumidiFi 尝试解决这个问题，但他们的 'Dark Pool' 只保护做市商。
+> 你的交易金额？依然公开。你的钱包地址？依然可追踪。
+>
+> **Titan Dark Pool 不同。**
+>
+> 我们使用 **Client-Side Validation** 架构：
+> - 所有 AMM 计算在你本地完成
+> - 链上只提交一个 ZK 证明
+> - 证明说：'这笔交易是合法的'，但不透露任何细节
+>
+> 链上存什么？只有一个 32 字节的状态哈希。
+> 没有 reserve 余额，没有交易金额，没有用户地址。
+>
+> MEV 机器人看着链上数据，只能看到一个哈希变成另一个哈希。
+> '这是什么？发生了什么？谁在交易？' —— 他们永远不会知道。
+>
+> 技术上，我们用 **Zig** 实现链上验证器，比 Rust 省 30% CU。
+> 这意味着更复杂的电路能在 Solana 的限制内跑通。
+>
+> **HumidiFi 是机构暗池 —— 他们信任做市商。**
+> **Titan 是用户暗池 —— 我们只信任数学。**
+>
+> 这不只是一个 DEX，这是 Solana 上**真正的金融隐私**。"
+
 ---
 
 ## 相关文档
