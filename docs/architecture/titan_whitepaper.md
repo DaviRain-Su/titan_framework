@@ -7576,6 +7576,870 @@ pub const Task = struct {
 > 就像没有 CDN 就没有现代互联网一样，
 > **没有 Titan 就没有 AI Agent 可以生存的 Web3。**
 
+### 17.9 RPC 统一抽象层：调度层的核心引擎
+
+> **如果不抽象 RPC，Titan Scheduler 就只是一个简单的"二传手"，无法真正解决用户的痛点。**
+>
+> RPC 抽象是调度层最核心的"脏活累活"，也是 Titan 真正的技术护城河。
+
+#### 为什么必须抽象 RPC？
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    原始 RPC 的混乱现状                                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  如果让 AI Agent 直接面对原始 RPC，它会崩溃：                               │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  Ethereum (JSON-RPC):                                               │   │
+│  │  ┌─────────────────────────────────────────────────────────────┐   │   │
+│  │  │  • eth_sendRawTransaction                                   │   │   │
+│  │  │  • 需要处理 nonce (极痛苦，发错卡死)                        │   │   │
+│  │  │  • 需要估算 gasLimit 和 maxFeePerGas                        │   │   │
+│  │  │  • 需要处理 EIP-1559 的 baseFee + priorityFee               │   │   │
+│  │  └─────────────────────────────────────────────────────────────┘   │   │
+│  │                                                                     │   │
+│  │  Solana (JSON-RPC):                                                 │   │
+│  │  ┌─────────────────────────────────────────────────────────────┐   │   │
+│  │  │  • sendTransaction                                          │   │   │
+│  │  │  • 需要处理 blockhash (过期了要重取，约 60 秒有效)          │   │   │
+│  │  │  • 需要处理 commitment 级别 (processed/confirmed/finalized) │   │   │
+│  │  │  • 需要处理 compute units 和 priority fee                   │   │   │
+│  │  └─────────────────────────────────────────────────────────────┘   │   │
+│  │                                                                     │   │
+│  │  Bitcoin (REST/RPC):                                                │   │
+│  │  ┌─────────────────────────────────────────────────────────────┐   │   │
+│  │  │  • sendrawtransaction                                       │   │   │
+│  │  │  • 需要自己拼凑 UTXO (没有"账户余额"概念)                   │   │   │
+│  │  │  • 需要处理 vbytes 和 sat/vB 费率                           │   │   │
+│  │  │  • 需要理解 SegWit、Taproot 等不同地址类型                  │   │   │
+│  │  └─────────────────────────────────────────────────────────────┘   │   │
+│  │                                                                     │   │
+│  │  TON / Cosmos / Sui / ...:                                          │   │
+│  │  ┌─────────────────────────────────────────────────────────────┐   │   │
+│  │  │  每条链都有自己独特的：                                     │   │   │
+│  │  │  • 查询格式                                                 │   │   │
+│  │  │  • 广播格式                                                 │   │   │
+│  │  │  • 确认标准                                                 │   │   │
+│  │  │  • 错误代码                                                 │   │   │
+│  │  └─────────────────────────────────────────────────────────────┘   │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  设计目标:                                                                  │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  把这一堆乱七八糟的接口，封装成一个标准化的 Titan RPC 接口          │   │
+│  │                                                                     │   │
+│  │  对于 AI: 整个区块链世界只有一个 RPC 接口 = titan.rpc               │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 三层抽象模型
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Titan RPC 三层抽象架构                                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│                    ┌─────────────────────────────────────┐                  │
+│                    │         AI Agent / User             │                  │
+│                    │      titan.rpc.* (统一接口)         │                  │
+│                    └──────────────────┬──────────────────┘                  │
+│                                       │                                      │
+│  ═══════════════════════════════════════════════════════════════════════   │
+│                                       │                                      │
+│                                       ▼                                      │
+│  第一层: 统一读取层 (Unified Read Layer)                                    │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  职责: 抹平数据结构的差异                                           │   │
+│  │  回答: "我现在有多少钱？" "现在网络堵不堵？"                        │   │
+│  │                                                                     │   │
+│  │  ┌─────────────────────────────────────────────────────────────┐   │   │
+│  │  │  titan.rpc.get_balance(chain, address)                      │   │   │
+│  │  │  titan.rpc.get_block_height(chain)                          │   │   │
+│  │  │  titan.rpc.get_gas_price(chain)                             │   │   │
+│  │  │  titan.rpc.get_transaction(chain, tx_hash)                  │   │   │
+│  │  └─────────────────────────────────────────────────────────────┘   │   │
+│  │                                                                     │   │
+│  │  内部实现 (Driver Pattern):                                         │   │
+│  │  • EVM Driver:    调用 eth_getBalance                              │   │
+│  │  • Bitcoin Driver: 聚合所有未花费 UTXO 的总和                      │   │
+│  │  • Solana Driver: 调用 getBalance                                  │   │
+│  │                                                                     │   │
+│  │  价值: AI 不需要知道 UTXO 是什么，它只看到一个数字                 │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                       │                                      │
+│                                       ▼                                      │
+│  第二层: 统一广播层 (Unified Broadcast Layer) ★ 最核心                      │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  职责: 抹平上链机制的差异                                           │   │
+│  │  回答: "怎么把交易发出去？"                                         │   │
+│  │                                                                     │   │
+│  │  ┌─────────────────────────────────────────────────────────────┐   │   │
+│  │  │  titan.rpc.broadcast(chain, payload) -> TxResult            │   │   │
+│  │  └─────────────────────────────────────────────────────────────┘   │   │
+│  │                                                                     │   │
+│  │  内部实现 (Smart Broadcaster):                                      │   │
+│  │                                                                     │   │
+│  │  ┌─────────────────────────────────────────────────────────────┐   │   │
+│  │  │  1. Nonce 管理器 (EVM 专用)                                 │   │   │
+│  │  │     • 内存维护用户 Nonce 队列                               │   │   │
+│  │  │     • AI 同时发 10 笔交易 → 自动标号 1,2,3...发送           │   │   │
+│  │  │     • 防止链上乱序失败                                      │   │   │
+│  │  │                                                             │   │   │
+│  │  │  2. BlockHash 刷新器 (Solana 专用)                          │   │   │
+│  │  │     • 交易因 BlockHash 过期失败 → 自动重取并重试            │   │   │
+│  │  │     • 用户无感知                                            │   │   │
+│  │  │                                                             │   │   │
+│  │  │  3. UTXO 选择器 (Bitcoin 专用)                              │   │   │
+│  │  │     • 自动选择最优 UTXO 组合                                │   │   │
+│  │  │     • 自动计算找零                                          │   │   │
+│  │  │                                                             │   │   │
+│  │  │  4. Gas 自动加注器                                          │   │   │
+│  │  │     • 监控 Mempool                                          │   │   │
+│  │  │     • 交易长时间未确认 → 自动 RBF 加速                      │   │   │
+│  │  │                                                             │   │   │
+│  │  └─────────────────────────────────────────────────────────────┘   │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                       │                                      │
+│                                       ▼                                      │
+│  第三层: 统一监听层 (Unified Event Layer)                                   │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  职责: 抹平确认标准的差异                                           │   │
+│  │  回答: "我的交易成功了吗？"                                         │   │
+│  │                                                                     │   │
+│  │  ┌─────────────────────────────────────────────────────────────┐   │   │
+│  │  │  titan.rpc.wait_for_confirmation(tx_id, level) -> Status    │   │   │
+│  │  │                                                             │   │   │
+│  │  │  level = .soft | .confirmed | .finalized                    │   │   │
+│  │  └─────────────────────────────────────────────────────────────┘   │   │
+│  │                                                                     │   │
+│  │  内部实现:                                                          │   │
+│  │  • ETH:    监听 receipt + 等待 2 epoch (Finalized)                 │   │
+│  │  • BTC:    等待 1/3/6 个区块确认                                   │   │
+│  │  • Solana: WebSocket signatureSubscribe → finalized                │   │
+│  │  • TON:    查询 transaction 状态 + 等待 shardchain 确认            │   │
+│  │                                                                     │   │
+│  │  价值: AI 得到的只是 True/False 回调，不需要轮询                   │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Chain Driver 实现 (Zig)
+
+```zig
+// ============================================================================
+// Titan Chain Driver - 链适配器模式
+// ============================================================================
+
+const std = @import("std");
+const titan = @import("titan");
+
+/// 通用链驱动接口 (类似 Linux 设备驱动)
+pub const ChainDriver = struct {
+    const Self = @This();
+
+    // 虚函数表 (vtable)
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        /// 获取余额
+        get_balance: *const fn (self: *anyopaque, address: Address) anyerror!u256,
+
+        /// 获取当前区块高度
+        get_block_height: *const fn (self: *anyopaque) anyerror!u64,
+
+        /// 获取推荐 Gas 价格
+        get_gas_price: *const fn (self: *anyopaque) anyerror!GasPrice,
+
+        /// 广播交易
+        broadcast: *const fn (self: *anyopaque, payload: []const u8) anyerror!TxHash,
+
+        /// 等待确认
+        wait_confirmation: *const fn (
+            self: *anyopaque,
+            tx_hash: TxHash,
+            level: ConfirmLevel,
+        ) anyerror!TxStatus,
+
+        /// 订阅事件
+        subscribe_events: *const fn (
+            self: *anyopaque,
+            filter: EventFilter,
+            callback: EventCallback,
+        ) anyerror!Subscription,
+    };
+
+    // 统一接口调用
+    pub fn getBalance(self: Self, address: Address) !u256 {
+        return self.vtable.get_balance(self.ptr, address);
+    }
+
+    pub fn broadcast(self: Self, payload: []const u8) !TxHash {
+        return self.vtable.broadcast(self.ptr, payload);
+    }
+
+    pub fn waitConfirmation(self: Self, tx: TxHash, level: ConfirmLevel) !TxStatus {
+        return self.vtable.wait_confirmation(self.ptr, tx, level);
+    }
+};
+
+/// EVM 驱动实现 (Ethereum, Base, Arbitrum, ...)
+pub const EvmDriver = struct {
+    const Self = @This();
+
+    chain_id: u64,
+    rpc_endpoints: []const []const u8,
+    current_endpoint: usize,
+    nonce_cache: std.AutoHashMap(Address, u64),
+    http_client: HttpClient,
+
+    pub fn init(chain_id: u64, endpoints: []const []const u8) Self {
+        return .{
+            .chain_id = chain_id,
+            .rpc_endpoints = endpoints,
+            .current_endpoint = 0,
+            .nonce_cache = std.AutoHashMap(Address, u64).init(allocator),
+            .http_client = HttpClient.init(),
+        };
+    }
+
+    /// 实现 getBalance
+    fn getBalance(ptr: *anyopaque, address: Address) !u256 {
+        const self = @ptrCast(*Self, @alignCast(@alignOf(Self), ptr));
+
+        const request = .{
+            .jsonrpc = "2.0",
+            .method = "eth_getBalance",
+            .params = .{ address.toHex(), "latest" },
+            .id = 1,
+        };
+
+        // 带故障转移的 RPC 调用
+        const response = try self.callWithFailover(request);
+        return std.fmt.parseInt(u256, response.result[2..], 16);
+    }
+
+    /// 实现 broadcast (带 Nonce 管理)
+    fn broadcast(ptr: *anyopaque, payload: []const u8) !TxHash {
+        const self = @ptrCast(*Self, @alignCast(@alignOf(Self), ptr));
+
+        // 1. 解析交易获取 from 地址
+        const tx = try Transaction.decode(payload);
+
+        // 2. 获取并递增 Nonce (原子操作)
+        const nonce = try self.getAndIncrementNonce(tx.from);
+
+        // 3. 重新编码带正确 Nonce 的交易
+        tx.nonce = nonce;
+        const signed_payload = try tx.encode();
+
+        // 4. 广播
+        const request = .{
+            .jsonrpc = "2.0",
+            .method = "eth_sendRawTransaction",
+            .params = .{std.fmt.bytesToHex(signed_payload)},
+            .id = 1,
+        };
+
+        const response = try self.callWithFailover(request);
+        return TxHash.fromHex(response.result);
+    }
+
+    /// Nonce 管理器
+    fn getAndIncrementNonce(self: *Self, address: Address) !u64 {
+        // 检查缓存
+        if (self.nonce_cache.get(address)) |cached| {
+            const next = cached + 1;
+            try self.nonce_cache.put(address, next);
+            return cached;
+        }
+
+        // 从链上获取
+        const request = .{
+            .jsonrpc = "2.0",
+            .method = "eth_getTransactionCount",
+            .params = .{ address.toHex(), "pending" },
+            .id = 1,
+        };
+
+        const response = try self.callWithFailover(request);
+        const nonce = std.fmt.parseInt(u64, response.result[2..], 16);
+
+        try self.nonce_cache.put(address, nonce + 1);
+        return nonce;
+    }
+
+    /// 带故障转移的 RPC 调用
+    fn callWithFailover(self: *Self, request: anytype) !JsonRpcResponse {
+        var last_error: anyerror = error.AllEndpointsFailed;
+
+        for (self.rpc_endpoints) |endpoint| {
+            const result = self.http_client.post(endpoint, request) catch |err| {
+                last_error = err;
+                continue; // 尝试下一个节点
+            };
+
+            if (result.error == null) {
+                return result;
+            }
+        }
+
+        return last_error;
+    }
+
+    /// 导出为通用 ChainDriver
+    pub fn driver(self: *Self) ChainDriver {
+        return .{
+            .ptr = self,
+            .vtable = &.{
+                .get_balance = getBalance,
+                .get_block_height = getBlockHeight,
+                .get_gas_price = getGasPrice,
+                .broadcast = broadcast,
+                .wait_confirmation = waitConfirmation,
+                .subscribe_events = subscribeEvents,
+            },
+        };
+    }
+};
+
+/// Solana 驱动实现
+pub const SolanaDriver = struct {
+    const Self = @This();
+
+    rpc_endpoints: []const []const u8,
+    blockhash_cache: struct {
+        hash: [32]u8,
+        last_valid_slot: u64,
+        fetched_at: i64,
+    },
+
+    /// 实现 broadcast (带 BlockHash 自动刷新)
+    fn broadcast(ptr: *anyopaque, payload: []const u8) !TxHash {
+        const self = @ptrCast(*Self, @alignCast(@alignOf(Self), ptr));
+
+        var tx = try Transaction.decode(payload);
+
+        // 检查 BlockHash 是否过期
+        const current_slot = try self.getCurrentSlot();
+        if (current_slot > self.blockhash_cache.last_valid_slot) {
+            // 刷新 BlockHash
+            try self.refreshBlockhash();
+        }
+
+        // 设置最新的 BlockHash
+        tx.recent_blockhash = self.blockhash_cache.hash;
+
+        // 重新签名 (需要用户授权或使用 durable nonce)
+        const signed = try self.resignTransaction(tx);
+
+        // 广播
+        return try self.sendTransaction(signed);
+    }
+
+    fn refreshBlockhash(self: *Self) !void {
+        const request = .{
+            .jsonrpc = "2.0",
+            .method = "getLatestBlockhash",
+            .params = .{.{ .commitment = "finalized" }},
+            .id = 1,
+        };
+
+        const response = try self.call(request);
+        self.blockhash_cache = .{
+            .hash = response.result.value.blockhash,
+            .last_valid_slot = response.result.value.lastValidBlockHeight,
+            .fetched_at = std.time.timestamp(),
+        };
+    }
+};
+
+/// Bitcoin 驱动实现
+pub const BitcoinDriver = struct {
+    const Self = @This();
+
+    rpc_endpoints: []const []const u8,
+    utxo_indexer: UtxoIndexer,
+
+    /// 实现 getBalance (聚合 UTXO)
+    fn getBalance(ptr: *anyopaque, address: Address) !u256 {
+        const self = @ptrCast(*Self, @alignCast(@alignOf(Self), ptr));
+
+        // Bitcoin 没有余额概念，需要聚合所有 UTXO
+        const utxos = try self.utxo_indexer.getUtxosForAddress(address);
+
+        var total: u256 = 0;
+        for (utxos) |utxo| {
+            total += utxo.value;
+        }
+
+        return total;
+    }
+
+    /// 实现 broadcast (带 UTXO 选择)
+    fn broadcast(ptr: *anyopaque, payload: []const u8) !TxHash {
+        const self = @ptrCast(*Self, @alignCast(@alignOf(Self), ptr));
+
+        var tx = try BitcoinTransaction.decode(payload);
+
+        // 如果输入为空，自动选择 UTXO
+        if (tx.inputs.len == 0) {
+            const required_amount = tx.calculateOutputTotal() + tx.estimateFee();
+            const selected_utxos = try self.selectUtxos(tx.sender, required_amount);
+            tx.inputs = selected_utxos;
+
+            // 计算找零
+            const change = selected_utxos.total() - required_amount;
+            if (change > 546) { // 防止粉尘攻击
+                tx.addChangeOutput(tx.sender, change);
+            }
+        }
+
+        return try self.sendRawTransaction(tx.encode());
+    }
+
+    /// UTXO 选择算法 (Coin Selection)
+    fn selectUtxos(self: *Self, address: Address, amount: u64) ![]Utxo {
+        const all_utxos = try self.utxo_indexer.getUtxosForAddress(address);
+
+        // 使用 Branch and Bound 算法选择最优 UTXO 组合
+        // 目标: 最小化找零，减少手续费
+        return try coinSelection.branchAndBound(all_utxos, amount);
+    }
+};
+```
+
+#### 高级特性：三大增强模块
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Titan RPC 高级特性                                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  特性 A: 多路复用与故障转移 (RPC Aggregation & Failover)                    │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  问题: 假如只用 Infura，Infura 挂了怎么办？                         │   │
+│  │                                                                     │   │
+│  │  设计: 调度器后端连接多个 RPC 提供商                                │   │
+│  │                                                                     │   │
+│  │       ┌─────────────────────────────────────────────────────┐      │   │
+│  │       │              RPC Connection Pool                    │      │   │
+│  │       │                                                     │      │   │
+│  │       │  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐  │      │   │
+│  │       │  │ Infura  │ │ Alchemy │ │QuickNode│ │ Helius  │  │      │   │
+│  │       │  │ (ETH)   │ │ (ETH)   │ │ (SOL)   │ │ (SOL)   │  │      │   │
+│  │       │  └────┬────┘ └────┬────┘ └────┬────┘ └────┬────┘  │      │   │
+│  │       │       │           │           │           │        │      │   │
+│  │       │       └───────────┴───────────┴───────────┘        │      │   │
+│  │       │                       │                             │      │   │
+│  │       │                       ▼                             │      │   │
+│  │       │              ┌───────────────┐                     │      │   │
+│  │       │              │ Load Balancer │                     │      │   │
+│  │       │              │               │                     │      │   │
+│  │       │              │ • Round Robin │                     │      │   │
+│  │       │              │ • Latency     │                     │      │   │
+│  │       │              │ • Racing Mode │                     │      │   │
+│  │       │              └───────────────┘                     │      │   │
+│  │       │                                                     │      │   │
+│  │       └─────────────────────────────────────────────────────┘      │   │
+│  │                                                                     │   │
+│  │  策略:                                                              │   │
+│  │  1. Normal Mode: Round Robin 轮询                                  │   │
+│  │  2. Failover Mode: A 超时 → 自动切换到 B                           │   │
+│  │  3. Racing Mode: 同时发给 A,B,C，谁先返回用谁 (低延迟场景)        │   │
+│  │                                                                     │   │
+│  │  结果: 用户体感 —— Titan 网络永远不卡，永远在线                    │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  特性 B: 交易预执行与模拟 (Simulation & Pre-execution)                      │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  问题: 交易上链失败是要扣 Gas 的，AI 经常发逻辑错误的交易          │   │
+│  │                                                                     │   │
+│  │  设计: 在广播前，先在模拟环境中跑一遍                               │   │
+│  │                                                                     │   │
+│  │       ┌─────────────────────────────────────────────────────┐      │   │
+│  │       │                 Transaction Flow                    │      │   │
+│  │       │                                                     │      │   │
+│  │       │  User Tx ──► ┌─────────────┐                       │      │   │
+│  │       │              │  Simulator  │                       │      │   │
+│  │       │              │             │                       │      │   │
+│  │       │              │ • Fork State│                       │      │   │
+│  │       │              │ • Run EVM   │                       │      │   │
+│  │       │              │ • Check Gas │                       │      │   │
+│  │       │              └──────┬──────┘                       │      │   │
+│  │       │                     │                               │      │   │
+│  │       │           ┌─────────┴─────────┐                    │      │   │
+│  │       │           │                   │                    │      │   │
+│  │       │           ▼                   ▼                    │      │   │
+│  │       │     ┌──────────┐       ┌──────────┐               │      │   │
+│  │       │     │ SUCCESS  │       │  REVERT  │               │      │   │
+│  │       │     │          │       │          │               │      │   │
+│  │       │     │ 广播上链 │       │ 返回错误 │               │      │   │
+│  │       │     │          │       │ 不上链   │               │      │   │
+│  │       │     └──────────┘       └──────────┘               │      │   │
+│  │       │                                                     │      │   │
+│  │       └─────────────────────────────────────────────────────┘      │   │
+│  │                                                                     │   │
+│  │  实现:                                                              │   │
+│  │  • 内置轻量级 EVM/SVM 模拟器                                       │   │
+│  │  • 使用 eth_call / simulateTransaction 等原生方法                  │   │
+│  │  • 如果模拟结果是 Revert，直接告诉 AI "你会失败"                   │   │
+│  │                                                                     │   │
+│  │  结果: 帮用户省大量的冤枉钱 (Gas 费)                               │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  特性 C: 智能 Gas 预言机 (Smart Gas Oracle)                                 │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  问题: Gas 估算不准，要么给多了浪费，要么给少了卡住                │   │
+│  │                                                                     │   │
+│  │  设计: 分析历史数据 + Mempool 状态，给出最优价格                   │   │
+│  │                                                                     │   │
+│  │       ┌─────────────────────────────────────────────────────┐      │   │
+│  │       │              Smart Gas Oracle                       │      │   │
+│  │       │                                                     │      │   │
+│  │       │  输入:                                              │      │   │
+│  │       │  ┌─────────────────────────────────────────────┐   │      │   │
+│  │       │  │ • 最近 10 个区块的 BaseFee 趋势             │   │      │   │
+│  │       │  │ • 当前 Mempool 拥堵情况                     │   │      │   │
+│  │       │  │ • 用户期望的确认速度 (fast/medium/slow)     │   │      │   │
+│  │       │  └─────────────────────────────────────────────┘   │      │   │
+│  │       │                     │                               │      │   │
+│  │       │                     ▼                               │      │   │
+│  │       │  ┌─────────────────────────────────────────────┐   │      │   │
+│  │       │  │           ML Price Predictor                │   │      │   │
+│  │       │  │                                             │   │      │   │
+│  │       │  │  f(history, mempool, urgency) → optimal_gas │   │      │   │
+│  │       │  │                                             │   │      │   │
+│  │       │  └─────────────────────────────────────────────┘   │      │   │
+│  │       │                     │                               │      │   │
+│  │       │                     ▼                               │      │   │
+│  │       │  输出:                                              │      │   │
+│  │       │  ┌─────────────────────────────────────────────┐   │      │   │
+│  │       │  │ {                                           │   │      │   │
+│  │       │  │   maxFeePerGas: 25 gwei,                    │   │      │   │
+│  │       │  │   maxPriorityFeePerGas: 1.5 gwei,           │   │      │   │
+│  │       │  │   estimatedConfirmTime: "~12 seconds"       │   │      │   │
+│  │       │  │ }                                           │   │      │   │
+│  │       │  └─────────────────────────────────────────────┘   │      │   │
+│  │       │                                                     │      │   │
+│  │       └─────────────────────────────────────────────────────┘      │   │
+│  │                                                                     │   │
+│  │  结果: 给出"刚刚好能打包"的最优价格，不多花一分钱                  │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 完整 RPC Gateway 实现
+
+```zig
+// ============================================================================
+// Titan Universal RPC Gateway - 统一 RPC 网关
+// ============================================================================
+
+const std = @import("std");
+const titan = @import("titan");
+
+/// 链标识枚举
+pub const Chain = enum {
+    ethereum,
+    base,
+    arbitrum,
+    optimism,
+    solana,
+    bitcoin,
+    ton,
+    sui,
+    cosmos,
+    // ...
+};
+
+/// 确认级别
+pub const ConfirmLevel = enum {
+    /// 软确认 (Solver 担保，最快)
+    soft,
+    /// 单块确认
+    confirmed,
+    /// 最终确认 (不可逆)
+    finalized,
+};
+
+/// Titan 统一 RPC 网关
+pub const RpcGateway = struct {
+    const Self = @This();
+
+    /// 链驱动注册表
+    drivers: std.AutoHashMap(Chain, ChainDriver),
+
+    /// 连接池
+    connection_pool: ConnectionPool,
+
+    /// 交易模拟器
+    simulator: TxSimulator,
+
+    /// Gas 预言机
+    gas_oracle: GasOracle,
+
+    /// 初始化网关
+    pub fn init(config: GatewayConfig) !Self {
+        var self = Self{
+            .drivers = std.AutoHashMap(Chain, ChainDriver).init(allocator),
+            .connection_pool = try ConnectionPool.init(config.endpoints),
+            .simulator = try TxSimulator.init(),
+            .gas_oracle = try GasOracle.init(),
+        };
+
+        // 注册所有链驱动
+        try self.registerDriver(.ethereum, EvmDriver.init(1, config.eth_endpoints));
+        try self.registerDriver(.base, EvmDriver.init(8453, config.base_endpoints));
+        try self.registerDriver(.solana, SolanaDriver.init(config.sol_endpoints));
+        try self.registerDriver(.bitcoin, BitcoinDriver.init(config.btc_endpoints));
+        // ...
+
+        return self;
+    }
+
+    // ==================== 统一读取层 ====================
+
+    /// 获取余额 (统一接口)
+    pub fn getBalance(self: *Self, chain: Chain, address: Address) !u256 {
+        const driver = self.drivers.get(chain) orelse return error.UnsupportedChain;
+        return driver.getBalance(address);
+    }
+
+    /// 获取当前区块高度
+    pub fn getBlockHeight(self: *Self, chain: Chain) !u64 {
+        const driver = self.drivers.get(chain) orelse return error.UnsupportedChain;
+        return driver.getBlockHeight();
+    }
+
+    /// 获取 Gas 价格 (通过 Oracle)
+    pub fn getGasPrice(self: *Self, chain: Chain, urgency: GasUrgency) !GasPrice {
+        return self.gas_oracle.getOptimalPrice(chain, urgency);
+    }
+
+    // ==================== 统一广播层 ====================
+
+    /// 广播交易 (带预执行检查)
+    pub fn broadcast(
+        self: *Self,
+        chain: Chain,
+        payload: []const u8,
+        options: BroadcastOptions,
+    ) !BroadcastResult {
+        const driver = self.drivers.get(chain) orelse return error.UnsupportedChain;
+
+        // 1. 预执行模拟 (可选)
+        if (options.simulate_first) {
+            const sim_result = try self.simulator.simulate(chain, payload);
+            if (sim_result.reverted) {
+                return .{
+                    .status = .simulated_failure,
+                    .error_message = sim_result.revert_reason,
+                    .gas_would_be_wasted = sim_result.gas_used,
+                };
+            }
+        }
+
+        // 2. Gas 优化 (可选)
+        var final_payload = payload;
+        if (options.optimize_gas) {
+            const optimal_gas = try self.gas_oracle.getOptimalPrice(chain, options.urgency);
+            final_payload = try self.injectOptimalGas(payload, optimal_gas);
+        }
+
+        // 3. 广播到链
+        const tx_hash = try driver.broadcast(final_payload);
+
+        return .{
+            .status = .broadcasted,
+            .tx_hash = tx_hash,
+            .estimated_confirmation = self.gas_oracle.estimateConfirmTime(chain),
+        };
+    }
+
+    // ==================== 统一监听层 ====================
+
+    /// 等待交易确认
+    pub fn waitConfirmation(
+        self: *Self,
+        chain: Chain,
+        tx_hash: TxHash,
+        level: ConfirmLevel,
+    ) !TxStatus {
+        const driver = self.drivers.get(chain) orelse return error.UnsupportedChain;
+
+        // 根据确认级别选择策略
+        switch (level) {
+            .soft => {
+                // Solver 担保模式：直接返回，后台异步确认
+                _ = try self.registerSoftConfirmation(tx_hash);
+                return .{ .status = .soft_confirmed };
+            },
+            .confirmed => {
+                return driver.waitConfirmation(tx_hash, .confirmed);
+            },
+            .finalized => {
+                return driver.waitConfirmation(tx_hash, .finalized);
+            },
+        }
+    }
+
+    /// 订阅事件 (跨链统一)
+    pub fn subscribeEvents(
+        self: *Self,
+        chain: Chain,
+        filter: EventFilter,
+        callback: EventCallback,
+    ) !Subscription {
+        const driver = self.drivers.get(chain) orelse return error.UnsupportedChain;
+        return driver.subscribeEvents(filter, callback);
+    }
+};
+
+/// 广播选项
+pub const BroadcastOptions = struct {
+    /// 是否先模拟
+    simulate_first: bool = true,
+
+    /// 是否优化 Gas
+    optimize_gas: bool = true,
+
+    /// Gas 紧急程度
+    urgency: GasUrgency = .medium,
+
+    /// 是否启用 RBF 自动加速
+    enable_rbf: bool = true,
+
+    /// 超时时间
+    timeout_ms: u64 = 60_000,
+};
+
+/// Gas 紧急程度
+pub const GasUrgency = enum {
+    /// 慢速 (省钱，可能要等几个区块)
+    slow,
+    /// 中速 (平衡)
+    medium,
+    /// 快速 (下一个区块)
+    fast,
+    /// 立即 (不惜代价)
+    instant,
+};
+```
+
+#### 调度层完整架构图
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Titan Scheduler 完整内部架构                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│                         ┌─────────────────────┐                             │
+│                         │    AI Agent / User   │                             │
+│                         └──────────┬──────────┘                             │
+│                                    │                                         │
+│                                    ▼                                         │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                        Intent Layer                                 │   │
+│  │                   (意图解析与任务分发)                               │   │
+│  └────────────────────────────┬────────────────────────────────────────┘   │
+│                               │                                             │
+│        ┌──────────────────────┼──────────────────────┐                     │
+│        │                      │                      │                      │
+│        ▼                      ▼                      ▼                      │
+│  ┌──────────────┐      ┌──────────────┐      ┌──────────────┐             │
+│  │  TX Scheduler│      │Compute Sched │      │ Time Sched   │             │
+│  │  (交易调度)  │      │ (算力调度)   │      │ (时间调度)   │             │
+│  └──────┬───────┘      └──────┬───────┘      └──────┬───────┘             │
+│         │                     │                     │                       │
+│         └─────────────────────┼─────────────────────┘                       │
+│                               │                                             │
+│                               ▼                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │                    Titan RPC Gateway (核心引擎)                     │   │
+│  │                                                                     │   │
+│  │  ┌─────────────────────────────────────────────────────────────┐   │   │
+│  │  │                   Smart Features Layer                      │   │   │
+│  │  │                                                             │   │   │
+│  │  │  ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌─────────┐ │   │   │
+│  │  │  │   Nonce   │  │   Gas     │  │    Tx     │  │  RBF    │ │   │   │
+│  │  │  │  Manager  │  │  Oracle   │  │ Simulator │  │ Booster │ │   │   │
+│  │  │  └───────────┘  └───────────┘  └───────────┘  └─────────┘ │   │   │
+│  │  │                                                             │   │   │
+│  │  └─────────────────────────────────────────────────────────────┘   │   │
+│  │                               │                                     │   │
+│  │  ┌─────────────────────────────────────────────────────────────┐   │   │
+│  │  │                   Chain Driver Layer                        │   │   │
+│  │  │                                                             │   │   │
+│  │  │  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌───────┐│   │   │
+│  │  │  │   EVM   │ │ Solana  │ │ Bitcoin │ │   TON   │ │  Sui  ││   │   │
+│  │  │  │ Driver  │ │ Driver  │ │ Driver  │ │ Driver  │ │Driver ││   │   │
+│  │  │  └────┬────┘ └────┬────┘ └────┬────┘ └────┬────┘ └───┬───┘│   │   │
+│  │  │       │           │           │           │          │     │   │   │
+│  │  └───────┼───────────┼───────────┼───────────┼──────────┼─────┘   │   │
+│  │          │           │           │           │          │         │   │
+│  │  ┌───────┼───────────┼───────────┼───────────┼──────────┼─────┐   │   │
+│  │  │       │           │           │           │          │     │   │   │
+│  │  │       │     Connection Pool (with Failover)          │     │   │   │
+│  │  │       │                                              │     │   │   │
+│  │  │  ┌────┴────┐ ┌────┴────┐ ┌────┴────┐ ┌────┴────┐    │     │   │   │
+│  │  │  │ Infura  │ │ Alchemy │ │Quicknode│ │ Helius  │ ...│     │   │   │
+│  │  │  │ Ankr    │ │ Blast   │ │ GetBlock│ │ Triton  │    │     │   │   │
+│  │  │  └─────────┘ └─────────┘ └─────────┘ └─────────┘    │     │   │   │
+│  │  │                                                      │     │   │   │
+│  │  └──────────────────────────────────────────────────────┘     │   │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                    │                                         │
+│                                    ▼                                         │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                         Settlement Layer                            │   │
+│  │                                                                     │   │
+│  │  ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐          │   │
+│  │  │  ETH   │ │ Solana │ │  BTC   │ │  TON   │ │  Sui   │  ...     │   │
+│  │  │Mainnet │ │Mainnet │ │Mainnet │ │Mainnet │ │Mainnet │          │   │
+│  │  └────────┘ └────────┘ └────────┘ └────────┘ └────────┘          │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+> **设计哲学：**
+>
+> **"把复杂性留给自己，把简单留给用户。"**
+>
+> - 对于 AI：整个区块链世界只有一个 RPC 接口 `titan.rpc`
+> - 对于 Titan Scheduler：内部维护了一个庞大的、高可用的、多路复用的全链连接池
+>
+> **这就是为什么 Titan 能被称为 OS 的原因 —— 因为 Linux 内核也是这么管理网卡驱动的。**
+>
+> 你不需要知道网卡是 Realtek 还是 Intel，你只需要 `socket.send()`。
+>
+> 你不需要知道链是 EVM 还是 SVM，你只需要 `titan.rpc.broadcast()`。
+
 ---
 
 ## 18. 终极总结 (Conclusion)
