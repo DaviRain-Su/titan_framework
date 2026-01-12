@@ -18,7 +18,8 @@
 8. [与现有方案对比](#8-与现有方案对比-comparison)
 9. [实现路线图](#9-实现路线图-roadmap)
 10. [商业模式](#10-商业模式-business-model)
-11. [终极总结](#11-终极总结-conclusion)
+11. [Titan Client SDK：前端统一抽象](#11-titan-client-sdk前端统一抽象-frontend-unification)
+12. [终极总结](#12-终极总结-conclusion)
 
 ---
 
@@ -968,7 +969,567 @@ fetch_price() | check_threshold() | execute_swap() | emit_event()
 
 ---
 
-## 11. 终极总结 (Conclusion)
+## 11. Titan Client SDK：前端统一抽象 (Frontend Unification)
+
+> **"如果后端是 Linux 内核，前端就是桌面环境。没有桌面环境，用户无法使用内核。"**
+
+### 11.1 为什么前端需要抽象？
+
+如果只做到后端（合约）统一，而前端还需要开发者分别写 `ethers.js` (EVM) 和 `@solana/web3.js` (Solana)，那 Titan OS 只完成了一半。
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    前端开发的痛苦现状                                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  EVM 链交互：                                                               │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  import { ethers } from 'ethers';                                   │   │
+│  │  const provider = new ethers.BrowserProvider(window.ethereum);      │   │
+│  │  const signer = await provider.getSigner();                         │   │
+│  │  const contract = new ethers.Contract(addr, abi, signer);           │   │
+│  │  await contract.transfer(to, amount);                               │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  Solana 链交互：                                                            │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  import { Connection, PublicKey } from '@solana/web3.js';           │   │
+│  │  import { Program, AnchorProvider } from '@coral-xyz/anchor';       │   │
+│  │  const connection = new Connection(clusterApiUrl('mainnet'));       │   │
+│  │  const provider = new AnchorProvider(connection, wallet, opts);     │   │
+│  │  const program = new Program(idl, programId, provider);             │   │
+│  │  await program.methods.transfer(to, amount).rpc();                  │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  问题：完全不同的 API，完全不同的心智模型！                                  │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 11.2 Titan Client SDK 架构
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Titan Client SDK 完整架构                                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  Frontend Frameworks                                                 │   │
+│  │  React │ Vue │ Svelte │ Vanilla JS │ React Native │ Flutter         │   │
+│  └────────────────────────────┬────────────────────────────────────────┘   │
+│                               │                                             │
+│  ┌────────────────────────────▼────────────────────────────────────────┐   │
+│  │  @titan-os/client                                                    │   │
+│  │  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐   │   │
+│  │  │  Contract   │ │   Wallet    │ │   State     │ │  Simulator  │   │   │
+│  │  │  Proxy      │ │   Adapter   │ │   Manager   │ │   (Wasm)    │   │   │
+│  │  └─────────────┘ └─────────────┘ └─────────────┘ └─────────────┘   │   │
+│  │                                                                     │   │
+│  │  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐                   │   │
+│  │  │   Events    │ │   Cache     │ │    IDL      │                   │   │
+│  │  │  Subscriber │ │   Layer     │ │   Parser    │                   │   │
+│  │  └─────────────┘ └─────────────┘ └─────────────┘                   │   │
+│  └────────────────────────────┬────────────────────────────────────────┘   │
+│                               │ T-RPC (Titan Remote Procedure Call)        │
+│  ┌────────────────────────────▼────────────────────────────────────────┐   │
+│  │  Protocol Adapters (协议适配层)                                      │   │
+│  │  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐      │   │
+│  │  │ Solana  │ │  EVM    │ │   TON   │ │ Cosmos  │ │ Bitcoin │      │   │
+│  │  │ JsonRPC │ │ JsonRPC │ │  ADNL   │ │  gRPC   │ │Electrum │      │   │
+│  │  └─────────┘ └─────────┘ └─────────┘ └─────────┘ └─────────┘      │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                               │                                             │
+│  ┌────────────────────────────▼────────────────────────────────────────┐   │
+│  │  Blockchains                                                         │   │
+│  │  Solana │ Ethereum │ Arbitrum │ TON │ Cosmos │ Bitcoin │ ...        │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 11.3 Titan IDL：前后端的桥梁
+
+当开发者运行 `titan build` 时，编译器不仅生成合约字节码，还生成 **Titan IDL** (接口描述语言)。
+
+```json
+// build/schema.titan.json - Titan IDL
+{
+  "version": "1.0",
+  "name": "MyToken",
+  "address": "auto-detected",
+  "chain": "auto-detected",
+
+  "methods": [
+    {
+      "name": "transfer",
+      "args": [
+        { "name": "to", "type": "address" },
+        { "name": "amount", "type": "u64" }
+      ],
+      "returns": { "type": "bool" },
+      "mutates": true,
+      "syscalls": ["titan_storage_write", "titan_emit"]
+    },
+    {
+      "name": "balanceOf",
+      "args": [
+        { "name": "owner", "type": "address" }
+      ],
+      "returns": { "type": "u64" },
+      "mutates": false,
+      "syscalls": ["titan_storage_read"]
+    }
+  ],
+
+  "storage": {
+    "balances": {
+      "type": "map<address, u64>",
+      "key_encoding": "keccak256"
+    },
+    "total_supply": {
+      "type": "u64"
+    }
+  },
+
+  "events": [
+    {
+      "name": "Transfer",
+      "args": [
+        { "name": "from", "type": "address", "indexed": true },
+        { "name": "to", "type": "address", "indexed": true },
+        { "name": "amount", "type": "u64" }
+      ]
+    }
+  ]
+}
+```
+
+### 11.4 统一的前端 API
+
+**Titan Client 使用示例：**
+
+```typescript
+// 不管合约在哪条链，代码完全一样！
+import { TitanClient } from '@titan-os/client';
+import idl from './build/schema.titan.json';
+
+// 初始化客户端
+const client = new TitanClient({
+  idl,
+  // 地址可以是任何链的格式
+  // SDK 自动检测并选择正确的协议适配器
+  address: "0x123..." // 或 "7xYz..." (Solana) 或 "EQ..." (TON)
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 读取状态 (Read)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// 读取单个值
+const totalSupply = await client.storage.total_supply.get();
+
+// 读取 Map 中的值
+const balance = await client.storage.balances.get("0xUser...");
+
+// 批量读取
+const [balance1, balance2] = await client.storage.balances.getMany([
+  "0xUser1...",
+  "0xUser2..."
+]);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 调用方法 (Write)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// 发送交易
+const tx = await client.methods.transfer("0xRecipient...", 100n).submit();
+
+// 等待确认
+const receipt = await tx.wait();
+console.log("Transaction confirmed:", receipt.hash);
+
+// 模拟执行（不发送交易）
+const simResult = await client.methods.transfer("0xRecipient...", 100n).simulate();
+console.log("Gas estimate:", simResult.gasUsed);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 事件订阅 (Events)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// 订阅事件 - 不管是 EVM Event 还是 Solana Log，格式统一
+client.events.on('Transfer', (event) => {
+  console.log(`${event.from} -> ${event.to}: ${event.amount}`);
+});
+
+// 查询历史事件
+const transfers = await client.events.query('Transfer', {
+  filter: { from: "0xUser..." },
+  fromBlock: 1000000,
+  toBlock: 'latest'
+});
+```
+
+### 11.5 框架绑定 (Framework Bindings)
+
+**React:**
+
+```tsx
+import { useTitanContract, TitanProvider } from '@titan-os/react';
+
+// 包装应用
+function App() {
+  return (
+    <TitanProvider>
+      <MyDApp />
+    </TitanProvider>
+  );
+}
+
+// 使用 Hook
+function TokenBalance({ address }) {
+  const { storage, methods, isLoading, error } = useTitanContract(idl);
+
+  const { data: balance } = storage.balances.use(address);
+
+  const handleTransfer = async () => {
+    await methods.transfer(recipient, amount).submit();
+  };
+
+  if (isLoading) return <Spinner />;
+  if (error) return <Error message={error} />;
+
+  return (
+    <div>
+      <p>Balance: {balance}</p>
+      <button onClick={handleTransfer}>Transfer</button>
+    </div>
+  );
+}
+```
+
+**Vue 3:**
+
+```vue
+<script setup>
+import { useTitan } from '@titan-os/vue';
+
+const { storage, methods, isLoading } = useTitan(idl);
+const balance = storage.balances.use(userAddress);
+
+const transfer = async () => {
+  await methods.transfer(recipient, amount).submit();
+};
+</script>
+
+<template>
+  <div v-if="isLoading">Loading...</div>
+  <div v-else>
+    <p>Balance: {{ balance }}</p>
+    <button @click="transfer">Transfer</button>
+  </div>
+</template>
+```
+
+**Svelte:**
+
+```svelte
+<script>
+import { titanStore } from '@titan-os/svelte';
+
+const contract = titanStore(idl);
+$: balance = $contract.storage.balances.get(userAddress);
+
+const transfer = async () => {
+  await $contract.methods.transfer(recipient, amount).submit();
+};
+</script>
+
+<p>Balance: {$balance}</p>
+<button on:click={transfer}>Transfer</button>
+```
+
+### 11.6 钱包适配器 (Wallet Adapter)
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Titan Wallet Adapter                                      │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  开发者代码：                                                               │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  <TitanConnectButton />                                             │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                    │                                        │
+│                                    ▼                                        │
+│  SDK 自动检测合约所在链，唤起对应钱包：                                      │
+│                                                                             │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐             │
+│  │ 合约在 EVM      │  │ 合约在 Solana   │  │ 合约在 TON      │             │
+│  │                 │  │                 │  │                 │             │
+│  │ 唤起 MetaMask   │  │ 唤起 Phantom    │  │ 唤起 TonKeeper  │             │
+│  │ 或 WalletConnect│  │ 或 Solflare    │  │ 或 TonConnect   │             │
+│  └─────────────────┘  └─────────────────┘  └─────────────────┘             │
+│                                                                             │
+│  返回统一的 Signer 接口：                                                   │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  const { signer, address, chain } = useTitanWallet();               │   │
+│  │  // signer 接口完全统一，开发者无需关心底层钱包                      │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**使用示例：**
+
+```tsx
+import { TitanConnectButton, useTitanWallet } from '@titan-os/react';
+
+function WalletStatus() {
+  const { isConnected, address, chain, disconnect } = useTitanWallet();
+
+  if (!isConnected) {
+    return <TitanConnectButton />;
+  }
+
+  return (
+    <div>
+      <p>Connected: {address}</p>
+      <p>Chain: {chain}</p>
+      <button onClick={disconnect}>Disconnect</button>
+    </div>
+  );
+}
+```
+
+### 11.7 客户端模拟器 (Client-Side Simulator)
+
+这是 Titan Client 的**杀手级功能**：在发送交易前，在浏览器本地预执行。
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    客户端模拟器工作流程                                      │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  用户点击"发送"                                                             │
+│       │                                                                     │
+│       ▼                                                                     │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  Titan Wasm Simulator                                               │   │
+│  │  ┌───────────────────────────────────────────────────────────────┐ │   │
+│  │  │  加载合约的 Lean 逻辑 (编译为 Wasm)                           │ │   │
+│  │  │  获取链上当前状态                                             │ │   │
+│  │  │  本地执行交易                                                 │ │   │
+│  │  └───────────────────────────────────────────────────────────────┘ │   │
+│  └──────────────────────────┬──────────────────────────────────────────┘   │
+│                             │                                               │
+│                ┌────────────┴────────────┐                                  │
+│                │                         │                                  │
+│                ▼                         ▼                                  │
+│  ┌─────────────────────┐   ┌─────────────────────────────────────────┐     │
+│  │      执行成功        │   │              执行失败                    │     │
+│  │                     │   │                                         │     │
+│  │  显示预估 Gas       │   │  阻止发送交易                            │     │
+│  │  显示状态变化预览    │   │  显示详细错误信息：                      │     │
+│  │  用户确认后发送     │   │  "余额不足: 需要 100, 当前 50"           │     │
+│  │                     │   │  "权限不足: 需要 admin 角色"             │     │
+│  └─────────────────────┘   └─────────────────────────────────────────┘     │
+│                                                                             │
+│  价值：用户永远不会发出失败交易，省 Gas，体验极佳                           │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**使用示例：**
+
+```typescript
+// 模拟执行
+const simulation = await client.methods.transfer(to, amount).simulate();
+
+if (simulation.success) {
+  console.log("预估 Gas:", simulation.gasUsed);
+  console.log("状态变化:", simulation.stateChanges);
+
+  // 用户确认后发送
+  const tx = await client.methods.transfer(to, amount).submit();
+} else {
+  // 显示错误，不发送交易
+  console.error("交易将失败:", simulation.error);
+  // Error: "余额不足: 需要 100 USDC, 当前余额 50 USDC"
+}
+```
+
+### 11.8 移动端 SDK
+
+| 平台 | 包名 | 语言 | 钱包适配 |
+| :--- | :--- | :--- | :--- |
+| **iOS** | `TitanSwift` | Swift | WalletConnect, Deep Link |
+| **Android** | `titan-android` | Kotlin | WalletConnect, Deep Link |
+| **Flutter** | `titan_flutter` | Dart | 跨平台统一 |
+| **React Native** | `@titan-os/rn` | TypeScript | 跨平台统一 |
+
+**iOS 示例 (Swift):**
+
+```swift
+import TitanSwift
+
+let client = TitanClient(idl: tokenIDL)
+
+// 连接钱包
+let wallet = try await TitanWallet.connect()
+
+// 调用合约
+let tx = try await client.methods.transfer(
+    to: recipientAddress,
+    amount: 100
+).submit(signer: wallet)
+
+// 等待确认
+let receipt = try await tx.wait()
+```
+
+**Flutter 示例 (Dart):**
+
+```dart
+import 'package:titan_flutter/titan_flutter.dart';
+
+final client = TitanClient(idl: tokenIdl);
+
+// 连接钱包
+final wallet = await TitanWallet.connect();
+
+// 调用合约
+final tx = await client.methods.transfer(
+  to: recipientAddress,
+  amount: BigInt.from(100),
+).submit(signer: wallet);
+
+// 等待确认
+final receipt = await tx.wait();
+```
+
+### 11.9 跨链状态聚合
+
+Titan Client 可以聚合多条链上的状态，提供统一视图：
+
+```typescript
+import { TitanMultiChain } from '@titan-os/client';
+
+// 创建多链客户端
+const multichain = new TitanMultiChain({
+  contracts: {
+    ethereum: { idl: tokenIdl, address: "0x123..." },
+    solana: { idl: tokenIdl, address: "7xYz..." },
+    ton: { idl: tokenIdl, address: "EQ..." }
+  }
+});
+
+// 聚合查询：获取用户在所有链上的总余额
+const totalBalance = await multichain.aggregate(
+  (contract) => contract.storage.balances.get(userAddress)
+);
+// { ethereum: 100n, solana: 50n, ton: 30n, total: 180n }
+
+// 跨链转账（通过 TICP）
+await multichain.crossTransfer({
+  from: { chain: 'ethereum', amount: 50n },
+  to: { chain: 'solana', recipient: solanaAddress }
+});
+```
+
+### 11.10 AI Agent 的前端体验
+
+有了 Titan Client SDK，AI Agent 生成前端代码变成"填空题"：
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    AI Agent 前端生成                                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Prompt: "给我做一个代币转账页面"                                            │
+│                                                                             │
+│  AI 生成的代码：                                                            │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  import { useTitanContract, TitanConnectButton } from '@titan/react';│   │
+│  │                                                                     │   │
+│  │  export function TransferPage() {                                   │   │
+│  │    const { storage, methods } = useTitanContract(tokenIdl);         │   │
+│  │    const balance = storage.balances.use(userAddress);               │   │
+│  │                                                                     │   │
+│  │    return (                                                         │   │
+│  │      <div>                                                          │   │
+│  │        <TitanConnectButton />                                       │   │
+│  │        <p>Balance: {balance}</p>                                    │   │
+│  │        <input placeholder="Recipient" />                            │   │
+│  │        <input placeholder="Amount" />                               │   │
+│  │        <button onClick={() => methods.transfer(to, amt).submit()}>  │   │
+│  │          Transfer                                                   │   │
+│  │        </button>                                                    │   │
+│  │      </div>                                                         │   │
+│  │    );                                                               │   │
+│  │  }                                                                  │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  AI 不需要知道 ethers.js 或 @solana/web3.js                                 │
+│  只需要知道 Titan Client 的统一 API                                         │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 11.11 全栈架构总览
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Titan OS 全栈架构                                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  Desktop Environment (桌面环境)                                      │   │
+│  │  ┌───────────────────────────────────────────────────────────────┐ │   │
+│  │  │  Titan Client SDK                                             │ │   │
+│  │  │  React │ Vue │ Svelte │ Mobile │ AI Agent                    │ │   │
+│  │  └───────────────────────────────────────────────────────────────┘ │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                               │ T-RPC + IDL                                 │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  User Space (用户空间)                                               │   │
+│  │  ┌───────────────────────────────────────────────────────────────┐ │   │
+│  │  │  Polyglot Shell: Swift │ Python │ TypeScript │ Go             │ │   │
+│  │  └───────────────────────────────────────────────────────────────┘ │   │
+│  │  ┌───────────────────────────────────────────────────────────────┐ │   │
+│  │  │  Verified Core: Lean 4 (形式化验证)                           │ │   │
+│  │  └───────────────────────────────────────────────────────────────┘ │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                               │ C ABI (titan.h)                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  Kernel (内核)                                                       │   │
+│  │  ┌───────────────────────────────────────────────────────────────┐ │   │
+│  │  │  Zig Kernel: Compute │ Storage (VSS) │ Network (TICP)         │ │   │
+│  │  └───────────────────────────────────────────────────────────────┘ │   │
+│  │  ┌───────────────────────────────────────────────────────────────┐ │   │
+│  │  │  Dual Engine: Native (LLVM) │ Inline (Transpiler)             │ │   │
+│  │  └───────────────────────────────────────────────────────────────┘ │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                               │                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  Hardware (硬件)                                                     │   │
+│  │  Solana │ Ethereum │ TON │ Bitcoin │ Cosmos │ Polkadot │ ...        │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+> **Titan Client SDK 是 Titan OS 的"桌面环境"。**
+>
+> 它把底层的复杂性包装成简单的 API，让前端开发者和 AI Agent
+> 能够像调用普通 API 一样与任何区块链交互。
+>
+> **前端不需要知道合约在哪条链上。用户不需要知道自己在用哪条链。**
+>
+> **这才是真正的"链抽象"。**
+
+---
+
+## 12. 终极总结 (Conclusion)
 
 ### Titan Framework 是什么？
 
