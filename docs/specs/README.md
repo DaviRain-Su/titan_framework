@@ -53,3 +53,4 @@
 | **D-009** | [ZK 隐私架构](design/009_zk_privacy.md) | 定义链上验证与链下电路编译流程。 |
 | **D-010** | [形式化验证](../design/010_formal_verification.md) | 定义基于 SMT 求解器的代码安全性证明。 |
 | **D-011** | [PDA KV 实现](../design/011_pda_kv_implementation.md) | 详解 Solana 上 Key 到 PDA 账户的映射机制。 |
+| **D-012** | [ZK 计算层](../design/012_zk_compute_layer.md) | 链下执行 + 链上验证架构，实现传统互联网应用体验。 |
