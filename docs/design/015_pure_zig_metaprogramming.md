@@ -1068,10 +1068,27 @@ pub fn StateValue(comptime T: type) type {
 
 这意味着：**任何能调用 C 的语言，都可以通过 Titan 开发区块链合约。**
 
+> **这就是操作系统的设计思路。**
+>
+> 想象一下：**Linux 内核是用 C 写的**，但你可以在上面跑 Python、JS、Go、Rust。
+> 为什么？因为 Linux 内核暴露了 **Syscalls (系统调用)** 接口。
+>
+> **Titan Framework (Zig Core)** 现在扮演的就是 **"区块链上的微内核"** 的角色。
+
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                    libtitan: 通用区块链运行时引擎                            │
+│                    libtitan: 区块链微内核 (Blockchain Microkernel)           │
 ├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  设计哲学: "Linux Syscall" 模式                                             │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                      │   │
+│  │  Linux 内核 (C) ─────暴露 Syscalls────→ Python/Go/Rust/JS 都能跑    │   │
+│  │                                                                      │   │
+│  │  libtitan (Zig) ────暴露 C ABI────→ Swift/Go/Rust/Nim 都能用        │   │
+│  │                                                                      │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
 │                                                                             │
 │  定位升级:                                                                  │
 │                                                                             │
@@ -1087,10 +1104,124 @@ pub fn StateValue(comptime T: type) type {
 │  │  → 它暴露 C 接口，Swift/Go/Rust/Nim 都可以用它                      │   │
 │  └─────────────────────────────────────────────────────────────────────┘   │
 │                                                                             │
+│  核心层 (The Kernel): libtitan (Zig)                                        │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  职责: 脏活累活全包                                                  │   │
+│  │  • 管理只有 32KB 的堆内存 (Bump Allocator)                           │   │
+│  │  • 处理 Solana/TON 的系统调用 (Log, CPI, Sysvar)                    │   │
+│  │  • 处理入口点 (Entrypoint) 和参数序列化                              │   │
+│  │                                                                      │   │
+│  │  形式: 编译为静态库 (libtitan.a) 或 Wasm 模块                        │   │
+│  │  接口: 纯 C 头文件 (titan.h)                                         │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 8.2 架构设计
+### 8.2 语言兼容性三梯队 (Three-Tier Language Compatibility)
+
+只要其他语言能做到一件事：**"调用 C 函数 (FFI) 并编译成二进制/Wasm"**，它们就能加入生态。
+
+#### 8.2.1 第一梯队：原生编译语言 (Native Compiled)
+
+**代表语言**: Swift, Rust, TinyGo, Nim, C++, Zig, C
+
+**兼容性等级**: ⭐⭐⭐⭐⭐ (完美)
+
+这些语言天生支持编译成机器码，并且能**零损耗**调用 C。
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    第一梯队: 原生编译语言 (Zero-Overhead)                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Swift (iOS 开发者 - 几百万人):                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  • Swift 可以直接 import C                                           │   │
+│  │  • 只需要写一个 Package.swift 包装 titan.h                           │   │
+│  │  • 结果: iOS 开发者用 Swift 语法写 Solana 合约                       │   │
+│  │  • 性能: 编译出来的二进制和 Zig 一样小!                              │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  Rust (Rust 开发者 - 几十万人):                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  • extern "C" 直接调用                                               │   │
+│  │  • 比 Anchor 更简洁，不需要复杂宏                                    │   │
+│  │  • 结果: Rust 开发者绕过 Anchor 直接用 libtitan                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  TinyGo (Go 开发者 - 几百万人):                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  • 标准 Go 太大，但 TinyGo 专为嵌入式设计                            │   │
+│  │  • TinyGo 通过 cgo 调用 Zig 库                                       │   │
+│  │  • 结果: Go 程序员终于可以不用 Rust 也能写高性能合约了              │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  Nim (小众但硬核):                                                          │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  • Nim 有出色的 C FFI 支持                                           │   │
+│  │  • 语法简洁类似 Python，编译性能接近 C                               │   │
+│  │  • 结果: Nim 社区新的应用场景                                        │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 8.2.2 第二梯队：脚本语言 (Scripting Languages via AOT)
+
+**代表语言**: TypeScript (AssemblyScript), Python (Codon/Cython), Lua
+
+**兼容性等级**: ⭐⭐⭐ (需要特殊手段)
+
+> **巨大的技术陷阱**: 你不能直接把 `node` 或 `python` 解释器搬上链（太重了）。
+> 所以，对于这些语言，策略是 **"AOT 编译 (Ahead-of-Time)"**。
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    第二梯队: 脚本语言 (AOT Compilation)                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  TypeScript → AssemblyScript:                                               │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  • AssemblyScript 是 TS 的子集，可编译成 Wasm                        │   │
+│  │  • 让 AssemblyScript 导入 Zig Wasm Host Functions                    │   │
+│  │  • 结果: 前端开发者用 TS 写合约，底层跑在 Zig 运行时上               │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  Python → Codon / Cython:                                                   │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  • 不能用标准的 CPython (太重)                                       │   │
+│  │  • 使用 Codon (高性能 Python 编译器) 或 Cython                       │   │
+│  │  • 把 Python 语法编译成 C/LLVM IR，然后链接 libtitan                 │   │
+│  │  • 结果: 看起来是 Python，跑起来是原生机器码!                        │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  Lua → LuaJIT FFI:                                                          │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  • LuaJIT 有高效的 FFI 库                                            │   │
+│  │  • 游戏开发者熟悉的语言                                              │   │
+│  │  • 结果: 游戏开发者进入 Web3                                         │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 8.2.3 语言兼容性速查表
+
+| 语言 | 梯队 | 兼容路径 | 目标人群 | 规模 |
+| :--- | :---: | :--- | :--- | :--- |
+| **Zig** | 原生 | 直接使用 | Zig 开发者 | 万级 |
+| **C** | 原生 | 直接链接 | 系统程序员 | 百万级 |
+| **Rust** | 1st | extern "C" | Rust 开发者 | 十万级 |
+| **Swift** | 1st | import C | iOS 开发者 | 百万级 |
+| **TinyGo** | 1st | cgo | Go 开发者 | 百万级 |
+| **Nim** | 1st | C FFI | Nim 社区 | 万级 |
+| **C++** | 1st | extern "C" | 游戏/系统开发者 | 百万级 |
+| **TypeScript** | 2nd | AssemblyScript | 前端开发者 | 千万级 |
+| **Python** | 2nd | Codon/Cython | 数据科学家 | 千万级 |
+| **Lua** | 2nd | LuaJIT FFI | 游戏开发者 | 十万级 |
+
+### 8.3 架构设计
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -1433,36 +1564,109 @@ int titan_compile_to_fift(
 #endif // TITAN_H
 ```
 
-### 8.5 多语言绑定示例
+### 8.6 多语言绑定示例
 
-#### 8.5.1 Swift on Solana (苹果开发者的福音)
+#### 8.6.1 Swift on Solana: 完整工作流程 (Complete Workflow)
+
+**端到端示例: iOS 开发者用 Swift 写 Solana 合约**
+
+这个例子展示了三层架构如何协同工作：
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Swift → Solana 完整编译流程                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Step 1: 用户写 Swift 代码                                                  │
+│        │                                                                    │
+│        ▼                                                                    │
+│  Step 2: Swift 编译器生成 .o (目标文件)                                     │
+│        │                                                                    │
+│        │    libtitan.a (Zig 编译的静态库)                                   │
+│        │         │                                                          │
+│        └────┬────┘                                                          │
+│             │                                                               │
+│             ▼                                                               │
+│  Step 3: Linker (链接器) 合并                                               │
+│             │                                                               │
+│             ▼                                                               │
+│  Step 4: 输出 .so (Solana) 或 .wasm (Near/Cosmos)                          │
+│                                                                             │
+│  关键: Swift 调用 Zig，Zig 调用 Solana Syscall                              │
+│  性能: 和 Rust/Zig 原生代码 **没有任何区别**                                │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Layer 1: Zig 核心 (Provider) - 底层脏活累活**
+
+```zig
+// titan/exports.zig - libtitan 核心
+export fn titan_log(msg: [*]const u8, len: usize) void {
+    // 调用 Solana 底层 log syscall
+    @import("arch/solana/log.zig").sol_log(msg[0..len]);
+}
+
+export fn titan_alloc(size: usize) ?*anyopaque {
+    return allocator.titan_allocator.alloc(u8, size) catch null;
+}
+
+export fn titan_get_sender(out_addr: [*]u8) void {
+    const ctx = context.Context.init();
+    const addr_bytes = ctx.sender.toBytes();
+    @memcpy(out_addr, &addr_bytes, addr_bytes.len);
+}
+```
+
+**Layer 2: Swift 绑定 (User Wrapper) - 语法糖封装**
 
 ```swift
 // TitanSwift/Sources/Titan.swift
+// 这是一个极简的包装层，Swift 开发者只需要引用这个库
 
 import Foundation
+
+// C 函数声明 - 使用 @_silgen_name 直接绑定
+@_silgen_name("titan_log")
+func c_titan_log(_ msg: UnsafePointer<UInt8>, _ len: Int)
+
+@_silgen_name("titan_get_sender")
+func c_titan_get_sender(_ out: UnsafeMutablePointer<UInt8>)
+
+@_silgen_name("titan_storage_read")
+func c_titan_storage_read(_ key: UnsafePointer<UInt8>, _ keyLen: Int,
+                          _ buf: UnsafeMutablePointer<UInt8>, _ bufLen: Int) -> Int32
+
+@_silgen_name("titan_storage_write")
+func c_titan_storage_write(_ key: UnsafePointer<UInt8>, _ keyLen: Int,
+                           _ val: UnsafePointer<UInt8>, _ valLen: Int) -> Int32
+
+// 高级 API - 自动把 Swift 类型转成 C 指针传给 Zig
+public enum Titan {
+    public static func log(_ message: String) {
+        var msg = message
+        msg.withUTF8 { ptr in
+            c_titan_log(ptr.baseAddress!, ptr.count)
+        }
+    }
+
+    public static func getSender() -> [UInt8] {
+        var addr = [UInt8](repeating: 0, count: 32)
+        c_titan_get_sender(&addr)
+        return addr
+    }
+}
 
 public class TitanContext {
     public static func getSender() -> [UInt8] {
         var addr = [UInt8](repeating: 0, count: 32)
-        titan_get_sender(&addr)
+        c_titan_get_sender(&addr)
         return addr
-    }
-
-    public static func getValue() -> UInt64 {
-        return titan_get_value()
-    }
-
-    public static func transfer(to: [UInt8], amount: UInt64) throws {
-        let result = titan_transfer(to, amount)
-        if result != 0 {
-            throw TitanError.transferFailed
-        }
     }
 
     public static func log(_ message: String) {
         message.withCString { ptr in
-            titan_log(ptr, message.utf8.count)
+            c_titan_log(UnsafePointer<UInt8>(OpaquePointer(ptr)), message.utf8.count)
         }
     }
 }
@@ -1471,7 +1675,8 @@ public class TitanStorage {
     public static func read(key: String) -> Data? {
         var buffer = [UInt8](repeating: 0, count: 1024)
         let result = key.withCString { keyPtr in
-            titan_storage_read(keyPtr, key.utf8.count, &buffer, buffer.count)
+            c_titan_storage_read(UnsafePointer<UInt8>(OpaquePointer(keyPtr)),
+                                 key.utf8.count, &buffer, buffer.count)
         }
         if result < 0 { return nil }
         return Data(buffer[0..<Int(result)])
@@ -1480,7 +1685,10 @@ public class TitanStorage {
     public static func write(key: String, value: Data) throws {
         let result = key.withCString { keyPtr in
             value.withUnsafeBytes { valPtr in
-                titan_storage_write(keyPtr, key.utf8.count, valPtr, value.count)
+                c_titan_storage_write(UnsafePointer<UInt8>(OpaquePointer(keyPtr)),
+                                      key.utf8.count,
+                                      valPtr.bindMemory(to: UInt8.self).baseAddress!,
+                                      value.count)
             }
         }
         if result != 0 {
@@ -1489,21 +1697,74 @@ public class TitanStorage {
     }
 }
 
-// 用户合约示例
-@main
-struct MyContract {
-    static func main() {
-        TitanContext.log("Hello from Swift on Solana!")
+public enum TitanError: Error {
+    case transferFailed
+    case writeFailed
+}
+```
 
-        let sender = TitanContext.getSender()
-        let balance = TitanStorage.read(key: "balance:\(sender)") ?? Data()
+**Layer 3: 用户合约 (User Code) - 纯粹业务逻辑**
 
+```swift
+// MyContract.swift - 用户写的合约代码
+import Titan
+
+@_cdecl("entrypoint")  // 告诉编译器这是入口点
+public func main() -> UInt64 {
+    Titan.log("Hello Solana from Swift!")
+
+    let sender = TitanContext.getSender()
+    let key = "balance:\(sender.hexString)"
+
+    if let balanceData = TitanStorage.read(key: key) {
         // 业务逻辑...
+        let balance = balanceData.withUnsafeBytes { $0.load(as: UInt64.self) }
+        Titan.log("Current balance: \(balance)")
+    }
+
+    return 0  // 成功
+}
+
+// Helper extension
+extension Array where Element == UInt8 {
+    var hexString: String {
+        return map { String(format: "%02x", $0) }.joined()
     }
 }
 ```
 
-#### 8.5.2 Rust (简化版，绕过 Anchor)
+**编译命令:**
+
+```bash
+# 1. 编译 libtitan (Zig → 静态库)
+zig build -Dtarget_chain=solana -Drelease
+# 输出: zig-out/lib/libtitan.a
+
+# 2. 编译 Swift 合约
+swiftc -emit-object -target sbf-solana-solana \
+    -I./include \           # titan.h 所在目录
+    MyContract.swift \
+    -o MyContract.o
+
+# 3. 链接生成最终二进制
+ld.lld --shared \
+    MyContract.o \
+    libtitan.a \
+    -o my_contract.so
+
+# 4. 部署到 Solana
+solana program deploy my_contract.so
+```
+
+**发生了什么？**
+
+1. iOS 开发者用熟悉的 Swift 语法写代码
+2. Swift 编译器生成 `.o` 目标文件
+3. 链接器把 `swift.o` 和 `libtitan.a` 合并
+4. 生成的 `.so` 文件直接部署到 Solana
+5. **性能与 Rust/Zig 原生代码完全相同** (零 FFI 开销)
+
+#### 8.6.2 Rust (简化版，绕过 Anchor)
 
 ```rust
 // titan-rust/src/lib.rs
@@ -1574,7 +1835,7 @@ pub extern "C" fn entrypoint() {
 }
 ```
 
-#### 8.5.3 TinyGo on Wasm
+#### 8.6.3 TinyGo on Wasm
 
 ```go
 // titan-go/titan.go
@@ -1639,9 +1900,9 @@ func entrypoint() {
 func main() {} // Required for TinyGo
 ```
 
-### 8.6 两种路径的适配策略
+### 8.7 两种路径的适配策略
 
-#### 8.6.1 原生路径 (Solana / Wasm) - Runtime Binding
+#### 8.7.1 原生路径 (Solana / Wasm) - Runtime Binding
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -1670,7 +1931,7 @@ func main() {} // Required for TinyGo
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-#### 8.6.2 转译路径 (TON / EVM) - Compiler Service
+#### 8.7.2 转译路径 (TON / EVM) - Compiler Service
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -1703,7 +1964,7 @@ func main() {} // Required for TinyGo
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### 8.7 "万国来朝" 生态效应
+### 8.8 "万国来朝" 生态效应
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -1738,7 +1999,7 @@ func main() {} // Required for TinyGo
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 8.8 实现路线图
+### 8.9 实现路线图
 
 | 阶段 | 任务 | 优先级 |
 | :--- | :--- | :---: |
@@ -1751,7 +2012,56 @@ func main() {} // Required for TinyGo
 | **Phase 7** | titan-swift SDK 原型 | P2 |
 | **Phase 8** | titan-go (TinyGo) SDK 原型 | P2 |
 
-### 8.9 小结
+### 8.10 "降维打击" 战略定位 (Strategic Position)
+
+如果说：
+
+- **Anchor (Rust)** 是给 Rust 程序员用的工具
+- **Seahorse (Python)** 是生成 Rust 代码的玩具
+
+那么 **Titan Framework (C-ABI)** 就是 **"区块链通天塔"**。
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         降维打击: 对比分析                                   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  竞品分析:                                                                  │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  Anchor (Rust-only)                                                  │   │
+│  │  • 只服务 Rust 开发者                                                │   │
+│  │  • 学习曲线陡峭                                                      │   │
+│  │  • 市场: Rust 开发者 (十万级)                                        │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  Seahorse (Python → Rust)                                            │   │
+│  │  • Python 语法生成 Rust 代码                                         │   │
+│  │  • 功能受限，玩具级别                                                │   │
+│  │  • 市场: 想要入门的 Python 开发者                                    │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  Titan Framework (C-ABI, Universal)                                  │   │
+│  │  • 万语言支持: Swift/Rust/Go/Nim/C/C++/...                          │   │
+│  │  • 真·原生性能: 零 FFI 开销                                          │   │
+│  │  • 市场: 所有能调用 C 的开发者 (千万级)                              │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  你不需要自己实现 Swift 编译器、Go 编译器、Python 编译器                   │
+│  你只需要:                                                                  │
+│                                                                             │
+│  1. 守住底层: 用 Zig 把最难的内存管理、跨链适配做成最坚固的"地基"          │
+│  2. 开放接口: 扔出一个 titan.h                                              │
+│  3. 坐等生态: 社区自发过来写 Wrapper (Swift/Go/Nim/...)                    │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**结论: 只要兼容 C ABI，万物皆可 Titan。这才是真正的平台级思维。**
+
+### 8.11 小结
 
 ```
 ┌───────────────────────────────────────────────────────────────────────────┐
