@@ -15321,6 +15321,609 @@ pub fn compileContract(
 
 ---
 
+### 17.19 系统级抽象：从工具到内核驱动 (System-Level Abstraction)
+
+> **关键认知升级**: 上述 Polyglot Transpiler 不是一个"CLI 工具"，
+> 它是 **Titan OS 内核的 HAL (硬件抽象层)** 的核心组件。
+
+#### 17.19.1 重新定位：它是 Titan 的"显卡驱动"
+
+在操作系统原理中，OS 负责管理硬件。关键在于**驱动程序 (Driver)**。
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Linux vs Titan: 驱动程序类比                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Linux 内核:                                                                │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │   用户程序 (OpenGL 绘图)                                            │   │
+│  │        │                                                            │   │
+│  │        ▼                                                            │   │
+│  │   Linux Kernel                                                      │   │
+│  │        │                                                            │   │
+│  │        ▼                                                            │   │
+│  │   ┌─────────────────────────────────────────────────────────────┐  │   │
+│  │   │  NVIDIA Driver                                              │  │   │
+│  │   │  通用绘图指令 → CUDA 指令                                    │  │   │
+│  │   └─────────────────────────────────────────────────────────────┘  │   │
+│  │        │                                                            │   │
+│  │        ▼                                                            │   │
+│  │   GPU Hardware                                                      │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  Titan 内核:                                                                │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │   用户程序 (Python/Swift)                                           │   │
+│  │        │                                                            │   │
+│  │        ▼                                                            │   │
+│  │   Titan Kernel                                                      │   │
+│  │        │                                                            │   │
+│  │        ▼                                                            │   │
+│  │   ┌─────────────────────────────────────────────────────────────┐  │   │
+│  │   │  EVM Driver (zig-to-yul)                                    │  │   │
+│  │   │  Titan ISA → Yul/EVM Bytecode                               │  │   │
+│  │   └─────────────────────────────────────────────────────────────┘  │   │
+│  │        │                                                            │   │
+│  │        ▼                                                            │   │
+│  │   Ethereum VM (Hardware)                                            │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  关键洞察:                                                                  │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  上层应用根本不需要知道 Yul 的存在！                                │   │
+│  │  就像 OpenGL 程序员不需要知道 CUDA 指令集一样。                     │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 17.19.2 Titan OS 内核架构 (完整视图)
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Titan OS 完整内核架构                                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ╔═══════════════════════════════════════════════════════════════════════╗ │
+│  ║                    Layer 1: User Space (用户态)                        ║ │
+│  ╠═══════════════════════════════════════════════════════════════════════╣ │
+│  ║                                                                       ║ │
+│  ║  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐     ║ │
+│  ║  │ Python App  │ │ Swift App   │ │ TypeScript  │ │ AI Agent    │     ║ │
+│  ║  │             │ │             │ │ App         │ │             │     ║ │
+│  ║  └──────┬──────┘ └──────┬──────┘ └──────┬──────┘ └──────┬──────┘     ║ │
+│  ║         │               │               │               │             ║ │
+│  ║         └───────────────┴───────────────┴───────────────┘             ║ │
+│  ║                                   │                                   ║ │
+│  ║                                   ▼                                   ║ │
+│  ║  ┌───────────────────────────────────────────────────────────────┐   ║ │
+│  ║  │              Titan POSIX API (系统调用接口)                    │   ║ │
+│  ║  │  • Titan.Storage.write(key, value)                            │   ║ │
+│  ║  │  • Titan.Process.spawn(contract)                              │   ║ │
+│  ║  │  • Titan.Network.call(address, method)                        │   ║ │
+│  ║  └───────────────────────────────────────────────────────────────┘   ║ │
+│  ║                                                                       ║ │
+│  ╚═══════════════════════════════════════════════════════════════════════╝ │
+│                                   │                                         │
+│                                   │ syscall                                 │
+│                                   ▼                                         │
+│  ╔═══════════════════════════════════════════════════════════════════════╗ │
+│  ║                    Layer 2: Kernel Space (内核态)                      ║ │
+│  ╠═══════════════════════════════════════════════════════════════════════╣ │
+│  ║                                                                       ║ │
+│  ║  ┌───────────────────────────────────────────────────────────────┐   ║ │
+│  ║  │                    Titan Kernel Core (Zig)                     │   ║ │
+│  ║  │                                                                │   ║ │
+│  ║  │  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐           │   ║ │
+│  ║  │  │ T-Scheduler  │ │ T-MMU        │ │ T-IPC        │           │   ║ │
+│  ║  │  │ 调度器       │ │ 内存管理     │ │ 进程间通信   │           │   ║ │
+│  ║  │  └──────────────┘ └──────────────┘ └──────────────┘           │   ║ │
+│  ║  │                                                                │   ║ │
+│  ║  │  ┌──────────────────────────────────────────────────────────┐ │   ║ │
+│  ║  │  │              Titan ISA (指令集架构)                       │ │   ║ │
+│  ║  │  │  T_STORE, T_LOAD, T_ADD, T_CALL, T_SPAWN, T_EMIT...      │ │   ║ │
+│  ║  │  └──────────────────────────────────────────────────────────┘ │   ║ │
+│  ║  │                                                                │   ║ │
+│  ║  └────────────────────────────┬───────────────────────────────────┘   ║ │
+│  ║                               │                                       ║ │
+│  ╚═══════════════════════════════╪═══════════════════════════════════════╝ │
+│                                   │                                         │
+│                                   ▼                                         │
+│  ╔═══════════════════════════════════════════════════════════════════════╗ │
+│  ║                    Layer 3: HAL (硬件抽象层) - 驱动程序                ║ │
+│  ╠═══════════════════════════════════════════════════════════════════════╣ │
+│  ║                                                                       ║ │
+│  ║  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐     ║ │
+│  ║  │ EVM Driver  │ │ SVM Driver  │ │ TVM Driver  │ │ Wasm Driver │     ║ │
+│  ║  │ (zig→yul)   │ │ (zig→sbf)   │ │ (zig→tact)  │ │ (zig→wasm)  │     ║ │
+│  ║  │             │ │             │ │             │ │             │     ║ │
+│  ║  │ Titan ISA   │ │ Titan ISA   │ │ Titan ISA   │ │ Titan ISA   │     ║ │
+│  ║  │     ↓       │ │     ↓       │ │     ↓       │ │     ↓       │     ║ │
+│  ║  │ EVM ISA     │ │ SVM ISA     │ │ TVM ISA     │ │ Wasm ISA    │     ║ │
+│  ║  └──────┬──────┘ └──────┬──────┘ └──────┬──────┘ └──────┬──────┘     ║ │
+│  ║         │               │               │               │             ║ │
+│  ╚═════════╪═══════════════╪═══════════════╪═══════════════╪═════════════╝ │
+│            │               │               │               │               │
+│            ▼               ▼               ▼               ▼               │
+│  ╔═══════════════════════════════════════════════════════════════════════╗ │
+│  ║                    Layer 4: Hardware (区块链虚拟机)                    ║ │
+│  ╠═══════════════════════════════════════════════════════════════════════╣ │
+│  ║                                                                       ║ │
+│  ║  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐     ║ │
+│  ║  │ Ethereum    │ │ Solana      │ │ TON         │ │ Near/Cosmos │     ║ │
+│  ║  │ EVM         │ │ SVM         │ │ TVM         │ │ Wasm VM     │     ║ │
+│  ║  └─────────────┘ └─────────────┘ └─────────────┘ └─────────────┘     ║ │
+│  ║                                                                       ║ │
+│  ╚═══════════════════════════════════════════════════════════════════════╝ │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 17.19.3 Titan ISA：统一指令集架构
+
+**核心创新**：定义一套 **Titan ISA (Titan 指令集)**，所有上层代码只针对 Titan ISA 编程。
+
+```zig
+// ============================================================================
+// Titan ISA (Titan Instruction Set Architecture)
+// ============================================================================
+
+/// Titan 统一指令集
+pub const TitanISA = enum {
+    // 存储指令
+    T_STORE,        // 存储到持久化状态
+    T_LOAD,         // 从持久化状态加载
+    T_MSTORE,       // 存储到临时内存
+    T_MLOAD,        // 从临时内存加载
+
+    // 算术指令
+    T_ADD,          // 加法 (溢出检查)
+    T_SUB,          // 减法 (下溢检查)
+    T_MUL,          // 乘法 (溢出检查)
+    T_DIV,          // 除法 (除零检查)
+    T_MOD,          // 取模
+
+    // 逻辑指令
+    T_AND,
+    T_OR,
+    T_XOR,
+    T_NOT,
+
+    // 比较指令
+    T_EQ,           // 相等
+    T_LT,           // 小于
+    T_GT,           // 大于
+
+    // 控制流指令
+    T_JUMP,         // 无条件跳转
+    T_JUMPI,        // 条件跳转
+    T_CALL,         // 函数调用
+    T_RETURN,       // 返回
+    T_REVERT,       // 回滚
+
+    // 系统指令
+    T_SPAWN,        // 创建新合约 (fork)
+    T_EMIT,         // 发送事件 (signal)
+    T_BALANCE,      // 查询余额
+    T_CALLER,       // 获取调用者
+    T_TIMESTAMP,    // 获取时间戳
+
+    // 跨链指令 (Titan 独有)
+    T_XCALL,        // 跨链调用
+    T_XQUERY,       // 跨链查询
+    T_XSYNC,        // 跨链同步
+};
+
+/// Titan ISA 到目标 ISA 的映射表
+pub const ISAMapping = struct {
+    /// EVM ISA 映射
+    pub const evm = struct {
+        pub fn map(inst: TitanISA) []const u8 {
+            return switch (inst) {
+                .T_STORE => "sstore",
+                .T_LOAD => "sload",
+                .T_MSTORE => "mstore",
+                .T_MLOAD => "mload",
+                .T_ADD => "add",      // 注意: EVM add 不检查溢出
+                .T_SUB => "sub",
+                .T_MUL => "mul",
+                .T_DIV => "div",
+                .T_CALL => "call",
+                .T_RETURN => "return",
+                .T_REVERT => "revert",
+                .T_SPAWN => "create",
+                .T_EMIT => "log1",     // 简化
+                .T_BALANCE => "balance",
+                .T_CALLER => "caller",
+                .T_TIMESTAMP => "timestamp",
+                // 跨链指令需要特殊处理
+                .T_XCALL => @compileError("XCALL requires bridge contract"),
+                else => @compileError("Unsupported instruction"),
+            };
+        }
+    };
+
+    /// Solana SVM ISA 映射
+    pub const svm = struct {
+        pub fn map(inst: TitanISA) []const u8 {
+            return switch (inst) {
+                .T_STORE => "sol_set_account_data",
+                .T_LOAD => "sol_get_account_data",
+                .T_ADD => "checked_add",  // Solana 默认检查溢出
+                .T_CALL => "sol_invoke",
+                .T_SPAWN => "sol_create_program_address",
+                .T_EMIT => "sol_log",
+                .T_CALLER => "sol_get_signer",
+                else => @compileError("Unsupported instruction"),
+            };
+        }
+    };
+
+    /// TON TVM ISA 映射
+    pub const tvm = struct {
+        pub fn map(inst: TitanISA) []const u8 {
+            return switch (inst) {
+                .T_STORE => "STSLICE",   // Cell 存储
+                .T_LOAD => "LDSLICE",    // Cell 加载
+                .T_ADD => "ADD",
+                .T_CALL => "SENDRAWMSG", // Actor 消息
+                .T_SPAWN => "SETCODE",   // 部署新合约
+                .T_EMIT => "THROWARG",   // 事件模拟
+                else => @compileError("Unsupported instruction"),
+            };
+        }
+    };
+};
+```
+
+#### 17.19.4 三大系统级抽象
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Titan OS 三大系统级抽象                                   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │  A. 指令集架构抽象 (ISA Abstraction)                                  │ │
+│  ├───────────────────────────────────────────────────────────────────────┤ │
+│  │                                                                       │ │
+│  │  问题: 每条链有不同的指令集                                           │ │
+│  │  • EVM: SSTORE, SLOAD, CALL, CREATE...                               │ │
+│  │  • SVM: AccountInfo, invoke, create_program_address...               │ │
+│  │  • TVM: STSLICE, LDSLICE, SENDRAWMSG...                              │ │
+│  │                                                                       │ │
+│  │  解决: Titan ISA 统一抽象                                             │ │
+│  │  ┌─────────────────────────────────────────────────────────────────┐ │ │
+│  │  │                                                                 │ │ │
+│  │  │              T_STORE                                            │ │ │
+│  │  │                 │                                               │ │ │
+│  │  │    ┌───────────┼───────────┬───────────┐                       │ │ │
+│  │  │    │           │           │           │                        │ │ │
+│  │  │    ▼           ▼           ▼           ▼                        │ │ │
+│  │  │  sstore    set_data    STSLICE    kv_write                     │ │ │
+│  │  │  (EVM)     (Solana)    (TON)      (Near)                       │ │ │
+│  │  │                                                                 │ │ │
+│  │  └─────────────────────────────────────────────────────────────────┘ │ │
+│  │                                                                       │ │
+│  │  结果: 上层开发者只针对 Titan ISA 编程，彻底解耦                      │ │
+│  │                                                                       │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │  B. 内存模型抽象 (Virtual Memory Abstraction)                         │ │
+│  ├───────────────────────────────────────────────────────────────────────┤ │
+│  │                                                                       │ │
+│  │  问题: 每条链的存储模型完全不同                                       │ │
+│  │  • EVM: mapping(address => uint), 32字节 slot 哈希                   │ │
+│  │  • Solana: Account 数据块，需要 PDA 派生                             │ │
+│  │  • TON: Cell 树结构，DAG 存储                                        │ │
+│  │                                                                       │ │
+│  │  解决: T-MMU (Titan Memory Management Unit)                          │ │
+│  │  ┌─────────────────────────────────────────────────────────────────┐ │ │
+│  │  │                                                                 │ │ │
+│  │  │  用户视角:                                                      │ │ │
+│  │  │  Titan.Storage.write("balance", 100)                           │ │ │
+│  │  │                                                                 │ │ │
+│  │  │  T-MMU 内部:                                                    │ │ │
+│  │  │  ┌─────────────────────────────────────────────────────────┐   │ │ │
+│  │  │  │ if target == EVM:                                       │   │ │ │
+│  │  │  │     slot = keccak256("balance")                         │   │ │ │
+│  │  │  │     sstore(slot, 100)                                   │   │ │ │
+│  │  │  │ elif target == Solana:                                  │   │ │ │
+│  │  │  │     pda = derive_pda("balance", program_id)             │   │ │ │
+│  │  │  │     account.data[0:32] = 100                            │   │ │ │
+│  │  │  │ elif target == TON:                                     │   │ │ │
+│  │  │  │     cell = build_cell("balance", 100)                   │   │ │ │
+│  │  │  │     store_cell(cell)                                    │   │ │ │
+│  │  │  └─────────────────────────────────────────────────────────┘   │ │ │
+│  │  │                                                                 │ │ │
+│  │  └─────────────────────────────────────────────────────────────────┘ │ │
+│  │                                                                       │ │
+│  │  结果: 用户不需要懂 Solidity 的 mapping 或 Solana 的 PDA            │ │
+│  │                                                                       │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │  C. 原子性抽象 (Process Abstraction)                                  │ │
+│  ├───────────────────────────────────────────────────────────────────────┤ │
+│  │                                                                       │ │
+│  │  问题: 智能合约的生命周期管理                                         │ │
+│  │  • 部署 = 创建进程                                                   │ │
+│  │  • 调用 = 进程间通信                                                 │ │
+│  │  • 升级 = 热更新                                                     │ │
+│  │                                                                       │ │
+│  │  解决: Process → Contract 映射                                        │ │
+│  │  ┌─────────────────────────────────────────────────────────────────┐ │ │
+│  │  │                                                                 │ │ │
+│  │  │  操作系统概念          Titan 映射          区块链实现            │ │ │
+│  │  │  ─────────────────────────────────────────────────────────      │ │ │
+│  │  │  fork()               T_SPAWN            CREATE/CREATE2        │ │ │
+│  │  │  exec()               deploy()           合约部署               │ │ │
+│  │  │  kill()               destruct()         SELFDESTRUCT          │ │ │
+│  │  │  signal()             T_EMIT             LOG/Event             │ │ │
+│  │  │  IPC                  T_CALL             CALL/DELEGATECALL     │ │ │
+│  │  │                                                                 │ │ │
+│  │  └─────────────────────────────────────────────────────────────────┘ │ │
+│  │                                                                       │ │
+│  │  结果: 用户写的一段 Python 函数，被 Titan OS 视为一个 Process        │ │
+│  │        合约的 deploy 就像是操作系统的 exec (启动进程)                │ │
+│  │                                                                       │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 17.19.5 内核调用流程 (完整示例)
+
+```zig
+// ============================================================================
+// Titan Kernel Core Logic (伪代码)
+// ============================================================================
+
+const evm_driver = @import("drivers/evm/zig_to_yul.zig");
+const svm_driver = @import("drivers/solana/zig_to_sbf.zig");
+const tvm_driver = @import("drivers/ton/zig_to_tact.zig");
+const wasm_driver = @import("drivers/wasm/zig_to_wasm.zig");
+
+/// 目标链类型
+pub const ChainType = enum {
+    Ethereum,
+    Solana,
+    TON,
+    Near,
+    Cosmos,
+    Arbitrum,
+    Base,
+};
+
+/// 系统调用: 部署进程 (合约)
+pub fn sys_deploy_process(
+    target_chain: ChainType,
+    process_ast: *const TitanIR,
+    config: DeployConfig,
+) !DeployResult {
+
+    // 1. 根据目标链选择驱动
+    const bytecode = switch (target_chain) {
+        .Ethereum, .Arbitrum, .Base => blk: {
+            // EVM 兼容链: 使用 EVM Driver
+            const yul_code = evm_driver.transpile(process_ast);
+            const optimized = evm_driver.optimize(yul_code, config.optimization_level);
+            break :blk evm_driver.compile_to_bytecode(optimized);
+        },
+        .Solana => blk: {
+            // Solana: 使用 SVM Driver
+            const sbf_code = svm_driver.transpile(process_ast);
+            break :blk svm_driver.compile_to_sbf(sbf_code);
+        },
+        .TON => blk: {
+            // TON: 使用 TVM Driver
+            const tact_code = tvm_driver.transpile(process_ast);
+            break :blk tvm_driver.compile_to_boc(tact_code);
+        },
+        .Near, .Cosmos => blk: {
+            // Wasm 链: 使用 Wasm Driver
+            const wasm_code = wasm_driver.transpile(process_ast);
+            break :blk wasm_driver.compile_to_wasm(wasm_code);
+        },
+    };
+
+    // 2. 广播到目标网络
+    const network = NetworkManager.get_network(target_chain);
+    const tx_hash = try network.broadcast_deploy(bytecode, config.signer);
+
+    // 3. 等待确认并返回合约地址
+    const receipt = try network.wait_for_confirmation(tx_hash);
+
+    return .{
+        .contract_address = receipt.contract_address,
+        .tx_hash = tx_hash,
+        .gas_used = receipt.gas_used,
+        .chain = target_chain,
+    };
+}
+
+/// 系统调用: 存储写入
+pub fn sys_storage_write(
+    target_chain: ChainType,
+    contract: Address,
+    key: []const u8,
+    value: []const u8,
+) !void {
+    // T-MMU 负责地址转换
+    const physical_key = T_MMU.virtual_to_physical(target_chain, key);
+
+    // 生成目标链的存储指令
+    const instruction = switch (target_chain) {
+        .Ethereum => TitanISA.T_STORE.to_evm(physical_key, value),
+        .Solana => TitanISA.T_STORE.to_svm(physical_key, value),
+        .TON => TitanISA.T_STORE.to_tvm(physical_key, value),
+        else => TitanISA.T_STORE.to_wasm(physical_key, value),
+    };
+
+    // 执行
+    try execute_instruction(target_chain, contract, instruction);
+}
+
+/// 系统调用: 跨链调用
+pub fn sys_cross_chain_call(
+    source_chain: ChainType,
+    target_chain: ChainType,
+    target_contract: Address,
+    method: []const u8,
+    args: []const u8,
+) !CrossChainResult {
+    // 1. 在源链记录意图
+    const intent_id = try record_intent(source_chain, .{
+        .target_chain = target_chain,
+        .target_contract = target_contract,
+        .method = method,
+        .args = args,
+    });
+
+    // 2. 通过 T-IPC 发送跨链消息
+    const message = T_IPC.create_xcall_message(intent_id, target_chain, target_contract, method, args);
+
+    // 3. 等待目标链确认 (异步)
+    return .{
+        .intent_id = intent_id,
+        .status = .pending,
+        .callback = CrossChainCallback.init(intent_id),
+    };
+}
+```
+
+#### 17.19.6 用户视角：完全透明的区块链
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    用户视角: 区块链完全透明                                   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  用户 (Python 开发者) 写的代码:                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  from titan import Storage, Process                                 │   │
+│  │                                                                     │   │
+│  │  class Counter(Process):                                            │   │
+│  │      def __init__(self):                                            │   │
+│  │          self.value = Storage.var("value", default=0)               │   │
+│  │                                                                     │   │
+│  │      def increment(self):                                           │   │
+│  │          self.value += 1                                            │   │
+│  │                                                                     │   │
+│  │      def get_value(self) -> int:                                    │   │
+│  │          return self.value                                          │   │
+│  │                                                                     │   │
+│  │  # 部署 - 用户完全不知道自己在写 Solidity/Rust                      │   │
+│  │  counter = Counter.deploy(target="ethereum")                        │   │
+│  │  counter.increment()                                                │   │
+│  │  print(counter.get_value())  # 1                                    │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  Titan OS 内部发生了什么:                                                   │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  1. Python AST 解析                                                 │   │
+│  │     Counter class → TitanIR                                         │   │
+│  │                                                                     │   │
+│  │  2. 内核选择驱动                                                    │   │
+│  │     target="ethereum" → EVM Driver                                  │   │
+│  │                                                                     │   │
+│  │  3. ISA 转换                                                        │   │
+│  │     T_STORE("value", 0) → sstore(keccak256("value"), 0)            │   │
+│  │     T_ADD(T_LOAD("value"), 1) → add(sload(...), 1)                 │   │
+│  │                                                                     │   │
+│  │  4. 代码生成                                                        │   │
+│  │     TitanIR → Yul → EVM Bytecode                                   │   │
+│  │                                                                     │   │
+│  │  5. 网络广播                                                        │   │
+│  │     Bytecode → Ethereum Mainnet                                     │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  最终真相:                                                                  │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  用户写了 Python，但运行的是 EVM 字节码。                           │   │
+│  │  用户以为自己在写文件，但实际上在写智能合约。                       │   │
+│  │  用户感知不到 Solidity、Gas、ABI 的存在。                          │   │
+│  │                                                                     │   │
+│  │  这就是 Titan OS 的 **系统级抽象** 的威力。                         │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 17.19.7 类比：Titan 是区块链世界的 Wine/Rosetta
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Titan = 区块链的 Wine/Rosetta                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  历史类比:                                                                  │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  Wine (Linux):                                                      │   │
+│  │  让 Windows 程序在 Linux 上运行                                     │   │
+│  │  Windows EXE → Wine 翻译层 → Linux 系统调用                        │   │
+│  │                                                                     │   │
+│  │  Rosetta 2 (macOS):                                                 │   │
+│  │  让 x86 程序在 ARM Mac 上运行                                       │   │
+│  │  x86 指令 → Rosetta 翻译层 → ARM 指令                              │   │
+│  │                                                                     │   │
+│  │  Titan EVM Driver:                                                  │   │
+│  │  让 Titan 程序在 Ethereum 上运行                                    │   │
+│  │  Titan ISA → EVM Driver → EVM Bytecode                             │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  核心使命:                                                                  │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  "让 Titan 的通用系统调用，能够'欺骗'以太坊，                       │   │
+│  │   让以太坊以为自己是在运行原生的 Solidity 合约，                    │   │
+│  │   但实际上它在运行 Titan OS 的指令。"                               │   │
+│  │                                                                     │   │
+│  │  Wine 让 Windows 程序"以为"自己在 Windows 上运行。                  │   │
+│  │  Titan 让 Python 程序"以为"自己在操作本地文件。                     │   │
+│  │  区块链"以为"自己在运行原生合约。                                  │   │
+│  │                                                                     │   │
+│  │  三方皆被"欺骗"，但一切正常运行。                                   │   │
+│  │  这就是系统设计的魅力。                                             │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  Titan 的终极愿景:                                                          │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  "Titan OS 是区块链世界的'翻译层'，                                │   │
+│  │   它把混乱的区块链世界屏蔽在 OS 之下，                             │   │
+│  │   向上提供干净、统一、熟悉的编程接口。"                            │   │
+│  │                                                                     │   │
+│  │   用户只需要会写 Python/Swift/Go，                                  │   │
+│  │   就能在任何区块链上部署应用。                                      │   │
+│  │   不需要学习 Solidity/Rust/Move/FunC。                             │   │
+│  │   不需要理解 Gas/Account Model/PDA。                                │   │
+│  │   不需要关心 EVM/SVM/TVM 的差异。                                   │   │
+│  │                                                                     │   │
+│  │   因为 Titan OS 帮他们处理了一切。                                  │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
 ## 18. 终极总结 (Conclusion)
 
 ### Titan Framework 是什么？
