@@ -27923,6 +27923,884 @@ pub fn verifySchnorr(
 
 ---
 
+### 18.24 Kaspa 高级 SDK：状态机编程与验证型 VM
+
+> **核心洞察**: Kaspa Script 是"验证型虚拟机"，不是"计算型虚拟机"。复杂业务逻辑需要采用"链下计算，链上验证"的模式。
+
+#### 18.24.1 两种 VM 的本质区别
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                                                             │
+│                    计算型 VM vs 验证型 VM                                   │
+│                                                                             │
+│  ═══════════════════════════════════════════════════════════════════════   │
+│                                                                             │
+│                                                                             │
+│  EVM (计算型 VM):                                                           │
+│  ─────────────────                                                          │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │   EVM 是一个 CPU                                                    │   │
+│  │                                                                     │   │
+│  │   你给它代码，它帮你"跑"（计算状态）                                │   │
+│  │                                                                     │   │
+│  │   ┌───────────┐      ┌───────────┐      ┌───────────┐              │   │
+│  │   │           │      │           │      │           │              │   │
+│  │   │   Code    │ ───► │   EVM     │ ───► │  State    │              │   │
+│  │   │  (输入)   │      │  (计算)   │      │  (输出)   │              │   │
+│  │   │           │      │           │      │           │              │   │
+│  │   └───────────┘      └───────────┘      └───────────┘              │   │
+│  │                                                                     │   │
+│  │   特点:                                                             │   │
+│  │   • 有循环 (while/for)                                              │   │
+│  │   • 有全局状态 (Storage)                                            │   │
+│  │   • 图灵完备                                                        │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│                                                                             │
+│  ───────────────────────────────────────────────────────────────────────   │
+│                                                                             │
+│                                                                             │
+│  Kaspa Script (验证型 VM):                                                  │
+│  ───────────────────────────                                                │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │   Kaspa Script 是一个电路板                                         │   │
+│  │                                                                     │   │
+│  │   你给它信号，它告诉你"通还是不通"（验证通过与否）                  │   │
+│  │                                                                     │   │
+│  │   ┌───────────┐      ┌───────────┐      ┌───────────┐              │   │
+│  │   │           │      │           │      │           │              │   │
+│  │   │  Witness  │ ───► │  Script   │ ───► │  true /   │              │   │
+│  │   │  (输入)   │      │  (验证)   │      │  false    │              │   │
+│  │   │           │      │           │      │           │              │   │
+│  │   └───────────┘      └───────────┘      └───────────┘              │   │
+│  │                                                                     │   │
+│  │   特点:                                                             │   │
+│  │   • 无循环 (只有 If/Else)                                           │   │
+│  │   • 无全局状态 (只验证当前 UTXO)                                    │   │
+│  │   • 非图灵完备 (刻意限制)                                           │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**核心限制分析**：
+
+| 限制 | 原因 | 影响 |
+| :--- | :--- | :--- |
+| **无循环** | 防止死循环导致节点宕机 | 不能写"遍历数组" |
+| **无全局状态** | UTXO 模型天生无状态 | 不知道"合约当前余额" |
+| **栈深度有限** | 资源限制 | 复杂逻辑受限 |
+
+#### 18.24.2 范式转换：链下计算，链上验证
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                                                             │
+│                    UTXO 编程范式：Off-chain Compute, On-chain Verify        │
+│                                                                             │
+│  ═══════════════════════════════════════════════════════════════════════   │
+│                                                                             │
+│                                                                             │
+│  传统思维 (EVM 思维):                                                       │
+│  ─────────────────────                                                      │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │   "我把所有逻辑都写进合约，链上执行"                                │   │
+│  │                                                                     │   │
+│  │   Contract.sol:                                                     │   │
+│  │   ┌─────────────────────────────────────────────────────────────┐  │   │
+│  │   │  function transfer(to, amount) {                            │  │   │
+│  │   │      require(balances[msg.sender] >= amount);  // 检查       │  │   │
+│  │   │      balances[msg.sender] -= amount;           // 计算       │  │   │
+│  │   │      balances[to] += amount;                   // 存储       │  │   │
+│  │   │  }                                                          │  │   │
+│  │   └─────────────────────────────────────────────────────────────┘  │   │
+│  │                                                                     │   │
+│  │   问题: Gas 昂贵，链上资源浪费                                      │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│                                                                             │
+│  ───────────────────────────────────────────────────────────────────────   │
+│                                                                             │
+│                                                                             │
+│  UTXO 思维 (Kaspa/Bitcoin):                                                 │
+│  ─────────────────────────────                                              │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │   "链下计算状态，链上只验证转换合法性"                              │   │
+│  │                                                                     │   │
+│  │   ┌─────────────────────┐      ┌─────────────────────┐             │   │
+│  │   │                     │      │                     │             │   │
+│  │   │   Off-chain         │      │   On-chain          │             │   │
+│  │   │   (客户端)          │      │   (Script)          │             │   │
+│  │   │                     │      │                     │             │   │
+│  │   │   • 计算新状态      │ ───► │   • 验证签名        │             │   │
+│  │   │   • 构建交易        │      │   • 验证哈希        │             │   │
+│  │   │   • 生成证明        │      │   • 验证时间锁      │             │   │
+│  │   │                     │      │                     │             │   │
+│  │   └─────────────────────┘      └─────────────────────┘             │   │
+│  │                                                                     │   │
+│  │   优势: 链上极简，验证高效                                          │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Titan Kaspa SDK 的定位**：
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                                                             │
+│                    Titan Kaspa SDK = 状态机管理器                           │
+│                                                                             │
+│  ═══════════════════════════════════════════════════════════════════════   │
+│                                                                             │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │   SDK 核心任务:                                                     │   │
+│  │                                                                     │   │
+│  │   把用户脑子里的"复杂业务流程"（状态机）                            │   │
+│  │   编译成一张"电路图"（Script）                                      │   │
+│  │                                                                     │   │
+│  │   ┌───────────────────────────────────────────────────────────┐    │   │
+│  │   │                                                           │    │   │
+│  │   │   用户代码 (Zig)                                          │    │   │
+│  │   │   ─────────────────                                       │    │   │
+│  │   │                                                           │    │   │
+│  │   │   pub const Escrow = struct {                             │    │   │
+│  │   │       buyer: PubKey,                                      │    │   │
+│  │   │       seller: PubKey,                                     │    │   │
+│  │   │       arbiter: PubKey,                                    │    │   │
+│  │   │       amount: u64,                                        │    │   │
+│  │   │       timeout: u64,                                       │    │   │
+│  │   │   };                                                      │    │   │
+│  │   │                                                           │    │   │
+│  │   └───────────────────────────────────────────────────────────┘    │   │
+│  │                         │                                          │   │
+│  │                         │ Titan Compiler                           │   │
+│  │                         ▼                                          │   │
+│  │   ┌───────────────────────────────────────────────────────────┐    │   │
+│  │   │                                                           │    │   │
+│  │   │   生成产物:                                                │    │   │
+│  │   │   ──────────                                               │    │   │
+│  │   │                                                           │    │   │
+│  │   │   1. Script (锁): 验证解锁条件                            │    │   │
+│  │   │   2. Witness Template: 构建证明数据                       │    │   │
+│  │   │   3. State Machine: 状态转换逻辑                          │    │   │
+│  │   │                                                           │    │   │
+│  │   └───────────────────────────────────────────────────────────┘    │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.24.3 三层 SDK 架构
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                                                             │
+│                    Titan Kaspa SDK 三层架构                                 │
+│                                                                             │
+│  ═══════════════════════════════════════════════════════════════════════   │
+│                                                                             │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │   Layer 3: Business Layer (业务层)                                  │   │
+│  │   ═════════════════════════════════                                 │   │
+│  │                                                                     │   │
+│  │   • 状态机定义                                                      │   │
+│  │   • 复杂业务流程                                                    │   │
+│  │   • UTXO 链编排                                                     │   │
+│  │                                                                     │   │
+│  │   用户代码: Escrow, Installment, Auction, Swap...                   │   │
+│  │                                                                     │   │
+│  └──────────────────────────────┬──────────────────────────────────────┘   │
+│                                 │                                          │
+│                                 ▼                                          │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │   Layer 2: Predicate Layer (断言层)                                 │   │
+│  │   ═════════════════════════════════                                 │   │
+│  │                                                                     │   │
+│  │   • 所有权断言                                                      │   │
+│  │   • 条件组合 (And/Or/Not)                                           │   │
+│  │   • comptime 逻辑推导                                               │   │
+│  │                                                                     │   │
+│  │   中间表示: If(And(Sig, Time), Else(...))                           │   │
+│  │                                                                     │   │
+│  └──────────────────────────────┬──────────────────────────────────────┘   │
+│                                 │                                          │
+│                                 ▼                                          │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │   Layer 1: VM Layer (虚拟机层)                                      │   │
+│  │   ═════════════════════════════                                     │   │
+│  │                                                                     │   │
+│  │   • OpCode 封装                                                     │   │
+│  │   • 脚本序列化                                                      │   │
+│  │   • 字节码生成                                                      │   │
+│  │                                                                     │   │
+│  │   输出: P2SH Script Hex                                             │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Layer 1: VM Layer (虚拟机层)**
+
+```zig
+// titan/kaspa/vm.zig
+
+const std = @import("std");
+
+/// 基础 OpCode 操作
+pub const Op = union(enum) {
+    push: []const u8,
+    dup,
+    drop,
+    swap,
+    add,
+    sub,
+    equal,
+    verify,
+    check_sig,
+    check_multisig: struct { m: u8, n: u8 },
+    hash_blake2b,
+    time_lock: u64,
+    sequence_lock: u64,
+    op_if,
+    op_else,
+    op_endif,
+    // KIP-10 交易内省
+    tx_input_count,
+    tx_output_count,
+    tx_input_amount,
+    tx_output_amount,
+};
+
+/// 生成签名验证
+pub fn checkSig(pubkey: [33]u8) Op {
+    return .{ .push = &pubkey } ++ .check_sig;
+}
+
+/// 生成时间锁
+pub fn timeLock(height: u64) Op {
+    return .{ .time_lock = height };
+}
+
+/// 生成哈希锁
+pub fn hashLock(preimage_hash: [32]u8) Op {
+    return .{ .push = &preimage_hash } ++ .hash_blake2b ++ .equal ++ .verify;
+}
+
+/// 序列化为字节码
+pub fn serialize(ops: []const Op, allocator: std.mem.Allocator) ![]u8 {
+    var buffer = std.ArrayList(u8).init(allocator);
+    for (ops) |op| {
+        try serializeOp(&buffer, op);
+    }
+    return buffer.toOwnedSlice();
+}
+```
+
+**Layer 2: Predicate Layer (断言层)**
+
+```zig
+// titan/kaspa/predicate.zig
+
+const vm = @import("vm.zig");
+
+/// 断言类型
+pub const Predicate = union(enum) {
+    sig: [33]u8,           // 签名验证
+    multi_sig: MultiSig,   // 多签
+    time: u64,             // 时间锁
+    hash: [32]u8,          // 哈希锁
+    and: *const [2]Predicate,
+    or_: *const [2]Predicate,
+    not: *const Predicate,
+};
+
+/// 多签配置
+pub const MultiSig = struct {
+    m: u8,
+    n: u8,
+    pubkeys: []const [33]u8,
+};
+
+/// 共享金库：两人共管 OR 超时后单人取走
+pub fn SharedVault(
+    comptime owner1: [33]u8,
+    comptime owner2: [33]u8,
+    comptime timeout: u64,
+) Predicate {
+    return .{
+        .or_ = &[2]Predicate{
+            // 路径 A: 两人同时签名
+            .{ .and = &[2]Predicate{
+                .{ .sig = owner1 },
+                .{ .sig = owner2 },
+            }},
+            // 路径 B: 超时后 owner1 独占
+            .{ .and = &[2]Predicate{
+                .{ .time = timeout },
+                .{ .sig = owner1 },
+            }},
+        },
+    };
+}
+
+/// 托管合约：买家+卖家 OR 仲裁者裁决
+pub fn Escrow(
+    comptime buyer: [33]u8,
+    comptime seller: [33]u8,
+    comptime arbiter: [33]u8,
+) Predicate {
+    return .{
+        .or_ = &[2]Predicate{
+            // 正常交易: 买卖双方同意
+            .{ .and = &[2]Predicate{
+                .{ .sig = buyer },
+                .{ .sig = seller },
+            }},
+            // 争议仲裁: 仲裁者 + 任意一方
+            .{ .and = &[2]Predicate{
+                .{ .sig = arbiter },
+                .{ .or_ = &[2]Predicate{
+                    .{ .sig = buyer },
+                    .{ .sig = seller },
+                }},
+            }},
+        },
+    };
+}
+
+/// 编译断言为 Script
+pub fn compile(pred: Predicate) ![]vm.Op {
+    return switch (pred) {
+        .sig => |pk| &[_]vm.Op{
+            .{ .push = &pk },
+            .check_sig,
+        },
+        .time => |h| &[_]vm.Op{
+            .{ .time_lock = h },
+        },
+        .and => |pair| blk: {
+            const left = try compile(pair[0]);
+            const right = try compile(pair[1]);
+            // 两个条件都必须满足
+            break :blk left ++ right ++ &[_]vm.Op{.verify};
+        },
+        .or_ => |pair| blk: {
+            const left = try compile(pair[0]);
+            const right = try compile(pair[1]);
+            // IF 分支结构
+            break :blk &[_]vm.Op{.op_if} ++ left ++
+                       &[_]vm.Op{.op_else} ++ right ++
+                       &[_]vm.Op{.op_endif};
+        },
+        // ... 其他情况
+    };
+}
+```
+
+**Layer 3: Business Layer (业务层)**
+
+```zig
+// titan/kaspa/business.zig
+
+const std = @import("std");
+const predicate = @import("predicate.zig");
+const vm = @import("vm.zig");
+
+/// 分期付款合约
+pub const Installment = struct {
+    total: u64,          // 总金额
+    per_step: u64,       // 每期金额
+    interval: u64,       // 间隔区块数
+    beneficiary: [33]u8, // 收款人
+    depositor: [33]u8,   // 存款人
+
+    /// 编译为 UTXO 链
+    /// 生成 N 个不同的 Script，形成"契约链"
+    pub fn compile(self: Installment, allocator: std.mem.Allocator) ![]Script {
+        const steps = self.total / self.per_step;
+        var scripts = try allocator.alloc(Script, steps);
+
+        var current_height: u64 = 0;
+        for (0..steps) |i| {
+            current_height += self.interval;
+
+            // 每一期的解锁条件:
+            // 1. 到达指定区块高度
+            // 2. 收款人签名
+            // 3. 剩余金额必须流向下一个脚本 (Covenant)
+            scripts[i] = Script{
+                .predicate = predicate.And(
+                    predicate.Time(current_height),
+                    predicate.Sig(self.beneficiary),
+                ),
+                .covenant = if (i < steps - 1)
+                    // 强制剩余金额流向下一个脚本
+                    Covenant.mustSpendTo(scripts[i + 1].address())
+                else
+                    null,
+                .amount = self.total - (i + 1) * self.per_step,
+            };
+        }
+
+        return scripts;
+    }
+};
+
+/// 原子交换 (跨链 HTLC)
+pub const AtomicSwap = struct {
+    alice: [33]u8,       // 发起方
+    bob: [33]u8,         // 接收方
+    secret_hash: [32]u8, // 哈希锁
+    timeout: u64,        // 超时区块
+
+    pub fn compile(self: AtomicSwap) ![]vm.Op {
+        // Alice 锁定资金:
+        // 路径 A: Bob 提供 preimage + 签名 (正常兑换)
+        // 路径 B: 超时后 Alice 取回 (退款)
+        return predicate.compile(.{
+            .or_ = &[2]predicate.Predicate{
+                // 正常兑换
+                .{ .and = &[2]predicate.Predicate{
+                    .{ .hash = self.secret_hash },
+                    .{ .sig = self.bob },
+                }},
+                // 超时退款
+                .{ .and = &[2]predicate.Predicate{
+                    .{ .time = self.timeout },
+                    .{ .sig = self.alice },
+                }},
+            },
+        });
+    }
+};
+
+/// 拍卖合约
+pub const Auction = struct {
+    seller: [33]u8,
+    min_bid: u64,
+    end_time: u64,
+
+    // 当前状态 (链下维护)
+    current_bidder: ?[33]u8 = null,
+    current_bid: u64 = 0,
+
+    /// 出价 (链下计算，生成新 UTXO)
+    pub fn bid(self: *Auction, bidder: [33]u8, amount: u64) !Transaction {
+        if (amount <= self.current_bid) return error.BidTooLow;
+
+        // 更新状态
+        const prev_bidder = self.current_bidder;
+        const prev_bid = self.current_bid;
+        self.current_bidder = bidder;
+        self.current_bid = amount;
+
+        // 生成交易:
+        // 1. 新出价者锁定资金
+        // 2. 退还前一个出价者的资金
+        return Transaction{
+            .inputs = &[_]Input{...},
+            .outputs = &[_]Output{
+                // 输出 1: 新拍卖 UTXO
+                .{ .script = self.compileAuctionScript(), .amount = amount },
+                // 输出 2: 退款给前出价者 (如果有)
+                if (prev_bidder) |pb|
+                    .{ .script = predicate.Sig(pb), .amount = prev_bid }
+                else
+                    null,
+            },
+        };
+    }
+};
+```
+
+#### 18.24.4 客户端验证模式
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                                                             │
+│                    客户端验证 (Client-Side Validation)                      │
+│                                                                             │
+│  ═══════════════════════════════════════════════════════════════════════   │
+│                                                                             │
+│                                                                             │
+│  Titan Kaspa SDK 产物:                                                      │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │   ┌───────────────────────────────────────────────────────────┐    │   │
+│  │   │                                                           │    │   │
+│  │   │   1. On-Chain Script (链上脚本)                           │    │   │
+│  │   │   ─────────────────────────────                           │    │   │
+│  │   │                                                           │    │   │
+│  │   │   • 验证签名对不对                                        │    │   │
+│  │   │   • 验证哈希对不对                                        │    │   │
+│  │   │   • 验证时间锁对不对                                      │    │   │
+│  │   │                                                           │    │   │
+│  │   │   产物: .hex 脚本文件                                     │    │   │
+│  │   │                                                           │    │   │
+│  │   │   特点: 极简，只做验证                                    │    │   │
+│  │   │                                                           │    │   │
+│  │   └───────────────────────────────────────────────────────────┘    │   │
+│  │                                                                     │   │
+│  │   ┌───────────────────────────────────────────────────────────┐    │   │
+│  │   │                                                           │    │   │
+│  │   │   2. Off-Chain Proof (链下证明)                           │    │   │
+│  │   │   ──────────────────────────────                          │    │   │
+│  │   │                                                           │    │   │
+│  │   │   • 维护复杂状态                                          │    │   │
+│  │   │   • 计算状态转换                                          │    │   │
+│  │   │   • 构建交易和证明数据                                    │    │   │
+│  │   │                                                           │    │   │
+│  │   │   产物: Transaction + Witness 数据                        │    │   │
+│  │   │                                                           │    │   │
+│  │   │   特点: 复杂逻辑在本地执行                                │    │   │
+│  │   │                                                           │    │   │
+│  │   └───────────────────────────────────────────────────────────┘    │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│                                                                             │
+│  ───────────────────────────────────────────────────────────────────────   │
+│                                                                             │
+│                                                                             │
+│  执行流程:                                                                  │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │   1. 用户在本地运行 Zig 代码                                        │   │
+│  │      │                                                              │   │
+│  │      │  titan.kaspa.Auction.bid(my_pubkey, 1000)                   │   │
+│  │      │                                                              │   │
+│  │      ▼                                                              │   │
+│  │   2. SDK 计算新状态                                                 │   │
+│  │      │                                                              │   │
+│  │      │  current_bid: 500 → 1000                                    │   │
+│  │      │  current_bidder: Alice → Bob                                │   │
+│  │      │                                                              │   │
+│  │      ▼                                                              │   │
+│  │   3. SDK 生成交易                                                   │   │
+│  │      │                                                              │   │
+│  │      │  Input: 消费旧拍卖 UTXO                                     │   │
+│  │      │  Output[0]: 新拍卖 UTXO (金额 1000)                         │   │
+│  │      │  Output[1]: 退款给 Alice (金额 500)                         │   │
+│  │      │                                                              │   │
+│  │      ▼                                                              │   │
+│  │   4. 用户签名 & 广播                                                │   │
+│  │      │                                                              │   │
+│  │      ▼                                                              │   │
+│  │   5. Kaspa 网络验证                                                 │   │
+│  │      │                                                              │   │
+│  │      │  Script: 检查签名 ✓ 检查哈希 ✓ 检查时间 ✓                   │   │
+│  │      │                                                              │   │
+│  │      ▼                                                              │   │
+│  │   6. 交易上链                                                       │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.24.5 去中心化 KRC-20 验证器
+
+```zig
+// titan/kaspa/krc20_validator.zig
+
+const std = @import("std");
+const json = std.json;
+
+/// KRC-20 状态 (链下维护)
+pub const TokenState = struct {
+    balances: std.AutoHashMap([33]u8, u64),
+    total_supply: u64,
+    max_supply: u64,
+    mint_limit: u64,
+
+    pub fn init(max: u64, lim: u64) TokenState {
+        return .{
+            .balances = std.AutoHashMap([33]u8, u64).init(std.heap.page_allocator),
+            .total_supply = 0,
+            .max_supply = max,
+            .mint_limit = lim,
+        };
+    }
+};
+
+/// 验证 KRC-20 交易
+pub fn validateKRC20(
+    tx: Transaction,
+    state: *TokenState,
+) !ValidationResult {
+    // 1. 解析交易中的 JSON 备注
+    const memo = tx.getMemo() orelse return error.NoMemo;
+    const action = try json.parseFromSlice(KRC20Action, std.heap.page_allocator, memo, .{});
+
+    // 2. 根据操作类型验证
+    return switch (action.value.op) {
+        .mint => validateMint(tx, state, action.value),
+        .transfer => validateTransfer(tx, state, action.value),
+        .deploy => validateDeploy(tx, state, action.value),
+    };
+}
+
+fn validateMint(tx: Transaction, state: *TokenState, action: KRC20Action) !ValidationResult {
+    // 检查铸造限额
+    if (action.amt > state.mint_limit) {
+        return .{ .valid = false, .reason = "Exceeds mint limit" };
+    }
+
+    // 检查总供应量
+    if (state.total_supply + action.amt > state.max_supply) {
+        return .{ .valid = false, .reason = "Exceeds max supply" };
+    }
+
+    // 更新状态
+    const sender = tx.getSender();
+    const current = state.balances.get(sender) orelse 0;
+    try state.balances.put(sender, current + action.amt);
+    state.total_supply += action.amt;
+
+    return .{ .valid = true, .reason = null };
+}
+
+fn validateTransfer(tx: Transaction, state: *TokenState, action: KRC20Action) !ValidationResult {
+    const sender = tx.getSender();
+    const sender_balance = state.balances.get(sender) orelse 0;
+
+    // 检查余额
+    if (sender_balance < action.amt) {
+        return .{ .valid = false, .reason = "Insufficient balance" };
+    }
+
+    // 更新状态
+    try state.balances.put(sender, sender_balance - action.amt);
+
+    const receiver = action.to orelse return error.NoReceiver;
+    const receiver_balance = state.balances.get(receiver) orelse 0;
+    try state.balances.put(receiver, receiver_balance + action.amt);
+
+    return .{ .valid = true, .reason = null };
+}
+
+/// 生成带有验证逻辑的 Script
+/// 确保只有经过验证的交易才能被花费
+pub fn generateValidatedScript(
+    expected_state_hash: [32]u8,
+    authorized_signer: [33]u8,
+) ![]u8 {
+    return predicate.compile(.{
+        .and = &[2]predicate.Predicate{
+            // 条件 1: 状态哈希匹配
+            .{ .hash = expected_state_hash },
+            // 条件 2: 授权签名
+            .{ .sig = authorized_signer },
+        },
+    });
+}
+```
+
+#### 18.24.6 可实现的复杂业务场景
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                                                             │
+│                    Titan Kaspa SDK 可实现的业务场景                         │
+│                                                                             │
+│  ═══════════════════════════════════════════════════════════════════════   │
+│                                                                             │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │   1. 原子交换 (Atomic Swaps)                                        │   │
+│  │   ─────────────────────────────                                     │   │
+│  │                                                                     │   │
+│  │   • 跨链原子交换 (BTC ↔ KAS)                                        │   │
+│  │   • HTLC 哈希时间锁                                                 │   │
+│  │   • 无需信任的去中心化交换                                          │   │
+│  │                                                                     │   │
+│  │   titan.kaspa.AtomicSwap{                                           │   │
+│  │       .alice = alice_pubkey,                                        │   │
+│  │       .bob = bob_pubkey,                                            │   │
+│  │       .secret_hash = hash,                                          │   │
+│  │       .timeout = 1000,                                              │   │
+│  │   }.compile()                                                       │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │   2. 遗产继承合约                                                   │   │
+│  │   ─────────────────                                                 │   │
+│  │                                                                     │   │
+│  │   • 多重签名 + 时间锁                                               │   │
+│  │   • 指定继承人                                                      │   │
+│  │   • 分阶段解锁                                                      │   │
+│  │                                                                     │   │
+│  │   titan.kaspa.Inheritance{                                          │   │
+│  │       .owner = owner_pubkey,                                        │   │
+│  │       .heirs = &[_][33]u8{ heir1, heir2, heir3 },                   │   │
+│  │       .unlock_after = 365 * 24 * 60,  // 1 年后                     │   │
+│  │       .m_of_n = .{ .m = 2, .n = 3 },  // 2-of-3 继承人              │   │
+│  │   }.compile()                                                       │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │   3. 分期付款 / 工资流                                              │   │
+│  │   ───────────────────────                                           │   │
+│  │                                                                     │   │
+│  │   • 预签名交易链                                                    │   │
+│  │   • 定时解锁                                                        │   │
+│  │   • 契约约束 (Covenants)                                            │   │
+│  │                                                                     │   │
+│  │   titan.kaspa.Installment{                                          │   │
+│  │       .total = 10000,                                               │   │
+│  │       .per_step = 1000,                                             │   │
+│  │       .interval = 4320,  // 每 3 天 (10 BPS * 60 * 60 * 24 * 3)     │   │
+│  │       .beneficiary = employee_pubkey,                               │   │
+│  │   }.compile()                                                       │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │   4. 批量支付 (Payment Batching)                                    │   │
+│  │   ───────────────────────────────                                   │   │
+│  │                                                                     │   │
+│  │   • 一笔交易多个输出                                                │   │
+│  │   • 节省 Gas 费用                                                   │   │
+│  │   • 自动拆分逻辑                                                    │   │
+│  │                                                                     │   │
+│  │   titan.kaspa.BatchPayment{                                         │   │
+│  │       .recipients = &[_]Recipient{                                  │   │
+│  │           .{ .addr = addr1, .amount = 100 },                        │   │
+│  │           .{ .addr = addr2, .amount = 200 },                        │   │
+│  │           .{ .addr = addr3, .amount = 300 },                        │   │
+│  │       },                                                            │   │
+│  │   }.compile()                                                       │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │   5. 链上拍卖                                                       │   │
+│  │   ─────────────                                                     │   │
+│  │                                                                     │   │
+│  │   • 状态机驱动                                                      │   │
+│  │   • 自动退款                                                        │   │
+│  │   • 最高价中标                                                      │   │
+│  │                                                                     │   │
+│  │   titan.kaspa.Auction{                                              │   │
+│  │       .seller = seller_pubkey,                                      │   │
+│  │       .min_bid = 100,                                               │   │
+│  │       .end_time = current_height + 10000,                           │   │
+│  │   }.bid(bidder_pubkey, 500)                                         │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.24.7 总结：UTXO 编程的新范式
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                                                             │
+│                                                                             │
+│      ═══════════════════════════════════════════════════════════════       │
+│                                                                             │
+│                    Titan Kaspa SDK：UTXO 编程的新范式                       │
+│                                                                             │
+│      ═══════════════════════════════════════════════════════════════       │
+│                                                                             │
+│                                                                             │
+│      ┌──────────────────────────────────────────────────────────────┐      │
+│      │                                                              │      │
+│      │                                                              │      │
+│      │   核心认知:                                                  │      │
+│      │   ─────────                                                  │      │
+│      │                                                              │      │
+│      │   Kaspa Script ≠ EVM                                         │      │
+│      │                                                              │      │
+│      │   • Script 是电路板，不是 CPU                                │      │
+│      │   • 它验证 "通/不通"，不计算 "结果是什么"                    │      │
+│      │   • 复杂逻辑在链下，链上只做验证                             │      │
+│      │                                                              │      │
+│      │   ─────────────────────────────────────────────────────────  │      │
+│      │                                                              │      │
+│      │   SDK 核心能力:                                              │      │
+│      │   ──────────────                                             │      │
+│      │                                                              │      │
+│      │   1. 把状态机编译成 UTXO 链                                  │      │
+│      │   2. 把业务逻辑编译成 Script 锁                              │      │
+│      │   3. 把客户端变成计算引擎                                    │      │
+│      │                                                              │      │
+│      │   ─────────────────────────────────────────────────────────  │      │
+│      │                                                              │      │
+│      │   这是什么:                                                  │      │
+│      │   ──────────                                                 │      │
+│      │                                                              │      │
+│      │   用 Zig 写一个 Smart Contract DSL，                         │      │
+│      │   专门针对 UTXO 模型。                                       │      │
+│      │                                                              │      │
+│      │   这是目前开发 BTC/Kaspa/Doge 应用最先进的思路。             │      │
+│      │                                                              │      │
+│      │                                                              │      │
+│      └──────────────────────────────────────────────────────────────┘      │
+│                                                                             │
+│                                                                             │
+│      ───────────────────────────────────────────────────────────────       │
+│                                                                             │
+│                                                                             │
+│      对比总结:                                                              │
+│                                                                             │
+│      ┌──────────────────────┬──────────────────────────────────────┐       │
+│      │ 维度                 │ EVM           │ Kaspa Script         │       │
+│      ├──────────────────────┼───────────────┼──────────────────────┤       │
+│      │ 类比                 │ CPU           │ 电路板               │       │
+│      │ 能力                 │ 计算          │ 验证                 │       │
+│      │ 状态                 │ 全局 Storage  │ 链下维护             │       │
+│      │ 循环                 │ ✅ 支持       │ ❌ 不支持            │       │
+│      │ 复杂度               │ 链上高        │ 链上低               │       │
+│      │ Gas 成本             │ 高            │ 低                   │       │
+│      │ 编程模型             │ 状态机在链上  │ 状态机在链下         │       │
+│      │ Titan SDK 产物       │ Yul/Bytecode  │ Script + State       │       │
+│      └──────────────────────┴───────────────┴──────────────────────┘       │
+│                                                                             │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
 ## 相关文档
 
 | 文档 | 说明 |
