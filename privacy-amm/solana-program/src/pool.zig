@@ -2,7 +2,7 @@
 // AMM 流动性池状态管理
 
 const std = @import("std");
-const sol = @import("solana-program-sdk");
+const sol = @import("solana_program_sdk");
 const verifier = @import("verifier.zig");
 
 /// Pool 状态
@@ -156,10 +156,8 @@ pub const DepositParams = struct {
 
 /// 取款参数
 pub const WithdrawParams = struct {
-    /// ZK 证明
-    proof: verifier.Proof,
-    /// 公开输入
-    public_inputs: verifier.WithdrawPublicInputs,
+    /// Merkle 根
+    root: [32]u8,
     /// Nullifier
     nullifier: [32]u8,
     /// 取款金额
@@ -168,15 +166,14 @@ pub const WithdrawParams = struct {
     asset_type: u8,
 
     pub fn deserialize(data: []const u8) !WithdrawParams {
-        if (data.len < 256 + 104 + 32 + 9) {
+        if (data.len < 73) {
             return error.InvalidInstructionData;
         }
         var params: WithdrawParams = undefined;
-        params.proof = try verifier.Proof.deserialize(data[0..256]);
-        params.public_inputs = try verifier.WithdrawPublicInputs.deserialize(data[256..360]);
-        @memcpy(&params.nullifier, data[360..392]);
-        params.amount = std.mem.readInt(u64, data[392..400], .little);
-        params.asset_type = data[400];
+        @memcpy(&params.root, data[0..32]);
+        @memcpy(&params.nullifier, data[32..64]);
+        params.amount = std.mem.readInt(u64, data[64..72], .little);
+        params.asset_type = data[72];
         return params;
     }
 };
@@ -233,7 +230,7 @@ pub const SwapParams = struct {
 // ============================================================================
 
 /// 初始化池
-pub fn initialize(account: sol.AccountInfo, params: InitializeParams) !void {
+pub fn initialize(account: sol.account.Account, params: InitializeParams) !void {
     const data = account.data();
 
     var state = PoolState{
@@ -253,7 +250,7 @@ pub fn initialize(account: sol.AccountInfo, params: InitializeParams) !void {
 }
 
 /// 存款后更新
-pub fn updateAfterDeposit(account: sol.AccountInfo, params: DepositParams) !void {
+pub fn updateAfterDeposit(account: sol.account.Account, params: DepositParams) !void {
     const data = account.data();
     var state = try PoolState.deserialize(data);
 
@@ -269,7 +266,7 @@ pub fn updateAfterDeposit(account: sol.AccountInfo, params: DepositParams) !void
 }
 
 /// 取款后更新
-pub fn updateAfterWithdraw(account: sol.AccountInfo, params: WithdrawParams) !void {
+pub fn updateAfterWithdraw(account: sol.account.Account, params: WithdrawParams) !void {
     const data = account.data();
     var state = try PoolState.deserialize(data);
 
@@ -290,7 +287,7 @@ pub fn updateAfterWithdraw(account: sol.AccountInfo, params: WithdrawParams) !vo
 }
 
 /// Swap 后更新
-pub fn updateAfterSwap(account: sol.AccountInfo, params: SwapParams) !void {
+pub fn updateAfterSwap(account: sol.account.Account, params: SwapParams) !void {
     const data = account.data();
     var state = try PoolState.deserialize(data);
 

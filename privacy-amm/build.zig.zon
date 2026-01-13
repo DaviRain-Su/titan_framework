@@ -1,5 +1,6 @@
 .{
-    .name = .@"privacy-amm",
+    .fingerprint = 0x93ae17a56f4a2520,
+    .name = .privacy_amm,
     .version = "0.1.0",
     .minimum_zig_version = "0.15.2",
 

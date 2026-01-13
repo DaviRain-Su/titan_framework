@@ -233,7 +233,7 @@ fn fetchUserUtxos(allocator: std.mem.Allocator, token: []const u8) ![]Utxo {
 fn selectUtxos(allocator: std.mem.Allocator, utxos: []Utxo, amount: f64) !SelectedUtxos {
     // TODO: 实现 UTXO 选择算法 (最小化数量同时满足金额)
     _ = amount;
-    var selected = try allocator.alloc(Utxo, utxos.len);
+    const selected = try allocator.alloc(Utxo, utxos.len);
     @memcpy(selected, utxos);
 
     var total: f64 = 0;

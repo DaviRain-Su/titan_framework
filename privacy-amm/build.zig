@@ -4,40 +4,32 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // =========================================================================
-    // Solana Program (SBF target)
-    // =========================================================================
-    const program_step = b.step("program", "Build Solana on-chain program");
-
-    // Import solana-program-sdk-zig as dependency
+    // Import solana_program_sdk-zig as dependency
     const solana_dep = b.dependency("solana_program_sdk", .{
-        .target = b.resolveTargetQuery(.{
-            .cpu_arch = .sbf,
-            .os_tag = .solana,
-        }),
+        .target = target,
         .optimize = optimize,
     });
 
-    const program = b.addSharedLibrary(.{
-        .name = "privacy_amm",
+    // Create program module
+    const program_mod = b.createModule(.{
         .root_source_file = b.path("solana-program/src/lib.zig"),
-        .target = b.resolveTargetQuery(.{
-            .cpu_arch = .sbf,
-            .os_tag = .solana,
-        }),
+        .target = target,
         .optimize = optimize,
     });
+    program_mod.addImport("solana_program_sdk", solana_dep.module("solana_program_sdk"));
 
-    program.root_module.addImport("solana-program-sdk", solana_dep.module("solana-program-sdk"));
+    // =========================================================================
+    // Tests (native target with SDK)
+    // =========================================================================
+    const test_step = b.step("test", "Run unit tests");
 
-    // SBF specific settings
-    program.entry = .{ .symbol = "entrypoint" };
-    program.root_module.pic = true;
-
-    const install_program = b.addInstallArtifact(program, .{
-        .dest_dir = .{ .override = .{ .custom = "deploy" } },
+    // Program tests (native)
+    const program_tests = b.addTest(.{
+        .root_module = program_mod,
     });
-    program_step.dependOn(&install_program.step);
+
+    const run_program_tests = b.addRunArtifact(program_tests);
+    test_step.dependOn(&run_program_tests.step);
 
     // =========================================================================
     // CLI (native target)
@@ -46,13 +38,27 @@ pub fn build(b: *std.Build) void {
 
     const cli = b.addExecutable(.{
         .name = "titan-privacy",
-        .root_source_file = b.path("cli/src/main.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("cli/src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
 
     b.installArtifact(cli);
     cli_step.dependOn(&cli.step);
+
+    // CLI tests
+    const cli_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("cli/src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
+    const run_cli_tests = b.addRunArtifact(cli_tests);
+    test_step.dependOn(&run_cli_tests.step);
 
     // =========================================================================
     // Relayer (native target)
@@ -61,46 +67,16 @@ pub fn build(b: *std.Build) void {
 
     const relayer = b.addExecutable(.{
         .name = "privacy-relayer",
-        .root_source_file = b.path("relayer/src/main.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("relayer/src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
 
     b.installArtifact(relayer);
     relayer_step.dependOn(&relayer.step);
 
-    // =========================================================================
-    // Tests
-    // =========================================================================
-    const test_step = b.step("test", "Run unit tests");
-
-    // Program tests
-    const program_tests = b.addTest(.{
-        .root_source_file = b.path("solana-program/src/lib.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
-    const run_program_tests = b.addRunArtifact(program_tests);
-    test_step.dependOn(&run_program_tests.step);
-
-    // CLI tests
-    const cli_tests = b.addTest(.{
-        .root_source_file = b.path("cli/src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
-    const run_cli_tests = b.addRunArtifact(cli_tests);
-    test_step.dependOn(&run_cli_tests.step);
-
-    // =========================================================================
-    // All (default)
-    // =========================================================================
-    const all_step = b.step("all", "Build all components");
-    all_step.dependOn(program_step);
-    all_step.dependOn(cli_step);
-    all_step.dependOn(relayer_step);
-
-    b.default_step = all_step;
+    // Default step
+    b.default_step = test_step;
 }

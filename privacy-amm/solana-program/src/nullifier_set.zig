@@ -2,7 +2,7 @@
 // 使用 Solana 账户存储已使用的 nullifier
 
 const std = @import("std");
-const sol = @import("solana-program-sdk");
+const sol = @import("solana_program_sdk");
 
 /// Nullifier 集合头部
 /// 使用 Bloom Filter + 溢出列表的混合方案
@@ -46,7 +46,7 @@ const DEFAULT_BLOOM_SIZE: u32 = 1024 * 1024 * 8; // 1MB = 8M bits
 const DEFAULT_NUM_HASHES: u8 = 7;
 
 /// 初始化 Nullifier 集合
-pub fn initialize(account: sol.AccountInfo) !void {
+pub fn initialize(account: sol.account.Account) !void {
     const data = account.data();
 
     var header = NullifierSetHeader{
@@ -72,7 +72,7 @@ pub fn initialize(account: sol.AccountInfo) !void {
 }
 
 /// 检查 nullifier 是否已存在
-pub fn contains(account: sol.AccountInfo, nullifier: [32]u8) bool {
+pub fn contains(account: sol.account.Account, nullifier: [32]u8) bool {
     const data = account.data();
 
     const header = NullifierSetHeader.deserialize(data) catch {
@@ -115,7 +115,7 @@ pub fn contains(account: sol.AccountInfo, nullifier: [32]u8) bool {
 }
 
 /// 插入 nullifier
-pub fn insert(account: sol.AccountInfo, nullifier: [32]u8) !void {
+pub fn insert(account: sol.account.Account, nullifier: [32]u8) !void {
     const data = account.data();
 
     var header = try NullifierSetHeader.deserialize(data);

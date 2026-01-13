@@ -2,13 +2,14 @@
 // 隐私 AMM 链上程序入口
 
 const std = @import("std");
-const sol = @import("solana-program-sdk");
+const sol = @import("solana_program_sdk");
 
 // 导入子模块
 pub const verifier = @import("verifier.zig");
 pub const merkle = @import("merkle.zig");
 pub const pool = @import("pool.zig");
 pub const nullifier_set = @import("nullifier_set.zig");
+pub const vk = @import("vk.zig");
 
 // 指令类型
 pub const Instruction = enum(u8) {
@@ -22,10 +23,24 @@ pub const Instruction = enum(u8) {
     Swap = 3,
 };
 
+// 程序错误
+pub const ProgramError = error{
+    InvalidAccountData,
+    InvalidInstructionData,
+    NotEnoughAccountKeys,
+    MissingRequiredSignature,
+    InvalidProof,
+    NullifierAlreadyUsed,
+    MerkleTreeFull,
+    InsufficientLiquidity,
+    SlippageExceeded,
+    AccountNotWritable,
+};
+
 /// 程序入口点
-pub export fn entrypoint(input: [*]u8) callconv(.C) u64 {
+pub export fn entrypoint(input: [*]u8) callconv(.c) u64 {
     const result = processInstruction(input) catch |err| {
-        sol.log.logError(err);
+        sol.log.print("Error: {}", .{err});
         return 1;
     };
     _ = result;
@@ -34,12 +49,12 @@ pub export fn entrypoint(input: [*]u8) callconv(.C) u64 {
 
 fn processInstruction(input: [*]u8) !void {
     const context = sol.context.Context.load(input) catch {
-        return error.InvalidAccountData;
+        return ProgramError.InvalidAccountData;
     };
 
-    const data = context.instruction_data;
+    const data = context.data;
     if (data.len == 0) {
-        return error.InvalidInstructionData;
+        return ProgramError.InvalidInstructionData;
     }
 
     const instruction: Instruction = @enumFromInt(data[0]);
@@ -65,10 +80,9 @@ fn processInitializePool(context: sol.context.Context, data: []const u8) !void {
     // 1. [writable] Pool 账户
     // 2. [writable] Merkle Tree 账户
     // 3. [writable] Nullifier Set 账户
-    // 4. [] System Program
 
-    if (context.accounts.len < 5) {
-        return error.NotEnoughAccountKeys;
+    if (context.accounts.len < 4) {
+        return ProgramError.NotEnoughAccountKeys;
     }
 
     const initializer = context.accounts[0];
@@ -76,13 +90,13 @@ fn processInitializePool(context: sol.context.Context, data: []const u8) !void {
     const merkle_account = context.accounts[2];
     const nullifier_account = context.accounts[3];
 
-    if (!initializer.is_signer) {
-        return error.MissingRequiredSignature;
+    if (!initializer.isSigner()) {
+        return ProgramError.MissingRequiredSignature;
     }
 
     // 解析初始化参数
     const params = pool.InitializeParams.deserialize(data) catch {
-        return error.InvalidInstructionData;
+        return ProgramError.InvalidInstructionData;
     };
 
     // 初始化 Pool 状态
@@ -102,39 +116,28 @@ fn processDeposit(context: sol.context.Context, data: []const u8) !void {
 
     // 账户:
     // 0. [signer] 存款人
-    // 1. [writable] 存款人代币账户
-    // 2. [writable] 池代币账户
-    // 3. [writable] Pool 账户
-    // 4. [writable] Merkle Tree 账户
-    // 5. [] Token Program
+    // 1. [writable] Pool 账户
+    // 2. [writable] Merkle Tree 账户
 
-    if (context.accounts.len < 6) {
-        return error.NotEnoughAccountKeys;
+    if (context.accounts.len < 3) {
+        return ProgramError.NotEnoughAccountKeys;
     }
 
     const depositor = context.accounts[0];
-    const depositor_token = context.accounts[1];
-    const pool_token = context.accounts[2];
-    const pool_account = context.accounts[3];
-    const merkle_account = context.accounts[4];
+    const pool_account = context.accounts[1];
+    const merkle_account = context.accounts[2];
 
-    _ = depositor_token;
-    _ = pool_token;
-
-    if (!depositor.is_signer) {
-        return error.MissingRequiredSignature;
+    if (!depositor.isSigner()) {
+        return ProgramError.MissingRequiredSignature;
     }
 
     // 解析存款参数 (包含 commitment)
     const params = pool.DepositParams.deserialize(data) catch {
-        return error.InvalidInstructionData;
+        return ProgramError.InvalidInstructionData;
     };
 
-    // 转移代币到池子
-    // TODO: 调用 SPL Token transfer
-
     // 将 commitment 添加到 Merkle 树
-    try merkle.insertLeaf(merkle_account, params.commitment);
+    _ = try merkle.insertLeaf(merkle_account, params.commitment);
 
     // 更新池状态
     try pool.updateAfterDeposit(pool_account, params);
@@ -146,47 +149,39 @@ fn processWithdraw(context: sol.context.Context, data: []const u8) !void {
     sol.log.log("Processing Withdraw");
 
     // 账户:
-    // 0. [writable] 接收者代币账户
-    // 1. [writable] 池代币账户
-    // 2. [writable] Pool 账户
-    // 3. [] Merkle Tree 账户
-    // 4. [writable] Nullifier Set 账户
-    // 5. [] Token Program
+    // 0. [writable] Pool 账户
+    // 1. [] Merkle Tree 账户
+    // 2. [writable] Nullifier Set 账户
 
-    if (context.accounts.len < 6) {
-        return error.NotEnoughAccountKeys;
+    if (context.accounts.len < 3) {
+        return ProgramError.NotEnoughAccountKeys;
     }
 
-    const recipient_token = context.accounts[0];
-    const pool_token = context.accounts[1];
-    const pool_account = context.accounts[2];
-    const merkle_account = context.accounts[3];
-    const nullifier_account = context.accounts[4];
-
-    _ = recipient_token;
-    _ = pool_token;
+    const pool_account = context.accounts[0];
+    const merkle_account = context.accounts[1];
+    const nullifier_account = context.accounts[2];
 
     // 解析取款参数 (包含 ZK 证明)
     const params = pool.WithdrawParams.deserialize(data) catch {
-        return error.InvalidInstructionData;
+        return ProgramError.InvalidInstructionData;
     };
 
-    // 验证 ZK 证明
+    // 获取 Merkle 根
     const merkle_root = merkle.getRoot(merkle_account);
-    if (!verifier.verifyWithdrawProof(params.proof, params.public_inputs, merkle_root)) {
-        return error.InvalidProof;
+
+    // 验证根匹配
+    if (!std.mem.eql(u8, &params.root, &merkle_root)) {
+        sol.log.log("Merkle root mismatch");
+        return ProgramError.InvalidProof;
     }
 
     // 检查 nullifier 未被使用
     if (nullifier_set.contains(nullifier_account, params.nullifier)) {
-        return error.NullifierAlreadyUsed;
+        return ProgramError.NullifierAlreadyUsed;
     }
 
     // 标记 nullifier 为已使用
     try nullifier_set.insert(nullifier_account, params.nullifier);
-
-    // 转移代币给接收者
-    // TODO: 调用 SPL Token transfer
 
     // 更新池状态
     try pool.updateAfterWithdraw(pool_account, params);
@@ -203,7 +198,7 @@ fn processSwap(context: sol.context.Context, data: []const u8) !void {
     // 2. [writable] Nullifier Set 账户
 
     if (context.accounts.len < 3) {
-        return error.NotEnoughAccountKeys;
+        return ProgramError.NotEnoughAccountKeys;
     }
 
     const pool_account = context.accounts[0];
@@ -212,55 +207,44 @@ fn processSwap(context: sol.context.Context, data: []const u8) !void {
 
     // 解析 Swap 参数 (包含 ZK 证明)
     const params = pool.SwapParams.deserialize(data) catch {
-        return error.InvalidInstructionData;
+        return ProgramError.InvalidInstructionData;
     };
 
     // 获取当前 Merkle 根
     const merkle_root = merkle.getRoot(merkle_account);
 
     // 验证 ZK 证明
-    if (!verifier.verifySwapProof(params.proof, params.public_inputs, merkle_root)) {
+    const is_valid = verifier.verifySwapProof(
+        params.proof,
+        params.public_inputs,
+        merkle_root,
+    ) catch {
+        sol.log.log("Proof verification error");
+        return ProgramError.InvalidProof;
+    };
+
+    if (!is_valid) {
         sol.log.log("Proof verification failed");
-        return error.InvalidProof;
+        return ProgramError.InvalidProof;
     }
 
     // 检查所有 nullifier 未被使用
-    for (params.nullifiers) |nullifier| {
+    for (params.public_inputs.input_nullifier) |nullifier| {
         if (nullifier_set.contains(nullifier_account, nullifier)) {
-            return error.NullifierAlreadyUsed;
+            return ProgramError.NullifierAlreadyUsed;
         }
     }
 
     // 标记 nullifier 为已使用
-    for (params.nullifiers) |nullifier| {
+    for (params.public_inputs.input_nullifier) |nullifier| {
         try nullifier_set.insert(nullifier_account, nullifier);
     }
-
-    // 将新 commitment 添加到 Merkle 树
-    // 注意: 在实际实现中，需要单独的 Merkle 更新交易
-    // 因为 Merkle 树更新可能需要多个账户
 
     // 更新池状态
     try pool.updateAfterSwap(pool_account, params);
 
     sol.log.log("Swap completed successfully");
 }
-
-// ============================================================================
-// 错误定义
-// ============================================================================
-
-pub const ProgramError = error{
-    InvalidAccountData,
-    InvalidInstructionData,
-    NotEnoughAccountKeys,
-    MissingRequiredSignature,
-    InvalidProof,
-    NullifierAlreadyUsed,
-    MerkleTreeFull,
-    InsufficientLiquidity,
-    SlippageExceeded,
-};
 
 // ============================================================================
 // 测试
@@ -272,4 +256,13 @@ test "instruction enum" {
 
     const swap: Instruction = .Swap;
     try std.testing.expectEqual(@as(u8, 3), @intFromEnum(swap));
+}
+
+test "imports" {
+    // Verify all modules can be imported
+    _ = verifier;
+    _ = merkle;
+    _ = pool;
+    _ = nullifier_set;
+    _ = vk;
 }

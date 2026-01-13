@@ -2,7 +2,7 @@
 // 链上增量 Merkle 树实现
 
 const std = @import("std");
-const sol = @import("solana-program-sdk");
+const sol = @import("solana_program_sdk");
 
 /// Merkle 树深度 (支持 2^20 = 约 100 万叶子)
 pub const MERKLE_DEPTH: u32 = 20;
@@ -75,7 +75,7 @@ pub const MerkleTreeState = struct {
 };
 
 /// 初始化 Merkle 树
-pub fn initialize(account: sol.AccountInfo) !void {
+pub fn initialize(account: sol.account.Account) !void {
     var state = MerkleTreeState{
         .root = computeEmptyRoot(),
         .next_index = 0,
@@ -93,7 +93,7 @@ pub fn initialize(account: sol.AccountInfo) !void {
 }
 
 /// 插入新叶子节点
-pub fn insertLeaf(account: sol.AccountInfo, leaf: [32]u8) !u32 {
+pub fn insertLeaf(account: sol.account.Account, leaf: [32]u8) !u32 {
     const data = account.data();
     var state = try MerkleTreeState.deserialize(data);
 
@@ -136,7 +136,7 @@ pub fn insertLeaf(account: sol.AccountInfo, leaf: [32]u8) !u32 {
 }
 
 /// 获取当前 Merkle 根
-pub fn getRoot(account: sol.AccountInfo) [32]u8 {
+pub fn getRoot(account: sol.account.Account) [32]u8 {
     const data = account.data();
     const state = MerkleTreeState.deserialize(data) catch {
         return [_]u8{0} ** 32;
@@ -145,7 +145,7 @@ pub fn getRoot(account: sol.AccountInfo) [32]u8 {
 }
 
 /// 获取下一个叶子索引
-pub fn getNextIndex(account: sol.AccountInfo) u32 {
+pub fn getNextIndex(account: sol.account.Account) u32 {
     const data = account.data();
     const state = MerkleTreeState.deserialize(data) catch {
         return 0;
@@ -176,7 +176,7 @@ fn poseidonHash(left: [32]u8, right: [32]u8) [32]u8 {
 
 /// 计算空树的根
 fn computeEmptyRoot() [32]u8 {
-    var zeros = computeZeros();
+    const zeros = computeZeros();
     var current = zeros[0];
 
     for (0..MERKLE_DEPTH) |level| {
