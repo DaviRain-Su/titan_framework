@@ -39006,6 +39006,1654 @@ test "proof generation and verification" {
 
 ---
 
+### 18.41 Pure Zig Architecture: 纯 Zig 的极致性能方案
+
+> **战略转型**: 从 "降低门槛 (面向 Web2)" 转变为 **"极致性能与底层控制 (面向极客与系统工程师)"**。
+
+#### 18.41.1 为什么选择纯 Zig？
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                 │
+│           Pure Zig: 在裸金属上跳舞                               │
+│                                                                 │
+│  "Titan OS is not a framework for beginners.                    │
+│   It's a weapon for system engineers."                          │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  为什么不用 Python？                                             │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                                                         │   │
+│  │  Python 方案:                                           │   │
+│  │                                                         │   │
+│  │  ┌──────────┐    ┌──────────┐    ┌──────────────────┐  │   │
+│  │  │  Python  │───►│  FFI     │───►│  Zig Core        │  │   │
+│  │  │  SDK     │    │  Bridge  │    │  (性能损失!)     │  │   │
+│  │  └──────────┘    └──────────┘    └──────────────────┘  │   │
+│  │                                                         │   │
+│  │  问题:                                                  │   │
+│  │  • 运行时开销 (GC, 解释器)                              │   │
+│  │  • 序列化/反序列化成本                                  │   │
+│  │  • 部署复杂度增加                                       │   │
+│  │  • 对 Solana 硬核评委缺乏吸引力                        │   │
+│  │                                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                                                         │   │
+│  │  Pure Zig 方案:                                         │   │
+│  │                                                         │   │
+│  │  ┌──────────────────────────────────────────────────┐  │   │
+│  │  │              Zig Source Code                      │  │   │
+│  │  │                     │                             │  │   │
+│  │  │                     ▼                             │  │   │
+│  │  │              ┌─────────────┐                      │  │   │
+│  │  │              │ Titan SDK   │                      │  │   │
+│  │  │              │ @import     │                      │  │   │
+│  │  │              └──────┬──────┘                      │  │   │
+│  │  │                     │                             │  │   │
+│  │  │      ┌──────────────┼──────────────┐             │  │   │
+│  │  │      ▼              ▼              ▼             │  │   │
+│  │  │  ┌──────┐     ┌──────────┐   ┌──────────┐       │  │   │
+│  │  │  │ SBF  │     │ Native   │   │ WASM     │       │  │   │
+│  │  │  │On-   │     │ Client   │   │ (可选)   │       │  │   │
+│  │  │  │Chain │     │ Off-Chain│   │          │       │  │   │
+│  │  │  └──────┘     └──────────┘   └──────────┘       │  │   │
+│  │  │                                                   │  │   │
+│  │  └───────────────────────────────────────────────────┘  │   │
+│  │                                                         │   │
+│  │  优势:                                                  │   │
+│  │  • Zero-overhead abstraction (零开销抽象)               │   │
+│  │  • 直接编译到 SBF，无中间层                             │   │
+│  │  • 极小的二进制体积                                     │   │
+│  │  • 对系统工程师极具吸引力                               │   │
+│  │                                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.41.2 产品形态: Titan = Foundry for Zig on Solana
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                 │
+│        Titan OS = "Zig 工具链 + 标准库 for Solana"               │
+│                                                                 │
+│  类比: Foundry (for Solidity) → Titan (for Zig on Solana)       │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  核心组件:                                                       │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                                                         │   │
+│  │  1. Titan Zig SDK (`@import("titan")`)                  │   │
+│  │                                                         │   │
+│  │     ┌─────────────────────────────────────────────┐    │   │
+│  │     │                                             │    │   │
+│  │     │  • titan.solana   - Syscalls 封装           │    │   │
+│  │     │  • titan.mem      - 内存管理                │    │   │
+│  │     │  • titan.zk       - ZK 证明接口             │    │   │
+│  │     │  • titan.crypto   - 密码学原语              │    │   │
+│  │     │  • titan.types    - 链上类型定义            │    │   │
+│  │     │                                             │    │   │
+│  │     └─────────────────────────────────────────────┘    │   │
+│  │                                                         │   │
+│  │  2. Titan CLI (`titan`)                                 │   │
+│  │                                                         │   │
+│  │     ┌─────────────────────────────────────────────┐    │   │
+│  │     │                                             │    │   │
+│  │     │  $ titan build    # 编译到 SBF              │    │   │
+│  │     │  $ titan test     # 本地测试                │    │   │
+│  │     │  $ titan deploy   # 部署到 Solana           │    │   │
+│  │     │  $ titan prove    # 生成 ZK 证明            │    │   │
+│  │     │  $ titan verify   # 验证证明                │    │   │
+│  │     │                                             │    │   │
+│  │     └─────────────────────────────────────────────┘    │   │
+│  │                                                         │   │
+│  │  3. Titan Runtime (链上 + 链下)                         │   │
+│  │                                                         │   │
+│  │     ┌─────────────────────────────────────────────┐    │   │
+│  │     │                                             │    │   │
+│  │     │  On-Chain:  精简 Verifier (SBF)             │    │   │
+│  │     │  Off-Chain: Native Client (本地证明生成)   │    │   │
+│  │     │                                             │    │   │
+│  │     └─────────────────────────────────────────────┘    │   │
+│  │                                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.41.3 架构设计: Zig 作为胶水层
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                 │
+│                  Pure Zig + C ABI 架构                           │
+│                                                                 │
+│  核心策略: Zig 作为 "胶水层" + "业务逻辑层"                       │
+│           底层调用 C ABI 封装的 Rust/C ZK 库                     │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                                                         │   │
+│  │  开发者写的代码 (.zig):                                 │   │
+│  │                                                         │   │
+│  │  ┌───────────────────────────────────────────────────┐ │   │
+│  │  │                                                   │ │   │
+│  │  │  const titan = @import("titan");                  │ │   │
+│  │  │  const zk = titan.zk;                             │ │   │
+│  │  │                                                   │ │   │
+│  │  │  pub fn private_swap(ctx: titan.Context) !void {  │ │   │
+│  │  │      // 业务逻辑                                  │ │   │
+│  │  │      const amount = ctx.read_private_input(u64);  │ │   │
+│  │  │      // ZK 约束                                   │ │   │
+│  │  │      try zk.assert(amount >= min_out);            │ │   │
+│  │  │      // 提交状态                                  │ │   │
+│  │  │      titan.commit(zk.generate_proof());           │ │   │
+│  │  │  }                                                │ │   │
+│  │  │                                                   │ │   │
+│  │  └───────────────────────────────────────────────────┘ │   │
+│  │                                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                         │                                       │
+│                         ▼                                       │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                                                         │   │
+│  │  Titan 编译输出:                                        │   │
+│  │                                                         │   │
+│  │  ┌───────────────────────┐  ┌───────────────────────┐  │   │
+│  │  │                       │  │                       │  │   │
+│  │  │  On-Chain Program     │  │  Off-Chain Client     │  │   │
+│  │  │  (SBF Binary)         │  │  (Native Binary)      │  │   │
+│  │  │                       │  │                       │  │   │
+│  │  │  • Verifier only      │  │  • Proof generation   │  │   │
+│  │  │  • ~10KB 极小体积     │  │  • Full logic         │  │   │
+│  │  │  • ~50K CU            │  │  • User interaction   │  │   │
+│  │  │                       │  │                       │  │   │
+│  │  └───────────────────────┘  └───────────────────────┘  │   │
+│  │            │                          │                 │   │
+│  │            │                          │                 │   │
+│  │            ▼                          ▼                 │   │
+│  │      Solana Chain              User's Machine           │   │
+│  │                                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│  ─────────────────────────────────────────────────────────────  │
+│                                                                 │
+│  底层 ZK 库 (通过 C ABI 调用):                                   │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                                                         │   │
+│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────┐ │   │
+│  │  │ libnoir.a   │  │ liblight.a  │  │  libarkworks.a  │ │   │
+│  │  │ (Noir/Rust) │  │ (Light/Rust)│  │  (Arkworks/Rust)│ │   │
+│  │  └──────┬──────┘  └──────┬──────┘  └────────┬────────┘ │   │
+│  │         │                │                  │          │   │
+│  │         └────────────────┼──────────────────┘          │   │
+│  │                          │                              │   │
+│  │                          ▼                              │   │
+│  │              ┌───────────────────────┐                  │   │
+│  │              │     C ABI Interface   │                  │   │
+│  │              │   extern "C" fn ...   │                  │   │
+│  │              └───────────────────────┘                  │   │
+│  │                          │                              │   │
+│  │                          ▼                              │   │
+│  │              ┌───────────────────────┐                  │   │
+│  │              │  Zig @cImport / FFI   │                  │   │
+│  │              │  titan.zk module      │                  │   │
+│  │              └───────────────────────┘                  │   │
+│  │                                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.41.4 核心代码: 纯 Zig 隐私 Swap
+
+```zig
+// src/dex.zig
+// Titan Privacy DEX - Pure Zig Implementation
+
+const std = @import("std");
+const titan = @import("titan");
+const zk = titan.zk;
+
+// ============================================================
+// 程序入口点
+// ============================================================
+
+pub fn main(ctx: titan.Context) !void {
+    // 根据指令类型分发
+    const instruction = ctx.parse_instruction();
+
+    switch (instruction.tag) {
+        .private_swap => try private_swap(ctx, instruction.data),
+        .add_liquidity => try add_liquidity(ctx, instruction.data),
+        .remove_liquidity => try remove_liquidity(ctx, instruction.data),
+    }
+}
+
+// ============================================================
+// 隐私交换核心逻辑
+// ============================================================
+
+fn private_swap(ctx: titan.Context, data: []const u8) !void {
+    // ────────────────────────────────────────────────────────
+    // Step 1: 读取输入
+    // ────────────────────────────────────────────────────────
+
+    // 私有输入 (只有用户知道)
+    const amount_in = ctx.read_private_input(u64);
+    const user_secret = ctx.read_private_input([32]u8);
+
+    // 公开输入 (链上可见)
+    const min_amount_out = ctx.read_public_input(u64);
+    const pool_state_hash = ctx.read_public_input([32]u8);
+
+    // 获取池子状态
+    const pool = try ctx.load_account(Pool, data[0..32]);
+
+    // ────────────────────────────────────────────────────────
+    // Step 2: 链下计算 (Client-Side Execution)
+    // ────────────────────────────────────────────────────────
+    //
+    // 这一步在用户本地运行，Solana 链上完全不知道!
+    //
+
+    // 验证池子状态哈希
+    const computed_pool_hash = pool.compute_hash();
+    if (!std.mem.eql(u8, &computed_pool_hash, &pool_state_hash)) {
+        return error.PoolStateMismatch;
+    }
+
+    // AMM 计算: x * y = k
+    const amount_out = calculate_amm_output(
+        pool.reserve_a,
+        pool.reserve_b,
+        amount_in,
+        pool.fee_rate,
+    );
+
+    // ────────────────────────────────────────────────────────
+    // Step 3: ZK 约束定义
+    // ────────────────────────────────────────────────────────
+    //
+    // 这些约束会被编译成 ZK 电路
+    //
+
+    // 约束 1: 输出金额 >= 最小输出 (滑点保护)
+    try zk.assert_ge(amount_out, min_amount_out);
+
+    // 约束 2: 输入金额 > 0
+    try zk.assert_gt(amount_in, 0);
+
+    // 约束 3: 用户签名有效
+    try zk.assert_signature_valid(user_secret, ctx.signer());
+
+    // 约束 4: AMM 公式正确
+    try zk.assert_amm_invariant(
+        pool.reserve_a,
+        pool.reserve_b,
+        amount_in,
+        amount_out,
+    );
+
+    // ────────────────────────────────────────────────────────
+    // Step 4: 生成证明 & 提交状态
+    // ────────────────────────────────────────────────────────
+
+    // 计算新池子状态
+    const new_pool = Pool{
+        .reserve_a = pool.reserve_a + amount_in,
+        .reserve_b = pool.reserve_b - amount_out,
+        .fee_rate = pool.fee_rate,
+        .total_lp = pool.total_lp,
+    };
+
+    // 生成 ZK 证明
+    const proof = try zk.generate_proof();
+
+    // 计算 nullifier (防双花)
+    const nullifier = titan.hash(.{
+        user_secret,
+        amount_in,
+        ctx.slot(),
+    });
+
+    // 提交到链上
+    try titan.commit_state_change(.{
+        .proof = proof,
+        .new_state_root = new_pool.compute_hash(),
+        .nullifier = nullifier,
+        .public_outputs = .{
+            .amount_out_commitment = titan.pedersen_hash(.{
+                amount_out,
+                user_secret,
+            }),
+        },
+    });
+}
+
+// ============================================================
+// AMM 数学计算
+// ============================================================
+
+/// 计算 AMM 输出: x * y = k
+fn calculate_amm_output(
+    reserve_a: u64,
+    reserve_b: u64,
+    amount_in: u64,
+    fee_rate: u16,
+) u64 {
+    // 扣除手续费
+    const amount_in_with_fee = amount_in * (10000 - fee_rate);
+
+    // x * y = k 公式
+    const numerator = amount_in_with_fee * reserve_b;
+    const denominator = reserve_a * 10000 + amount_in_with_fee;
+
+    return @intCast(numerator / denominator);
+}
+
+// ============================================================
+// 数据结构
+// ============================================================
+
+/// AMM 池子状态
+const Pool = struct {
+    reserve_a: u64,
+    reserve_b: u64,
+    fee_rate: u16,
+    total_lp: u64,
+
+    /// 计算状态哈希
+    pub fn compute_hash(self: *const Pool) [32]u8 {
+        return titan.hash(.{
+            self.reserve_a,
+            self.reserve_b,
+            self.fee_rate,
+            self.total_lp,
+        });
+    }
+};
+
+// ============================================================
+// 测试
+// ============================================================
+
+test "amm output calculation" {
+    // 1:1 池子，10000 reserve
+    const out = calculate_amm_output(10000, 10000, 100, 30);
+
+    // 扣除 0.3% 手续费后，应该约等于 99
+    try std.testing.expect(out >= 98 and out <= 100);
+}
+
+test "pool hash consistency" {
+    const pool = Pool{
+        .reserve_a = 10000,
+        .reserve_b = 10000,
+        .fee_rate = 30,
+        .total_lp = 10000,
+    };
+
+    const hash1 = pool.compute_hash();
+    const hash2 = pool.compute_hash();
+
+    try std.testing.expectEqualSlices(u8, &hash1, &hash2);
+}
+```
+
+#### 18.41.5 Titan SDK 核心模块
+
+```zig
+// titan/sdk.zig
+// Titan SDK - Pure Zig Implementation
+
+const std = @import("std");
+const builtin = @import("builtin");
+
+// ============================================================
+// 导出的公开接口
+// ============================================================
+
+pub const Context = @import("context.zig").Context;
+pub const zk = @import("zk.zig");
+pub const solana = @import("solana.zig");
+pub const crypto = @import("crypto.zig");
+pub const types = @import("types.zig");
+
+// ============================================================
+// 哈希函数
+// ============================================================
+
+/// 通用哈希函数 (SHA-256)
+pub fn hash(data: anytype) [32]u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+
+    // 使用 comptime 反射序列化任意类型
+    inline for (std.meta.fields(@TypeOf(data))) |field| {
+        const value = @field(data, field.name);
+        hasher.update(std.mem.asBytes(&value));
+    }
+
+    return hasher.finalResult();
+}
+
+/// Pedersen 哈希 (ZK 友好)
+pub fn pedersen_hash(data: anytype) [32]u8 {
+    // 调用底层 C 库
+    return zk.c_pedersen_hash(serialize(data));
+}
+
+// ============================================================
+// 状态提交
+// ============================================================
+
+pub const StateChange = struct {
+    proof: zk.Proof,
+    new_state_root: [32]u8,
+    nullifier: [32]u8,
+    public_outputs: anytype,
+};
+
+/// 提交状态变更到链上
+pub fn commit_state_change(change: StateChange) !void {
+    // 序列化证明
+    const proof_data = change.proof.serialize();
+
+    // 构建指令数据
+    var ix_data = std.ArrayList(u8).init(std.heap.page_allocator);
+    defer ix_data.deinit();
+
+    // 指令标识符
+    try ix_data.append(0x01); // COMMIT_STATE
+
+    // 证明数据
+    try ix_data.appendSlice(proof_data);
+
+    // 新状态根
+    try ix_data.appendSlice(&change.new_state_root);
+
+    // Nullifier
+    try ix_data.appendSlice(&change.nullifier);
+
+    // 调用 Solana syscall
+    try solana.invoke_signed(&.{
+        .program_id = solana.VERIFIER_PROGRAM_ID,
+        .accounts = &.{},
+        .data = ix_data.items,
+    }, &.{});
+}
+
+// ============================================================
+// 序列化
+// ============================================================
+
+fn serialize(data: anytype) []const u8 {
+    var buffer: [1024]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buffer);
+    const writer = fbs.writer();
+
+    inline for (std.meta.fields(@TypeOf(data))) |field| {
+        const value = @field(data, field.name);
+        writer.writeAll(std.mem.asBytes(&value)) catch unreachable;
+    }
+
+    return fbs.getWritten();
+}
+```
+
+#### 18.41.6 ZK 模块: C ABI 绑定
+
+```zig
+// titan/zk.zig
+// Titan ZK Module - C ABI Bindings for Noir/Arkworks
+
+const std = @import("std");
+
+// ============================================================
+// C 外部函数声明
+// ============================================================
+//
+// 这些函数由预编译的 Rust 库提供 (libnoir_wrapper.a)
+//
+
+extern "C" {
+    /// 初始化 ZK 电路
+    fn noir_init_circuit(circuit_data: [*]const u8, len: usize) ?*anyopaque;
+
+    /// 生成证明
+    fn noir_generate_proof(
+        circuit: *anyopaque,
+        private_inputs: [*]const u8,
+        private_len: usize,
+        public_inputs: [*]const u8,
+        public_len: usize,
+        proof_out: [*]u8,
+    ) c_int;
+
+    /// 验证证明
+    fn noir_verify_proof(
+        circuit: *anyopaque,
+        proof: [*]const u8,
+        proof_len: usize,
+        public_inputs: [*]const u8,
+        public_len: usize,
+    ) c_int;
+
+    /// Pedersen 哈希
+    fn noir_pedersen_hash(
+        data: [*]const u8,
+        len: usize,
+        out: [*]u8,
+    ) void;
+
+    /// 释放电路资源
+    fn noir_free_circuit(circuit: *anyopaque) void;
+}
+
+// ============================================================
+// Zig 封装
+// ============================================================
+
+/// ZK 证明
+pub const Proof = struct {
+    data: [256]u8,
+    public_inputs: []const u8,
+
+    pub fn serialize(self: *const Proof) []const u8 {
+        return &self.data;
+    }
+};
+
+/// ZK 电路
+pub const Circuit = struct {
+    handle: *anyopaque,
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator, circuit_data: []const u8) !Circuit {
+        const handle = noir_init_circuit(circuit_data.ptr, circuit_data.len) orelse
+            return error.CircuitInitFailed;
+
+        return Circuit{
+            .handle = handle,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *Circuit) void {
+        noir_free_circuit(self.handle);
+    }
+
+    pub fn prove(
+        self: *Circuit,
+        private_inputs: []const u8,
+        public_inputs: []const u8,
+    ) !Proof {
+        var proof_data: [256]u8 = undefined;
+
+        const result = noir_generate_proof(
+            self.handle,
+            private_inputs.ptr,
+            private_inputs.len,
+            public_inputs.ptr,
+            public_inputs.len,
+            &proof_data,
+        );
+
+        if (result != 0) {
+            return error.ProofGenerationFailed;
+        }
+
+        return Proof{
+            .data = proof_data,
+            .public_inputs = public_inputs,
+        };
+    }
+
+    pub fn verify(
+        self: *Circuit,
+        proof: *const Proof,
+        public_inputs: []const u8,
+    ) !bool {
+        const result = noir_verify_proof(
+            self.handle,
+            &proof.data,
+            proof.data.len,
+            public_inputs.ptr,
+            public_inputs.len,
+        );
+
+        return result == 0;
+    }
+};
+
+// ============================================================
+// 约束 API (编译时收集)
+// ============================================================
+
+/// 当前约束上下文
+var constraint_buffer: std.ArrayList(Constraint) = undefined;
+
+const Constraint = struct {
+    tag: ConstraintTag,
+    data: [64]u8,
+};
+
+const ConstraintTag = enum(u8) {
+    assert_eq,
+    assert_gt,
+    assert_ge,
+    assert_signature,
+    assert_amm,
+};
+
+/// 断言: a >= b
+pub fn assert_ge(a: anytype, b: anytype) !void {
+    try constraint_buffer.append(.{
+        .tag = .assert_ge,
+        .data = serialize_pair(a, b),
+    });
+}
+
+/// 断言: a > b
+pub fn assert_gt(a: anytype, b: anytype) !void {
+    try constraint_buffer.append(.{
+        .tag = .assert_gt,
+        .data = serialize_pair(a, b),
+    });
+}
+
+/// 断言: 签名有效
+pub fn assert_signature_valid(secret: [32]u8, pubkey: [32]u8) !void {
+    var data: [64]u8 = undefined;
+    @memcpy(data[0..32], &secret);
+    @memcpy(data[32..64], &pubkey);
+
+    try constraint_buffer.append(.{
+        .tag = .assert_signature,
+        .data = data,
+    });
+}
+
+/// 断言: AMM 不变量
+pub fn assert_amm_invariant(
+    reserve_a: u64,
+    reserve_b: u64,
+    amount_in: u64,
+    amount_out: u64,
+) !void {
+    var data: [64]u8 = undefined;
+    @memcpy(data[0..8], std.mem.asBytes(&reserve_a));
+    @memcpy(data[8..16], std.mem.asBytes(&reserve_b));
+    @memcpy(data[16..24], std.mem.asBytes(&amount_in));
+    @memcpy(data[24..32], std.mem.asBytes(&amount_out));
+
+    try constraint_buffer.append(.{
+        .tag = .assert_amm,
+        .data = data,
+    });
+}
+
+/// 生成证明 (消费所有约束)
+pub fn generate_proof() !Proof {
+    // 将约束编译成电路输入
+    const circuit_input = try compile_constraints(constraint_buffer.items);
+    defer constraint_buffer.clearAndFree();
+
+    // 调用底层证明器
+    var circuit = try Circuit.init(
+        std.heap.page_allocator,
+        @embedFile("../circuits/swap.bin"),
+    );
+    defer circuit.deinit();
+
+    return circuit.prove(
+        circuit_input.private,
+        circuit_input.public,
+    );
+}
+
+/// C Pedersen 哈希封装
+pub fn c_pedersen_hash(data: []const u8) [32]u8 {
+    var out: [32]u8 = undefined;
+    noir_pedersen_hash(data.ptr, data.len, &out);
+    return out;
+}
+
+fn serialize_pair(a: anytype, b: anytype) [64]u8 {
+    var data: [64]u8 = undefined;
+    @memcpy(data[0..@sizeOf(@TypeOf(a))], std.mem.asBytes(&a));
+    @memcpy(data[32..32 + @sizeOf(@TypeOf(b))], std.mem.asBytes(&b));
+    return data;
+}
+
+fn compile_constraints(constraints: []const Constraint) !struct {
+    private: []const u8,
+    public: []const u8,
+} {
+    // TODO: 实现约束到电路输入的编译
+    return .{
+        .private = &[_]u8{},
+        .public = &[_]u8{},
+    };
+}
+```
+
+#### 18.41.7 Titan CLI
+
+```zig
+// titan-cli/main.zig
+// Titan CLI - Build Tool for Solana + ZK
+
+const std = @import("std");
+const builtin = @import("builtin");
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, args);
+
+    if (args.len < 2) {
+        try printUsage();
+        return;
+    }
+
+    const command = args[1];
+
+    if (std.mem.eql(u8, command, "build")) {
+        try buildCommand(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "test")) {
+        try testCommand(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "deploy")) {
+        try deployCommand(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "prove")) {
+        try proveCommand(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "verify")) {
+        try verifyCommand(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "init")) {
+        try initCommand(allocator, args[2..]);
+    } else {
+        try printUsage();
+    }
+}
+
+fn printUsage() !void {
+    const stdout = std.io.getStdOut().writer();
+    try stdout.print(
+        \\
+        \\Titan CLI - The Zig Toolchain for Solana Privacy
+        \\
+        \\USAGE:
+        \\  titan <command> [options]
+        \\
+        \\COMMANDS:
+        \\  init      Initialize a new Titan project
+        \\  build     Compile Zig to SBF (Solana Binary Format)
+        \\  test      Run tests locally
+        \\  deploy    Deploy program to Solana
+        \\  prove     Generate ZK proof for a transaction
+        \\  verify    Verify a ZK proof
+        \\
+        \\OPTIONS:
+        \\  --help    Show this help message
+        \\  --version Show version
+        \\
+        \\EXAMPLES:
+        \\  titan init my_dex
+        \\  titan build --release
+        \\  titan deploy --cluster devnet
+        \\  titan prove --input tx.json
+        \\
+    , .{});
+}
+
+/// 构建命令
+fn buildCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    const stdout = std.io.getStdOut().writer();
+
+    try stdout.print("🔨 Building Titan program...\n", .{});
+
+    // 解析参数
+    var release = false;
+    var target_dir: []const u8 = "target";
+
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "--release")) {
+            release = true;
+        } else if (std.mem.startsWith(u8, arg, "--output=")) {
+            target_dir = arg[9..];
+        }
+    }
+
+    // 构建链上程序 (SBF)
+    try stdout.print("  → Compiling on-chain program (SBF)...\n", .{});
+    try compileToSBF(allocator, release, target_dir);
+
+    // 构建链下客户端
+    try stdout.print("  → Compiling off-chain client...\n", .{});
+    try compileClient(allocator, release, target_dir);
+
+    // 链接 ZK 库
+    try stdout.print("  → Linking ZK libraries...\n", .{});
+    try linkZKLibraries(allocator, target_dir);
+
+    try stdout.print("✅ Build complete!\n", .{});
+    try stdout.print("   On-chain:  {s}/program.so\n", .{target_dir});
+    try stdout.print("   Off-chain: {s}/client\n", .{target_dir});
+}
+
+/// 编译到 SBF
+fn compileToSBF(allocator: std.mem.Allocator, release: bool, target_dir: []const u8) !void {
+    var zig_args = std.ArrayList([]const u8).init(allocator);
+    defer zig_args.deinit();
+
+    try zig_args.appendSlice(&.{
+        "zig",
+        "build-lib",
+        "-target",
+        "bpfel-unknown-unknown", // Solana SBF
+        "-O",
+        if (release) "ReleaseFast" else "Debug",
+        "-fno-stack-check",
+        "--name",
+        "program",
+        "src/main.zig",
+    });
+
+    var child = std.process.Child.init(zig_args.items, allocator);
+    _ = try child.spawnAndWait();
+}
+
+/// 编译客户端
+fn compileClient(allocator: std.mem.Allocator, release: bool, target_dir: []const u8) !void {
+    _ = allocator;
+    _ = release;
+    _ = target_dir;
+    // 编译本地可执行文件
+    // TODO: 实现
+}
+
+/// 链接 ZK 库
+fn linkZKLibraries(allocator: std.mem.Allocator, target_dir: []const u8) !void {
+    _ = allocator;
+    _ = target_dir;
+    // 链接 libnoir_wrapper.a
+    // TODO: 实现
+}
+
+/// 测试命令
+fn testCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    _ = args;
+    const stdout = std.io.getStdOut().writer();
+
+    try stdout.print("🧪 Running tests...\n", .{});
+
+    var child = std.process.Child.init(&.{ "zig", "build", "test" }, allocator);
+    _ = try child.spawnAndWait();
+}
+
+/// 部署命令
+fn deployCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    const stdout = std.io.getStdOut().writer();
+
+    var cluster: []const u8 = "devnet";
+
+    for (args) |arg| {
+        if (std.mem.startsWith(u8, arg, "--cluster=")) {
+            cluster = arg[10..];
+        }
+    }
+
+    try stdout.print("🚀 Deploying to {s}...\n", .{cluster});
+
+    // 调用 solana deploy
+    var child = std.process.Child.init(&.{
+        "solana",
+        "program",
+        "deploy",
+        "target/program.so",
+        "--url",
+        cluster,
+    }, allocator);
+    _ = try child.spawnAndWait();
+}
+
+/// 证明生成命令
+fn proveCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    _ = allocator;
+    const stdout = std.io.getStdOut().writer();
+
+    var input_file: []const u8 = "input.json";
+
+    for (args) |arg| {
+        if (std.mem.startsWith(u8, arg, "--input=")) {
+            input_file = arg[8..];
+        }
+    }
+
+    try stdout.print("🔐 Generating ZK proof from {s}...\n", .{input_file});
+
+    // TODO: 调用证明生成逻辑
+}
+
+/// 验证命令
+fn verifyCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    _ = allocator;
+    _ = args;
+    const stdout = std.io.getStdOut().writer();
+
+    try stdout.print("✅ Verifying proof...\n", .{});
+
+    // TODO: 实现
+}
+
+/// 初始化命令
+fn initCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    const stdout = std.io.getStdOut().writer();
+
+    const project_name = if (args.len > 0) args[0] else "my_titan_project";
+
+    try stdout.print("📦 Initializing Titan project: {s}\n", .{project_name});
+
+    // 创建目录结构
+    try std.fs.cwd().makePath(project_name);
+    try std.fs.cwd().makePath(try std.fmt.allocPrint(
+        allocator,
+        "{s}/src",
+        .{project_name},
+    ));
+    try std.fs.cwd().makePath(try std.fmt.allocPrint(
+        allocator,
+        "{s}/circuits",
+        .{project_name},
+    ));
+
+    // 创建模板文件
+    try createTemplateFiles(allocator, project_name);
+
+    try stdout.print("✅ Project initialized!\n", .{});
+    try stdout.print("   cd {s} && titan build\n", .{project_name});
+}
+
+fn createTemplateFiles(allocator: std.mem.Allocator, project_name: []const u8) !void {
+    // build.zig
+    const build_zig =
+        \\const std = @import("std");
+        \\
+        \\pub fn build(b: *std.Build) void {
+        \\    const target = b.standardTargetOptions(.{});
+        \\    const optimize = b.standardOptimizeOption(.{});
+        \\
+        \\    const exe = b.addExecutable(.{
+        \\        .name = "client",
+        \\        .root_source_file = b.path("src/main.zig"),
+        \\        .target = target,
+        \\        .optimize = optimize,
+        \\    });
+        \\
+        \\    exe.linkSystemLibrary("noir_wrapper");
+        \\    b.installArtifact(exe);
+        \\}
+    ;
+
+    const build_path = try std.fmt.allocPrint(
+        allocator,
+        "{s}/build.zig",
+        .{project_name},
+    );
+
+    const file = try std.fs.cwd().createFile(build_path, .{});
+    defer file.close();
+    try file.writeAll(build_zig);
+
+    // src/main.zig 模板
+    const main_zig =
+        \\const std = @import("std");
+        \\const titan = @import("titan");
+        \\
+        \\pub fn main(ctx: titan.Context) !void {
+        \\    // Your Titan program starts here
+        \\    _ = ctx;
+        \\}
+    ;
+
+    const main_path = try std.fmt.allocPrint(
+        allocator,
+        "{s}/src/main.zig",
+        .{project_name},
+    );
+
+    const main_file = try std.fs.cwd().createFile(main_path, .{});
+    defer main_file.close();
+    try main_file.writeAll(main_zig);
+}
+```
+
+#### 18.41.8 C ABI Wrapper (Rust 侧)
+
+```rust
+// noir_wrapper/src/lib.rs
+// Rust wrapper providing C ABI for Noir prover
+
+use std::ffi::c_void;
+use std::slice;
+
+use noir_driver::{
+    compile_circuit, generate_proof, verify_proof, Circuit,
+};
+
+/// 不透明的电路句柄
+pub struct CircuitHandle {
+    circuit: Circuit,
+}
+
+/// 初始化电路
+#[no_mangle]
+pub extern "C" fn noir_init_circuit(
+    circuit_data: *const u8,
+    len: usize,
+) -> *mut c_void {
+    let data = unsafe { slice::from_raw_parts(circuit_data, len) };
+
+    match compile_circuit(data) {
+        Ok(circuit) => {
+            let handle = Box::new(CircuitHandle { circuit });
+            Box::into_raw(handle) as *mut c_void
+        }
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// 生成证明
+#[no_mangle]
+pub extern "C" fn noir_generate_proof(
+    circuit: *mut c_void,
+    private_inputs: *const u8,
+    private_len: usize,
+    public_inputs: *const u8,
+    public_len: usize,
+    proof_out: *mut u8,
+) -> i32 {
+    let handle = unsafe { &*(circuit as *mut CircuitHandle) };
+
+    let private = unsafe { slice::from_raw_parts(private_inputs, private_len) };
+    let public = unsafe { slice::from_raw_parts(public_inputs, public_len) };
+
+    match generate_proof(&handle.circuit, private, public) {
+        Ok(proof) => {
+            let out = unsafe { slice::from_raw_parts_mut(proof_out, 256) };
+            out.copy_from_slice(&proof);
+            0
+        }
+        Err(_) => -1,
+    }
+}
+
+/// 验证证明
+#[no_mangle]
+pub extern "C" fn noir_verify_proof(
+    circuit: *mut c_void,
+    proof: *const u8,
+    proof_len: usize,
+    public_inputs: *const u8,
+    public_len: usize,
+) -> i32 {
+    let handle = unsafe { &*(circuit as *mut CircuitHandle) };
+
+    let proof_data = unsafe { slice::from_raw_parts(proof, proof_len) };
+    let public = unsafe { slice::from_raw_parts(public_inputs, public_len) };
+
+    match verify_proof(&handle.circuit, proof_data, public) {
+        Ok(true) => 0,
+        Ok(false) => 1,
+        Err(_) => -1,
+    }
+}
+
+/// Pedersen 哈希
+#[no_mangle]
+pub extern "C" fn noir_pedersen_hash(
+    data: *const u8,
+    len: usize,
+    out: *mut u8,
+) {
+    let input = unsafe { slice::from_raw_parts(data, len) };
+    let hash = noir_crypto::pedersen_hash(input);
+
+    let output = unsafe { slice::from_raw_parts_mut(out, 32) };
+    output.copy_from_slice(&hash);
+}
+
+/// 释放电路
+#[no_mangle]
+pub extern "C" fn noir_free_circuit(circuit: *mut c_void) {
+    if !circuit.is_null() {
+        unsafe {
+            drop(Box::from_raw(circuit as *mut CircuitHandle));
+        }
+    }
+}
+```
+
+#### 18.41.9 为什么纯 Zig 更好？
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                 │
+│                  Pure Zig 优势分析                               │
+│                                                                 │
+│  "在裸金属上跳舞" (Dancing on Bare Metal)                        │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  1. Binary Size (体积优势)                                       │
+│  ─────────────────────────────────────────────────────────────  │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                                                         │   │
+│  │  Rust 编译的 SBF:                                       │   │
+│  │  • 即使优化后也很大 (~100KB - 500KB)                    │   │
+│  │  • 容易触碰 Solana 限制                                 │   │
+│  │  • 部署成本高                                           │   │
+│  │                                                         │   │
+│  │  Titan Zig 编译的 SBF:                                  │   │
+│  │  • 极小体积 (~10KB - 50KB)                              │   │
+│  │  • 远离 Solana 限制                                     │   │
+│  │  • 部署成本低                                           │   │
+│  │                                                         │   │
+│  │  ┌──────────────────────────────────────────────────┐  │   │
+│  │  │          Binary Size Comparison                  │  │   │
+│  │  │                                                  │  │   │
+│  │  │  Rust     ████████████████████████████  ~200KB   │  │   │
+│  │  │  Zig      ██████                        ~30KB    │  │   │
+│  │  │                                                  │  │   │
+│  │  │           ← 6x smaller!                          │  │   │
+│  │  └──────────────────────────────────────────────────┘  │   │
+│  │                                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│  2. Zero-Overhead Abstraction (零开销抽象)                       │
+│  ─────────────────────────────────────────────────────────────  │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                                                         │   │
+│  │  Python + FFI 方案:                                     │   │
+│  │                                                         │   │
+│  │  ┌──────┐   ┌──────┐   ┌──────┐   ┌──────┐            │   │
+│  │  │Python│──►│ GC   │──►│ FFI  │──►│ Zig  │            │   │
+│  │  └──────┘   └──────┘   └──────┘   └──────┘            │   │
+│  │                                                         │   │
+│  │  开销: 解释器 + GC + 序列化 + 调用开销                  │   │
+│  │                                                         │   │
+│  │  Pure Zig 方案:                                         │   │
+│  │                                                         │   │
+│  │  ┌────────────────────────────────────────────────┐    │   │
+│  │  │                    Zig                          │    │   │
+│  │  │              (直接编译到机器码)                 │    │   │
+│  │  └────────────────────────────────────────────────┘    │   │
+│  │                                                         │   │
+│  │  开销: ZERO                                             │   │
+│  │                                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│  3. Compute Units (计算单元优势)                                 │
+│  ─────────────────────────────────────────────────────────────  │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                                                         │   │
+│  │  Solana 对 CU 斤斤计较:                                 │   │
+│  │                                                         │   │
+│  │  • 每笔交易有 CU 上限 (200K default, 1.4M max)         │   │
+│  │  • CU 越少 → 优先级越高 → 确认越快                     │   │
+│  │  • CU 越少 → 费用越低                                  │   │
+│  │                                                         │   │
+│  │  Zig 的 CU 优势:                                        │   │
+│  │                                                         │   │
+│  │  • 无运行时开销                                         │   │
+│  │  • 精确的内存控制                                       │   │
+│  │  • comptime 优化减少运行时计算                          │   │
+│  │                                                         │   │
+│  │  ┌──────────────────────────────────────────────────┐  │   │
+│  │  │         CU Usage Comparison                      │  │   │
+│  │  │                                                  │  │   │
+│  │  │  Rust     ████████████████████████  ~180K CU     │  │   │
+│  │  │  Zig      ██████████████            ~100K CU     │  │   │
+│  │  │                                                  │  │   │
+│  │  │           ← 45% reduction!                       │  │   │
+│  │  └──────────────────────────────────────────────────┘  │   │
+│  │                                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│  4. Safety vs Simplicity (安全性与简洁性平衡)                    │
+│  ─────────────────────────────────────────────────────────────  │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                                                         │   │
+│  │  ┌──────────────────────────────────────────────────┐  │   │
+│  │  │                                                  │  │   │
+│  │  │     Safety                                       │  │   │
+│  │  │       ▲                                          │  │   │
+│  │  │       │                                          │  │   │
+│  │  │       │      ┌─────────┐                         │  │   │
+│  │  │       │      │  Rust   │  (过度复杂)             │  │   │
+│  │  │       │      └────┬────┘                         │  │   │
+│  │  │       │           │                              │  │   │
+│  │  │       │    ┌──────┴──────┐                       │  │   │
+│  │  │       │    │     Zig     │  ← 最佳平衡点         │  │   │
+│  │  │       │    └──────┬──────┘                       │  │   │
+│  │  │       │           │                              │  │   │
+│  │  │       │      ┌────┴────┐                         │  │   │
+│  │  │       │      │    C    │  (过于危险)             │  │   │
+│  │  │       └──────┴─────────┴───────────► Simplicity │  │   │
+│  │  │                                                  │  │   │
+│  │  └──────────────────────────────────────────────────┘  │   │
+│  │                                                         │  │
+│  │  Zig: 比 C 安全，比 Rust 简单。                         │   │
+│  │  编写 Solana 底层逻辑的完美中间地带。                   │   │
+│  │                                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.41.10 实现路径: 两种方案
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                 │
+│                    Hackathon 实现方案                            │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  方案 A: Titan + Noir (冲击 Aztec 奖金 $10K)                     │
+│  ─────────────────────────────────────────────────────────────  │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                                                         │   │
+│  │  原理:                                                  │   │
+│  │  • Noir 后端是 Rust，但可编译成静态库                   │   │
+│  │  • 通过 C ABI 调用                                      │   │
+│  │                                                         │   │
+│  │  实现:                                                  │   │
+│  │                                                         │   │
+│  │  ┌─────────────┐      ┌──────────────────────────────┐ │   │
+│  │  │             │      │                              │ │   │
+│  │  │  Noir Rust  │──────►  libnoir_wrapper.a          │ │   │
+│  │  │  Crate      │ cbind│  (静态库)                    │ │   │
+│  │  │             │      │                              │ │   │
+│  │  └─────────────┘      └───────────────┬──────────────┘ │   │
+│  │                                       │                │   │
+│  │                                       ▼                │   │
+│  │  ┌────────────────────────────────────────────────────┐│   │
+│  │  │                                                    ││   │
+│  │  │  Titan Zig SDK                                     ││   │
+│  │  │  @cImport("noir_wrapper.h")                        ││   │
+│  │  │                                                    ││   │
+│  │  └────────────────────────────────────────────────────┘│   │
+│  │                                                         │   │
+│  │  叙事:                                                  │   │
+│  │  "Titan OS brings Noir to Zig developers               │   │
+│  │   via zero-cost interop."                              │   │
+│  │                                                         │   │
+│  │  (Titan OS 通过零成本互操作性将 Noir 带给了 Zig 开发者) │   │
+│  │                                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│  方案 B: Titan + Light Protocol (冲击 Open Track $18K)           │
+│  ─────────────────────────────────────────────────────────────  │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                                                         │   │
+│  │  原理:                                                  │   │
+│  │  • Light Protocol 做 ZK Compression (状态压缩)          │   │
+│  │  • 有 Rust SDK                                          │   │
+│  │                                                         │   │
+│  │  实现:                                                  │   │
+│  │                                                         │   │
+│  │  ┌─────────────┐      ┌──────────────────────────────┐ │   │
+│  │  │             │      │                              │ │   │
+│  │  │ Light Proto │──────►  liblight_wrapper.a         │ │   │
+│  │  │ Rust SDK    │ cbind│  (静态库)                    │ │   │
+│  │  │             │      │                              │ │   │
+│  │  └─────────────┘      └───────────────┬──────────────┘ │   │
+│  │                                       │                │   │
+│  │                                       ▼                │   │
+│  │  ┌────────────────────────────────────────────────────┐│   │
+│  │  │                                                    ││   │
+│  │  │  Titan Zig SDK                                     ││   │
+│  │  │  titan.compression module                          ││   │
+│  │  │                                                    ││   │
+│  │  └────────────────────────────────────────────────────┘│   │
+│  │                                                         │   │
+│  │  叙事:                                                  │   │
+│  │  "Building the first Zig-native SDK                    │   │
+│  │   for Solana ZK Compression."                          │   │
+│  │                                                         │   │
+│  │  (构建首个用于 Solana ZK 压缩的 Zig 原生 SDK)           │   │
+│  │                                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│  推荐: 方案 A (Noir)                                             │
+│  ─────────────────────────────────────────────────────────────  │
+│                                                                 │
+│  理由:                                                           │
+│  1. Aztec 是明确的赞助商，更容易匹配                            │
+│  2. Noir 的 "Write Code, Not Proofs" 理念与 Titan 一致          │
+│  3. ZK AMM 是更创新的应用场景                                   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.41.11 更新后的 Pitch
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                 │
+│               Titan OS - Pure Zig Pitch                          │
+│                                                                 │
+│  "The Foundry for Zig on Solana"                                │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  痛点 (Problem):                                                 │
+│  ─────────────────────────────────────────────────────────────  │
+│                                                                 │
+│  "Rust is great, but it's not perfect for Solana."              │
+│                                                                 │
+│  • Rust 编译的 SBF 太大                                         │
+│  • Rust 学习曲线陡峭                                            │
+│  • Rust 的所有权模型在 Solana 上过度复杂                        │
+│  • 缺乏原生 ZK 集成工具链                                       │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  方案 (Solution):                                                │
+│  ─────────────────────────────────────────────────────────────  │
+│                                                                 │
+│  "Titan OS: The Zig Toolchain for Solana Privacy"               │
+│                                                                 │
+│  ```zig                                                         │
+│  const titan = @import("titan");                                │
+│                                                                 │
+│  pub fn main(ctx: titan.Context) !void {                        │
+│      const amount = ctx.read_private_input(u64);                │
+│      try titan.zk.assert_ge(output, min_out);                   │
+│      titan.commit(titan.zk.generate_proof());                   │
+│  }                                                              │
+│  ```                                                            │
+│                                                                 │
+│  一份代码，两种输出:                                             │
+│  • On-Chain: 精简 Verifier (SBF)                                │
+│  • Off-Chain: Native Prover (本地)                              │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  技术亮点 (Tech Highlights):                                     │
+│  ─────────────────────────────────────────────────────────────  │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                                                         │   │
+│  │  1. 6x Smaller Binary                                   │   │
+│  │     Zig SBF ~30KB vs Rust SBF ~200KB                    │   │
+│  │                                                         │   │
+│  │  2. 45% Less Compute Units                              │   │
+│  │     更低费用，更高优先级                                │   │
+│  │                                                         │   │
+│  │  3. Zero-Cost C ABI                                     │   │
+│  │     无缝调用 Noir ZK 库                                 │   │
+│  │                                                         │   │
+│  │  4. comptime Magic                                      │   │
+│  │     编译时生成约束，运行时零开销                        │   │
+│  │                                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  目标受众 (Target Audience):                                     │
+│  ─────────────────────────────────────────────────────────────  │
+│                                                                 │
+│  NOT for beginners.                                             │
+│  FOR system engineers who demand:                               │
+│                                                                 │
+│  • Maximum performance                                          │
+│  • Minimal abstraction                                          │
+│  • Direct hardware control                                      │
+│  • Privacy by default                                           │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Demo (What we built):                                           │
+│  ─────────────────────────────────────────────────────────────  │
+│                                                                 │
+│  1. titan-sdk: Zig 库 for Solana + ZK                           │
+│  2. titan-cli: build / test / deploy / prove                    │
+│  3. titan-dex: 隐私 Swap Demo (Devnet)                          │
+│                                                                 │
+│  ```bash                                                        │
+│  $ titan init my_dex                                            │
+│  $ titan build --release                                        │
+│  $ titan deploy --cluster devnet                                │
+│  $ titan prove --input swap.json                                │
+│  ```                                                            │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  结语 (Closing):                                                 │
+│  ─────────────────────────────────────────────────────────────  │
+│                                                                 │
+│  "Titan OS is not a framework for beginners.                    │
+│   It's a weapon for system engineers."                          │
+│                                                                 │
+│  我们不降低门槛。                                                │
+│  我们让专家更强大。                                              │
+│                                                                 │
+│  Titan OS - 在裸金属上跳舞。                                     │
+│                                                                 │
+│                                                                 │
+│        🎯 目标: Aztec Bounty ($10K) + Open Track ($18K)          │
+│        🚀 产品: Foundry for Zig on Solana                        │
+│        🔥 格调: Hardcore Infrastructure                          │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.41.12 三日开发计划 (Pure Zig 版本)
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                 │
+│            Hackathon 三日计划 (Pure Zig Edition)                 │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Day 1: 基础设施                                                 │
+│  ─────────────────────────────────────────────────────────────  │
+│                                                                 │
+│  上午 (4h):                                                      │
+│  • 搭建 Zig + Solana SBF 编译环境                               │
+│  • 编译 Noir wrapper 到静态库 (libnoir_wrapper.a)               │
+│  • 验证 Zig → C ABI → Rust 调用链                               │
+│                                                                 │
+│  下午 (4h):                                                      │
+│  • 实现 titan.zk 模块核心 API                                   │
+│  • 实现 titan.solana 模块 (syscalls 封装)                       │
+│  • 编写最小可编译的 SBF 程序                                    │
+│                                                                 │
+│  晚上 (2h):                                                      │
+│  • 部署空程序到 Devnet 验证                                     │
+│  • 修复 Day 1 问题                                              │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Day 2: 核心功能                                                 │
+│  ─────────────────────────────────────────────────────────────  │
+│                                                                 │
+│  上午 (4h):                                                      │
+│  • 实现 private_swap 核心逻辑                                   │
+│  • 实现 ZK 约束收集与证明生成                                   │
+│  • 本地测试完整流程                                             │
+│                                                                 │
+│  下午 (4h):                                                      │
+│  • 部署 Verifier 到 Devnet                                      │
+│  • 端到端测试: 本地生成证明 → 链上验证                          │
+│  • 优化 CU 消耗                                                 │
+│                                                                 │
+│  晚上 (2h):                                                      │
+│  • 实现 titan-cli 基本命令                                      │
+│  • 准备演示脚本                                                 │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Day 3: 演示 + Pitch                                             │
+│  ─────────────────────────────────────────────────────────────  │
+│                                                                 │
+│  上午 (4h):                                                      │
+│  • 录制演示视频 (2-3 分钟)                                      │
+│  • 编写 README 和技术文档                                       │
+│  • 准备 Pitch Deck (5 页)                                       │
+│                                                                 │
+│  下午 (4h):                                                      │
+│  • 提交到各赛道                                                 │
+│  • Pitch 彩排                                                   │
+│  • 准备 Q&A                                                     │
+│                                                                 │
+│  晚上:                                                           │
+│  • 展示 + 评审                                                  │
+│  • 🎉                                                           │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.41.13 关键交付物
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                 │
+│                  Hackathon 交付物清单                            │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  代码仓库:                                                       │
+│  ─────────────────────────────────────────────────────────────  │
+│                                                                 │
+│  titan-os/                                                      │
+│  ├── titan-sdk/                 # Zig SDK                       │
+│  │   ├── src/                                                   │
+│  │   │   ├── sdk.zig           # 主入口                         │
+│  │   │   ├── zk.zig            # ZK 模块                        │
+│  │   │   ├── solana.zig        # Solana syscalls                │
+│  │   │   ├── context.zig       # 运行时上下文                   │
+│  │   │   └── types.zig         # 类型定义                       │
+│  │   └── build.zig                                              │
+│  │                                                              │
+│  ├── titan-cli/                 # CLI 工具                      │
+│  │   ├── src/                                                   │
+│  │   │   └── main.zig          # CLI 入口                       │
+│  │   └── build.zig                                              │
+│  │                                                              │
+│  ├── noir-wrapper/              # Rust C ABI wrapper            │
+│  │   ├── src/                                                   │
+│  │   │   └── lib.rs            # C ABI 导出                     │
+│  │   └── Cargo.toml                                             │
+│  │                                                              │
+│  ├── examples/                  # 示例项目                      │
+│  │   └── privacy-dex/                                           │
+│  │       ├── src/                                               │
+│  │       │   └── main.zig      # DEX 逻辑                       │
+│  │       └── build.zig                                          │
+│  │                                                              │
+│  ├── docs/                      # 文档                          │
+│  │   ├── README.md                                              │
+│  │   └── architecture.md                                        │
+│  │                                                              │
+│  └── scripts/                   # 脚本                          │
+│      ├── build-wrapper.sh      # 编译 Rust wrapper              │
+│      └── deploy.sh             # 部署脚本                       │
+│                                                                 │
+│  演示材料:                                                       │
+│  ─────────────────────────────────────────────────────────────  │
+│                                                                 │
+│  • 演示视频 (2-3 分钟)                                          │
+│  • Pitch Deck (5 页 PDF)                                        │
+│  • 部署在 Devnet 的程序                                         │
+│  • 可运行的 CLI 工具                                            │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.41.14 总结: 硬核基础设施
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                 │
+│              Pure Zig = Hardcore Infrastructure                  │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  你的产品:                                                       │
+│  ─────────────────────────────────────────────────────────────  │
+│                                                                 │
+│  • 一个 Zig 库 (titan-sdk)                                      │
+│  • 一个 CLI 工具 (titan)                                        │
+│  • 一套 C ABI 绑定 (noir-wrapper)                               │
+│                                                                 │
+│  你的 Demo:                                                      │
+│  ─────────────────────────────────────────────────────────────  │
+│                                                                 │
+│  • 一个用 Zig 写的隐私 Swap 合约                                │
+│  • 部署在 Solana Devnet                                         │
+│  • 用 titan-cli 完成全流程                                      │
+│                                                                 │
+│  你的叙事:                                                       │
+│  ─────────────────────────────────────────────────────────────  │
+│                                                                 │
+│  "Titan OS is not a framework for beginners.                    │
+│   It's a weapon for system engineers."                          │
+│                                                                 │
+│  "Solana 上的系统级编程革命。"                                   │
+│                                                                 │
+│  比引入 Python 更简单直接，技术格调更高。                        │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  这就是:                                                         │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                                                         │   │
+│  │           "The Foundry for Zig on Solana"               │   │
+│  │                                                         │   │
+│  │                                                         │   │
+│  │                  ┌───────────────┐                      │   │
+│  │                  │               │                      │   │
+│  │                  │   TITAN OS    │                      │   │
+│  │                  │               │                      │   │
+│  │                  │   Pure Zig    │                      │   │
+│  │                  │   Zero Cost   │                      │   │
+│  │                  │   Max Power   │                      │   │
+│  │                  │               │                      │   │
+│  │                  └───────────────┘                      │   │
+│  │                                                         │   │
+│  │                                                         │   │
+│  │        "在裸金属上跳舞。"                                │   │
+│  │                                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
 ## 相关文档
 
 | 文档 | 说明 |
