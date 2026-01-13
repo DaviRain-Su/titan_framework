@@ -25544,6 +25544,978 @@ pub const DriverInterface = struct {
 
 ---
 
+### 18.21 SDK 抽象层演进 (SDK Abstraction Evolution)
+
+> **核心问题**: 直接操作 EVM 存储太蹩脚了，如何让开发者写出"自然"的代码？
+
+#### 18.21.1 为什么直译很蹩脚？
+
+**EVM 的"物理定律"与高级语言的"思维模型"冲突**：
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     EVM 存储模型 vs 开发者思维                                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  EVM 的"物理定律"                                                   │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  EVM Storage 本质上是一个极其简陋的 Key-Value 数据库：                      │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                      │   │
+│  │  Storage = Map<u256, u256>                                          │   │
+│  │                                                                      │   │
+│  │  只有两个操作:                                                       │   │
+│  │  • SSTORE(slot, value)  - 写入 256 位值到槽位                       │   │
+│  │  • SLOAD(slot) -> value - 从槽位读取 256 位值                       │   │
+│  │                                                                      │   │
+│  │  没有:                                                               │   │
+│  │  • 没有类型系统                                                      │   │
+│  │  • 没有结构体                                                        │   │
+│  │  • 没有数组边界检查                                                  │   │
+│  │  • 没有字符串                                                        │   │
+│  │  • 没有对象                                                          │   │
+│  │                                                                      │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  ─────────────────────────────────────────────────────────────────────────  │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  开发者的"思维模型"                                                 │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  开发者习惯这样思考问题:                                                    │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                      │   │
+│  │  // "我有一个用户对象"                                               │   │
+│  │  const user = User{                                                 │   │
+│  │      .name = "Alice",                                               │   │
+│  │      .balance = 1000,                                               │   │
+│  │      .is_active = true,                                             │   │
+│  │  };                                                                 │   │
+│  │                                                                      │   │
+│  │  // "我想更新用户余额"                                               │   │
+│  │  user.balance += 100;                                               │   │
+│  │                                                                      │   │
+│  │  // "我想查找所有活跃用户"                                           │   │
+│  │  const active_users = users.filter(.is_active);                     │   │
+│  │                                                                      │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  ─────────────────────────────────────────────────────────────────────────  │
+│                                                                             │
+│  冲突点:                                                                    │
+│                                                                             │
+│  ┌────────────────────────┬────────────────────────────────────────────┐   │
+│  │ 开发者想要             │ EVM 提供的                                 │   │
+│  ├────────────────────────┼────────────────────────────────────────────┤   │
+│  │ user.balance = 100     │ SSTORE(keccak256("user", addr, 1), 100)   │   │
+│  │ users[addr].name       │ SLOAD(keccak256(addr, 0))                 │   │
+│  │ balances.get(key)      │ SLOAD(keccak256(0, key))                  │   │
+│  │ array.push(item)       │ SSTORE(len_slot, len+1); SSTORE(...)      │   │
+│  └────────────────────────┴────────────────────────────────────────────┘   │
+│                                                                             │
+│  如果让开发者直接写底层代码，每一行都是"脑力体操"。                         │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.21.2 SDK 三阶段演进
+
+**从"蹩脚"到"自然"的演进路线**：
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     SDK 抽象层演进                                           │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                      │   │
+│  │  Stage 0: 裸金属 (Raw Metal)                                        │   │
+│  │  ═══════════════════════════                                        │   │
+│  │                                                                      │   │
+│  │  开发者直接写 Yul / 内联汇编                                         │   │
+│  │                                                                      │   │
+│  │  ┌─────────────────────────────────────────────────────────────┐    │   │
+│  │  │  pub fn updateBalance(user: u160, amount: u256) void {      │    │   │
+│  │  │      // 手动计算 slot = keccak256(user, 0)                  │    │   │
+│  │  │      var slot: u256 = undefined;                            │    │   │
+│  │  │      // ... 20 行哈希计算代码 ...                           │    │   │
+│  │  │                                                             │    │   │
+│  │  │      // 直接调用 sstore                                     │    │   │
+│  │  │      asm volatile ("sstore" : : [s] "r"(slot), [v] "r"(amount));│ │   │
+│  │  │  }                                                          │    │   │
+│  │  └─────────────────────────────────────────────────────────────┘    │   │
+│  │                                                                      │   │
+│  │  痛苦指数: ████████████████████ 100%                                │   │
+│  │  评价: 披着 Zig 皮的汇编                                            │   │
+│  │                                                                      │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                      │                                      │
+│                                      ▼                                      │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                      │   │
+│  │  Stage 1: 数据结构封装 (Data Structure Wrappers)                    │   │
+│  │  ═══════════════════════════════════════════════                    │   │
+│  │                                                                      │   │
+│  │  封装 Mapping, Array, StorageSlot 等容器                            │   │
+│  │                                                                      │   │
+│  │  ┌─────────────────────────────────────────────────────────────┐    │   │
+│  │  │  const Mapping = titan.storage.Mapping;                     │    │   │
+│  │  │  const StorageU256 = titan.storage.U256;                    │    │   │
+│  │  │                                                             │    │   │
+│  │  │  // 手动指定 Slot                                           │    │   │
+│  │  │  const balances = Mapping(Address, u256).init(0);           │    │   │
+│  │  │  const total_supply = StorageU256.init(1);                  │    │   │
+│  │  │                                                             │    │   │
+│  │  │  pub fn updateBalance(user: Address, amount: u256) void {   │    │   │
+│  │  │      balances.set(user, amount);  // 好多了!                │    │   │
+│  │  │  }                                                          │    │   │
+│  │  │                                                             │    │   │
+│  │  │  pub fn getTotalSupply() u256 {                             │    │   │
+│  │  │      return total_supply.get();                             │    │   │
+│  │  │  }                                                          │    │   │
+│  │  └─────────────────────────────────────────────────────────────┘    │   │
+│  │                                                                      │   │
+│  │  痛苦指数: ████████████░░░░░░░░ 60%                                 │   │
+│  │  评价: 像在用 Java Hibernate 操作数据库                             │   │
+│  │  问题: 还是要手动管理 Slot，嵌套结构很痛苦                          │   │
+│  │                                                                      │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                      │                                      │
+│                                      ▼                                      │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                      │   │
+│  │  Stage 2: ORM 风格抽象 (Object-Relational Mapping)                  │   │
+│  │  ═════════════════════════════════════════════════                  │   │
+│  │                                                                      │   │
+│  │  利用 Zig comptime 实现"链上 ORM"                                   │   │
+│  │                                                                      │   │
+│  │  ┌─────────────────────────────────────────────────────────────┐    │   │
+│  │  │  // 1. 像定义普通结构体一样定义合约状态                      │    │   │
+│  │  │  const State = struct {                                     │    │   │
+│  │  │      owner: Address,                                        │    │   │
+│  │  │      total_supply: u256,                                    │    │   │
+│  │  │      balances: Mapping(Address, u256),                      │    │   │
+│  │  │      allowances: Mapping(Address, Mapping(Address, u256)),  │    │   │
+│  │  │  };                                                         │    │   │
+│  │  │                                                             │    │   │
+│  │  │  // 2. SDK 在编译期自动分配 Slot                            │    │   │
+│  │  │  const db = titan.Database(State).init();                   │    │   │
+│  │  │                                                             │    │   │
+│  │  │  // 3. 极其自然的语法!                                      │    │   │
+│  │  │  pub fn transfer(to: Address, amount: u256) !void {         │    │   │
+│  │  │      const sender = titan.msg.sender();                     │    │   │
+│  │  │                                                             │    │   │
+│  │  │      // 读取 - 自动转为 SLOAD                               │    │   │
+│  │  │      const balance = db.balances.get(sender);               │    │   │
+│  │  │      if (balance < amount) return error.InsufficientBalance;│    │   │
+│  │  │                                                             │    │   │
+│  │  │      // 写入 - 自动转为 SSTORE                              │    │   │
+│  │  │      db.balances.set(sender, balance - amount);             │    │   │
+│  │  │      db.balances.set(to, db.balances.get(to) + amount);     │    │   │
+│  │  │  }                                                          │    │   │
+│  │  └─────────────────────────────────────────────────────────────┘    │   │
+│  │                                                                      │   │
+│  │  痛苦指数: ████░░░░░░░░░░░░░░░░ 20%                                 │   │
+│  │  评价: 感觉像在写普通的 Zig 程序!                                   │   │
+│  │                                                                      │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                      │                                      │
+│                                      ▼                                      │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                      │   │
+│  │  Stage 3: DSL 语法糖 (Domain Specific Language) [未来]              │   │
+│  │  ═════════════════════════════════════════════════════              │   │
+│  │                                                                      │   │
+│  │  极致的语法体验 (需要更多 comptime 魔法)                            │   │
+│  │                                                                      │   │
+│  │  ┌─────────────────────────────────────────────────────────────┐    │   │
+│  │  │  // 完全像普通 Zig 代码                                     │    │   │
+│  │  │  pub fn transfer(to: Address, amount: u256) !void {         │    │   │
+│  │  │      const sender = titan.msg.sender();                     │    │   │
+│  │  │                                                             │    │   │
+│  │  │      // 使用 -= 和 += 操作符!                               │    │   │
+│  │  │      state.balances[sender] -= amount;                      │    │   │
+│  │  │      state.balances[to] += amount;                          │    │   │
+│  │  │                                                             │    │   │
+│  │  │      // 自动事件触发                                        │    │   │
+│  │  │      titan.emit.Transfer(sender, to, amount);               │    │   │
+│  │  │  }                                                          │    │   │
+│  │  └─────────────────────────────────────────────────────────────┘    │   │
+│  │                                                                      │   │
+│  │  痛苦指数: ██░░░░░░░░░░░░░░░░░░ 10%                                 │   │
+│  │  评价: 忘记自己在写智能合约                                         │   │
+│  │                                                                      │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.21.3 Stage 1 实现：数据结构封装
+
+**基础容器的实现**：
+
+```zig
+// ==========================================================================
+// titan/storage/mapping.zig - Mapping 容器实现
+// ==========================================================================
+
+const native = @import("../drivers/evm/native.zig");
+const keccak = @import("../crypto/keccak.zig");
+
+/// 链上 Mapping 类型 (类似 Solidity 的 mapping)
+pub fn Mapping(comptime K: type, comptime V: type) type {
+    return struct {
+        const Self = @This();
+
+        /// 基础 Slot (Mapping 的起始位置)
+        base_slot: u256,
+
+        /// 初始化 Mapping
+        pub fn init(slot: u256) Self {
+            return .{ .base_slot = slot };
+        }
+
+        /// 获取值
+        pub fn get(self: Self, key: K) V {
+            const slot = self.computeSlot(key);
+            const raw = native.raw_sload(slot);
+            return decodeValue(V, raw);
+        }
+
+        /// 设置值
+        pub fn set(self: Self, key: K, value: V) void {
+            const slot = self.computeSlot(key);
+            const encoded = encodeValue(value);
+            native.raw_sstore(slot, encoded);
+        }
+
+        /// 计算 key 对应的 slot
+        /// slot = keccak256(key || base_slot)
+        fn computeSlot(self: Self, key: K) u256 {
+            var buf: [64]u8 = undefined;
+
+            // 编码 key
+            const key_bytes = encodeKey(key);
+            @memcpy(buf[0..32], key_bytes);
+
+            // 编码 base_slot
+            const slot_bytes = @bitCast([32]u8, self.base_slot);
+            @memcpy(buf[32..64], &slot_bytes);
+
+            // 计算 keccak256
+            const hash = keccak.keccak256(&buf);
+            return @bitCast(u256, hash);
+        }
+
+        fn encodeKey(key: K) [32]u8 {
+            // 根据 K 类型进行编码
+            return switch (@typeInfo(K)) {
+                .Int => @bitCast([32]u8, @as(u256, key)),
+                .Array => |arr| if (arr.len == 20) blk: {
+                    // Address 类型
+                    var result: [32]u8 = [_]u8{0} ** 32;
+                    @memcpy(result[12..32], &key);
+                    break :blk result;
+                } else @compileError("Unsupported array type"),
+                else => @compileError("Unsupported key type"),
+            };
+        }
+
+        fn encodeValue(value: V) u256 {
+            return switch (@typeInfo(V)) {
+                .Int => @intCast(u256, value),
+                .Bool => if (value) @as(u256, 1) else @as(u256, 0),
+                else => @compileError("Unsupported value type"),
+            };
+        }
+
+        fn decodeValue(comptime T: type, raw: u256) T {
+            return switch (@typeInfo(T)) {
+                .Int => @intCast(T, raw),
+                .Bool => raw != 0,
+                else => @compileError("Unsupported value type"),
+            };
+        }
+    };
+}
+
+/// 嵌套 Mapping (mapping(K1 => mapping(K2 => V)))
+pub fn NestedMapping(comptime K1: type, comptime K2: type, comptime V: type) type {
+    return struct {
+        const Self = @This();
+
+        base_slot: u256,
+
+        pub fn init(slot: u256) Self {
+            return .{ .base_slot = slot };
+        }
+
+        /// 获取内层 Mapping
+        pub fn at(self: Self, key1: K1) Mapping(K2, V) {
+            // 计算内层 Mapping 的 base_slot
+            const inner_slot = computeInnerSlot(self.base_slot, key1);
+            return Mapping(K2, V).init(inner_slot);
+        }
+
+        fn computeInnerSlot(base: u256, key: K1) u256 {
+            // inner_slot = keccak256(key || base)
+            var buf: [64]u8 = undefined;
+            const key_bytes = Mapping(K1, V).encodeKey(key);
+            @memcpy(buf[0..32], &key_bytes);
+            @memcpy(buf[32..64], &@bitCast([32]u8, base));
+            return @bitCast(u256, keccak.keccak256(&buf));
+        }
+    };
+}
+```
+
+```zig
+// ==========================================================================
+// titan/storage/array.zig - 动态数组实现
+// ==========================================================================
+
+/// 链上动态数组 (类似 Solidity 的 T[])
+pub fn Array(comptime T: type) type {
+    return struct {
+        const Self = @This();
+
+        /// 存储长度的 Slot
+        length_slot: u256,
+
+        pub fn init(slot: u256) Self {
+            return .{ .length_slot = slot };
+        }
+
+        /// 获取数组长度
+        pub fn len(self: Self) u256 {
+            return native.raw_sload(self.length_slot);
+        }
+
+        /// 获取元素
+        pub fn get(self: Self, index: u256) T {
+            if (index >= self.len()) {
+                @panic("Array index out of bounds");
+            }
+            const slot = self.elementSlot(index);
+            return decodeValue(T, native.raw_sload(slot));
+        }
+
+        /// 设置元素
+        pub fn set(self: Self, index: u256, value: T) void {
+            if (index >= self.len()) {
+                @panic("Array index out of bounds");
+            }
+            const slot = self.elementSlot(index);
+            native.raw_sstore(slot, encodeValue(value));
+        }
+
+        /// 追加元素
+        pub fn push(self: Self, value: T) void {
+            const current_len = self.len();
+            // 更新长度
+            native.raw_sstore(self.length_slot, current_len + 1);
+            // 存储新元素
+            const slot = self.elementSlot(current_len);
+            native.raw_sstore(slot, encodeValue(value));
+        }
+
+        /// 移除最后一个元素
+        pub fn pop(self: Self) T {
+            const current_len = self.len();
+            if (current_len == 0) {
+                @panic("Array is empty");
+            }
+            // 获取最后一个元素
+            const last_slot = self.elementSlot(current_len - 1);
+            const value = decodeValue(T, native.raw_sload(last_slot));
+            // 清空槽位
+            native.raw_sstore(last_slot, 0);
+            // 更新长度
+            native.raw_sstore(self.length_slot, current_len - 1);
+            return value;
+        }
+
+        /// 计算元素的 Slot
+        /// element_slot = keccak256(length_slot) + index
+        fn elementSlot(self: Self, index: u256) u256 {
+            const base = keccak.keccak256(&@bitCast([32]u8, self.length_slot));
+            return @bitCast(u256, base) + index;
+        }
+    };
+}
+```
+
+#### 18.21.4 Stage 2 实现：ORM 风格抽象
+
+**利用 comptime 反射自动生成存储布局**：
+
+```zig
+// ==========================================================================
+// titan/storage/database.zig - ORM 风格的状态管理
+// ==========================================================================
+
+const std = @import("std");
+const native = @import("../drivers/evm/native.zig");
+const Mapping = @import("mapping.zig").Mapping;
+const Array = @import("array.zig").Array;
+
+/// 链上数据库 - 把 EVM Storage 伪装成 Zig Struct
+pub fn Database(comptime State: type) type {
+    return struct {
+        const Self = @This();
+
+        /// 编译时生成的字段代理
+        fields: FieldProxies(State),
+
+        /// 初始化数据库
+        pub fn init() Self {
+            return .{
+                .fields = generateFieldProxies(State),
+            };
+        }
+
+        /// 生成所有字段的代理对象
+        fn generateFieldProxies(comptime S: type) FieldProxies(S) {
+            var proxies: FieldProxies(S) = undefined;
+            var current_slot: u256 = 0;
+
+            // 遍历结构体的所有字段
+            inline for (std.meta.fields(S)) |field| {
+                const slot = current_slot;
+                current_slot += slotSize(field.type);
+
+                // 根据字段类型生成对应的代理
+                @field(proxies, field.name) = createProxy(field.type, slot);
+            }
+
+            return proxies;
+        }
+
+        /// 计算类型需要的 slot 数量
+        fn slotSize(comptime T: type) u256 {
+            return switch (@typeInfo(T)) {
+                .Int, .Bool => 1,
+                .Struct => |s| blk: {
+                    // Mapping 和 Array 只占一个 slot (base slot)
+                    if (@hasDecl(T, "base_slot")) {
+                        break :blk 1;
+                    }
+                    // 普通结构体递归计算
+                    var size: u256 = 0;
+                    inline for (s.fields) |f| {
+                        size += slotSize(f.type);
+                    }
+                    break :blk size;
+                },
+                else => @compileError("Unsupported type for storage"),
+            };
+        }
+
+        /// 根据类型创建代理对象
+        fn createProxy(comptime T: type, slot: u256) ProxyType(T) {
+            return switch (@typeInfo(T)) {
+                .Int => StorageValue(T).init(slot),
+                .Bool => StorageValue(bool).init(slot),
+                .Struct => |_| blk: {
+                    if (T == Mapping) {
+                        break :blk T.init(slot);
+                    }
+                    // 嵌套结构体：递归创建
+                    break :blk createNestedProxy(T, slot);
+                },
+                else => @compileError("Unsupported type"),
+            };
+        }
+
+        /// 字段代理类型映射
+        fn ProxyType(comptime T: type) type {
+            return switch (@typeInfo(T)) {
+                .Int, .Bool => StorageValue(T),
+                .Struct => T, // Mapping/Array 保持原类型
+                else => @compileError("Unsupported type"),
+            };
+        }
+
+        /// 生成与 State 结构相同的代理结构
+        fn FieldProxies(comptime S: type) type {
+            var fields: [std.meta.fields(S).len]std.builtin.Type.StructField = undefined;
+
+            inline for (std.meta.fields(S), 0..) |field, i| {
+                fields[i] = .{
+                    .name = field.name,
+                    .type = ProxyType(field.type),
+                    .default_value = null,
+                    .is_comptime = false,
+                    .alignment = 0,
+                };
+            }
+
+            return @Type(.{
+                .Struct = .{
+                    .layout = .Auto,
+                    .fields = &fields,
+                    .decls = &.{},
+                    .is_tuple = false,
+                },
+            });
+        }
+    };
+}
+
+/// 单值存储代理
+pub fn StorageValue(comptime T: type) type {
+    return struct {
+        const Self = @This();
+
+        slot: u256,
+
+        pub fn init(slot: u256) Self {
+            return .{ .slot = slot };
+        }
+
+        /// 读取值 (生成 SLOAD)
+        pub fn get(self: Self) T {
+            const raw = native.raw_sload(self.slot);
+            return decode(T, raw);
+        }
+
+        /// 写入值 (生成 SSTORE)
+        pub fn set(self: Self, value: T) void {
+            native.raw_sstore(self.slot, encode(value));
+        }
+
+        /// 原子加法
+        pub fn add(self: Self, delta: T) void {
+            self.set(self.get() + delta);
+        }
+
+        /// 原子减法
+        pub fn sub(self: Self, delta: T) void {
+            self.set(self.get() - delta);
+        }
+
+        fn encode(value: T) u256 {
+            return switch (@typeInfo(T)) {
+                .Int => @intCast(u256, value),
+                .Bool => if (value) @as(u256, 1) else @as(u256, 0),
+                else => @compileError("Unsupported type"),
+            };
+        }
+
+        fn decode(comptime U: type, raw: u256) U {
+            return switch (@typeInfo(U)) {
+                .Int => @intCast(U, raw),
+                .Bool => raw != 0,
+                else => @compileError("Unsupported type"),
+            };
+        }
+    };
+}
+```
+
+**使用示例**：
+
+```zig
+// ==========================================================================
+// examples/erc20.zig - 使用 ORM 风格编写 ERC20
+// ==========================================================================
+
+const titan = @import("titan_os");
+const Address = titan.Address;
+const Mapping = titan.storage.Mapping;
+const Database = titan.storage.Database;
+
+// 1. 定义状态结构 (像普通 Zig 结构体一样)
+const ERC20State = struct {
+    name: [32]u8,
+    symbol: [32]u8,
+    decimals: u8,
+    total_supply: u256,
+    balances: Mapping(Address, u256),
+    allowances: Mapping(Address, Mapping(Address, u256)),
+};
+
+// 2. 创建数据库实例 (编译期自动分配 Slot)
+const db = Database(ERC20State).init();
+
+// 3. 合约函数 (自然的语法!)
+pub fn initialize(
+    name: []const u8,
+    symbol: []const u8,
+    decimals: u8,
+    initial_supply: u256,
+) void {
+    const sender = titan.msg.sender();
+
+    // 直接访问字段，像操作内存一样
+    db.fields.name.set(stringToBytes32(name));
+    db.fields.symbol.set(stringToBytes32(symbol));
+    db.fields.decimals.set(decimals);
+    db.fields.total_supply.set(initial_supply);
+    db.fields.balances.set(sender, initial_supply);
+
+    titan.emit("Transfer", .{ Address.zero(), sender, initial_supply });
+}
+
+pub fn transfer(to: Address, amount: u256) !void {
+    const sender = titan.msg.sender();
+
+    // 读取余额
+    const sender_balance = db.fields.balances.get(sender);
+    if (sender_balance < amount) {
+        return error.InsufficientBalance;
+    }
+
+    // 更新余额 (自动生成 SSTORE)
+    db.fields.balances.set(sender, sender_balance - amount);
+    db.fields.balances.set(to, db.fields.balances.get(to) + amount);
+
+    titan.emit("Transfer", .{ sender, to, amount });
+}
+
+pub fn approve(spender: Address, amount: u256) void {
+    const sender = titan.msg.sender();
+
+    // 嵌套 Mapping 访问 (自动计算多层 Hash)
+    db.fields.allowances.at(sender).set(spender, amount);
+
+    titan.emit("Approval", .{ sender, spender, amount });
+}
+
+pub fn transferFrom(from: Address, to: Address, amount: u256) !void {
+    const sender = titan.msg.sender();
+
+    // 检查授权
+    const allowed = db.fields.allowances.at(from).get(sender);
+    if (allowed < amount) {
+        return error.InsufficientAllowance;
+    }
+
+    // 检查余额
+    const from_balance = db.fields.balances.get(from);
+    if (from_balance < amount) {
+        return error.InsufficientBalance;
+    }
+
+    // 更新状态
+    db.fields.allowances.at(from).set(sender, allowed - amount);
+    db.fields.balances.set(from, from_balance - amount);
+    db.fields.balances.set(to, db.fields.balances.get(to) + amount);
+
+    titan.emit("Transfer", .{ from, to, amount });
+}
+
+// 只读函数
+pub fn balanceOf(account: Address) u256 {
+    return db.fields.balances.get(account);
+}
+
+pub fn allowance(owner: Address, spender: Address) u256 {
+    return db.fields.allowances.at(owner).get(spender);
+}
+
+pub fn totalSupply() u256 {
+    return db.fields.total_supply.get();
+}
+```
+
+#### 18.21.5 零成本抽象原理
+
+**为什么 ORM 风格不会带来性能损失？**
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     零成本抽象 (Zero-Cost Abstraction)                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  核心原理: 所有抽象在编译期被"内联展开"，运行时不存在额外开销。              │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  编译前 (用户代码)                                                   │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  db.fields.balances.set(sender, balance - amount);                  │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│                                      │                                      │
+│                                      │  Zig comptime 展开                   │
+│                                      ▼                                      │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  编译后 (展开的代码)                                                 │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  // 1. db.fields.balances 的 base_slot 在编译期已知 = 4             │   │
+│  │  // 2. .set(sender, ...) 展开为:                                    │   │
+│  │                                                                      │   │
+│  │  const slot = keccak256(sender, 4);  // 编译期计算槽位公式          │   │
+│  │  raw_sstore(slot, balance - amount); // 直接的底层调用              │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│                                      │                                      │
+│                                      │  zig-to-yul 转换                     │
+│                                      ▼                                      │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  最终 Yul 代码                                                       │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  {                                                                  │   │
+│  │      let slot := keccak256(sender, 4)                              │   │
+│  │      sstore(slot, sub(balance, amount))                            │   │
+│  │  }                                                                  │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  ─────────────────────────────────────────────────────────────────────────  │
+│                                                                             │
+│  对比:                                                                      │
+│                                                                             │
+│  ┌─────────────────┬─────────────────────────────────────────────────────┐ │
+│  │ 手写 Solidity   │ sstore(keccak256(sender, 4), balance - amount)     │ │
+│  ├─────────────────┼─────────────────────────────────────────────────────┤ │
+│  │ Titan SDK       │ sstore(keccak256(sender, 4), balance - amount)     │ │
+│  ├─────────────────┼─────────────────────────────────────────────────────┤ │
+│  │ Gas 消耗        │ 完全相同 ✅                                         │ │
+│  └─────────────────┴─────────────────────────────────────────────────────┘ │
+│                                                                             │
+│  结论: ORM 语法是"语法糖"，最终产物与手写汇编一模一样。                     │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Comptime 的魔力**：
+
+```zig
+// ==========================================================================
+// comptime 如何实现零成本抽象
+// ==========================================================================
+
+/// 编译期计算 slot
+fn computeSlotForField(comptime field_name: []const u8) u256 {
+    // 这个函数在编译期执行!
+    // 返回值直接嵌入到最终代码中
+
+    // 假设 ERC20State 的字段布局:
+    // name:         slot 0
+    // symbol:       slot 1
+    // decimals:     slot 2
+    // total_supply: slot 3
+    // balances:     slot 4  <-- Mapping base
+    // allowances:   slot 5  <-- Nested Mapping base
+
+    const layout = .{
+        .{ "name", 0 },
+        .{ "symbol", 1 },
+        .{ "decimals", 2 },
+        .{ "total_supply", 3 },
+        .{ "balances", 4 },
+        .{ "allowances", 5 },
+    };
+
+    inline for (layout) |entry| {
+        if (std.mem.eql(u8, entry[0], field_name)) {
+            return entry[1];
+        }
+    }
+
+    @compileError("Unknown field: " ++ field_name);
+}
+
+// 用户写: db.fields.balances.set(sender, amount)
+// 编译器看到: StorageMapping.set(4, sender, amount)
+// 最终生成: sstore(keccak256(sender, 4), amount)
+//
+// 没有任何运行时查找，没有任何函数调用开销!
+```
+
+#### 18.21.6 代理对象技术细节
+
+**代理对象 (Proxy Objects) 是实现"自然语法"的核心技术**：
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     代理对象原理                                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  当你写 `db.fields.owner` 时，Zig 并没有去读存储。                          │
+│  它返回了一个编译期的 `StorageValue(Address, slot=0)` 对象。                │
+│                                                                             │
+│  只有当你调用 `.get()` 或 `.set()` 时，才会生成实际的 sload/sstore。        │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  代理对象的生命周期                                                  │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│                                                                             │
+│  ┌──────────────────┐     ┌──────────────────┐     ┌──────────────────┐   │
+│  │ 用户代码         │     │ 代理对象         │     │ 底层操作         │   │
+│  └────────┬─────────┘     └────────┬─────────┘     └────────┬─────────┘   │
+│           │                        │                        │              │
+│           │ db.fields.owner        │                        │              │
+│           │───────────────────────►│                        │              │
+│           │                        │                        │              │
+│           │  返回 StorageValue     │                        │              │
+│           │  { slot: 0 }           │                        │              │
+│           │◄───────────────────────│                        │              │
+│           │                        │                        │              │
+│           │ .get()                 │                        │              │
+│           │───────────────────────►│                        │              │
+│           │                        │                        │              │
+│           │                        │ raw_sload(0)           │              │
+│           │                        │───────────────────────►│              │
+│           │                        │                        │              │
+│           │                        │ 返回 u256              │              │
+│           │                        │◄───────────────────────│              │
+│           │                        │                        │              │
+│           │ 返回 Address           │                        │              │
+│           │◄───────────────────────│                        │              │
+│           │                        │                        │              │
+│                                                                             │
+│  ─────────────────────────────────────────────────────────────────────────  │
+│                                                                             │
+│  关键点:                                                                    │
+│                                                                             │
+│  1. `db.fields.owner` 不执行任何存储操作                                   │
+│  2. 它只是返回一个"延迟执行"的代理对象                                     │
+│  3. 代理对象记住了 slot 信息                                               │
+│  4. 只有 `.get()/.set()` 才真正触发 sload/sstore                           │
+│                                                                             │
+│  这就是为什么可以写出链式调用:                                              │
+│                                                                             │
+│  db.fields.allowances.at(from).get(spender)                                │
+│       │          │       │      │                                          │
+│       │          │       │      └─► 执行 SLOAD                             │
+│       │          │       └─► 返回内层 Mapping 的代理                       │
+│       │          └─► 返回 NestedMapping 的代理                             │
+│       └─► 返回 db.fields 结构                                              │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.21.7 各阶段对比总结
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     SDK 各阶段对比                                           │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌────────────┬───────────────────────────────────────────────────────────┐│
+│  │ 维度       │ Stage 0    │ Stage 1      │ Stage 2      │ Stage 3       ││
+│  │            │ 裸金属     │ 数据结构     │ ORM          │ DSL           ││
+│  ├────────────┼────────────┼──────────────┼──────────────┼───────────────┤│
+│  │ 设置值     │ raw_sstore │ map.set()    │ db.x.set()   │ state.x = v   ││
+│  │            │ (slot,val) │              │              │               ││
+│  ├────────────┼────────────┼──────────────┼──────────────┼───────────────┤│
+│  │ Slot 管理  │ 手动计算   │ 手动指定     │ 自动分配     │ 自动分配      ││
+│  ├────────────┼────────────┼──────────────┼──────────────┼───────────────┤│
+│  │ 嵌套结构   │ 噩梦       │ 可用但痛苦   │ 自然         │ 完美          ││
+│  ├────────────┼────────────┼──────────────┼──────────────┼───────────────┤│
+│  │ 学习曲线   │ 陡峭       │ 中等         │ 平缓         │ 零            ││
+│  ├────────────┼────────────┼──────────────┼──────────────┼───────────────┤│
+│  │ 代码量     │ 100%       │ 60%          │ 30%          │ 20%           ││
+│  ├────────────┼────────────┼──────────────┼──────────────┼───────────────┤│
+│  │ Gas 效率   │ 最优       │ 最优         │ 最优         │ 最优          ││
+│  ├────────────┼────────────┼──────────────┼──────────────┼───────────────┤│
+│  │ 实现难度   │ N/A        │ 简单         │ 中等         │ 复杂          ││
+│  └────────────┴────────────┴──────────────┴──────────────┴───────────────┘│
+│                                                                             │
+│  ─────────────────────────────────────────────────────────────────────────  │
+│                                                                             │
+│  结论:                                                                      │
+│                                                                             │
+│  • Stage 1 (数据结构): 基础，必须实现                                      │
+│  • Stage 2 (ORM): Titan OS 的核心体验，优先级最高                          │
+│  • Stage 3 (DSL): 锦上添花，可以后续迭代                                   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.21.8 总结：SDK 三层职责
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                                                             │
+│                                                                             │
+│     ┌───────────────────────────────────────────────────────────────────┐   │
+│     │                                                                    │   │
+│     │                                                                    │   │
+│     │         SDK 三层职责:                                              │   │
+│     │                                                                    │   │
+│     │                                                                    │   │
+│     │         ┌─────────────────────────────────────────────────────┐   │   │
+│     │         │                                                      │   │   │
+│     │         │  高层 (ORM/DSL)                                      │   │   │
+│     │         │  ─────────────                                       │   │   │
+│     │         │                                                      │   │   │
+│     │         │  职责: 解决"写得爽不爽"的问题                        │   │   │
+│     │         │                                                      │   │   │
+│     │         │  • titan.Database(State)                             │   │   │
+│     │         │  • 自动 Slot 分配                                    │   │   │
+│     │         │  • 代理对象                                          │   │   │
+│     │         │  • 自然语法                                          │   │   │
+│     │         │                                                      │   │   │
+│     │         └──────────────────────┬──────────────────────────────┘   │   │
+│     │                                │                                   │   │
+│     │                                ▼                                   │   │
+│     │         ┌─────────────────────────────────────────────────────┐   │   │
+│     │         │                                                      │   │   │
+│     │         │  中层 (数据结构)                                     │   │   │
+│     │         │  ─────────────────                                   │   │   │
+│     │         │                                                      │   │   │
+│     │         │  职责: 解决"数据怎么存"的问题                        │   │   │
+│     │         │                                                      │   │   │
+│     │         │  • Mapping(K, V)                                     │   │   │
+│     │         │  • Array(T)                                          │   │   │
+│     │         │  • StorageValue(T)                                   │   │   │
+│     │         │  • Hash 计算封装                                     │   │   │
+│     │         │                                                      │   │   │
+│     │         └──────────────────────┬──────────────────────────────┘   │   │
+│     │                                │                                   │   │
+│     │                                ▼                                   │   │
+│     │         ┌─────────────────────────────────────────────────────┐   │   │
+│     │         │                                                      │   │   │
+│     │         │  底层 (Driver)                                       │   │   │
+│     │         │  ─────────────                                       │   │   │
+│     │         │                                                      │   │   │
+│     │         │  职责: 解决"能不能跑"的问题                          │   │   │
+│     │         │                                                      │   │   │
+│     │         │  • raw_sstore(slot, value)                           │   │   │
+│     │         │  • raw_sload(slot)                                   │   │   │
+│     │         │  • raw_call(...)                                     │   │   │
+│     │         │  • Yul 代码生成                                      │   │   │
+│     │         │                                                      │   │   │
+│     │         └─────────────────────────────────────────────────────┘   │   │
+│     │                                                                    │   │
+│     │                                                                    │   │
+│     │         ─────────────────────────────────────────────────────────  │   │
+│     │                                                                    │   │
+│     │                                                                    │   │
+│     │         Titan OS 的护城河:                                         │   │
+│     │                                                                    │   │
+│     │         把 EVM 的 Storage 伪装成 Zig 的 Struct。                   │   │
+│     │                                                                    │   │
+│     │         开发者感觉: "我在写 EVM 合约，                             │   │
+│     │                      但感觉像在写普通的 Zig 程序！"                │   │
+│     │                                                                    │   │
+│     │                                                                    │   │
+│     └───────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
 ## 相关文档
 
 | 文档 | 说明 |
