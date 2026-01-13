@@ -71,14 +71,18 @@ export async function computeNullifier(commitment, privateKey, leafIndex) {
  * Compute pool state hash
  */
 export async function computePoolStateHash(reserveA, reserveB, poolPubkey, poolBlinding) {
-    return poseidonHash([reserveA, reserveB, poolPubkey, poolBlinding]);
+    // Convert poolPubkey to field element if it's a base58 string
+    const poolPubkeyField = pubkeyToFieldElement(poolPubkey);
+    return poseidonHash([reserveA, reserveB, poolPubkeyField, poolBlinding]);
 }
 
 /**
  * Compute LP state hash
  */
 export async function computeLpStateHash(totalLpSupply, lpPoolPubkey, lpBlinding) {
-    return poseidonHash([totalLpSupply, lpPoolPubkey, lpBlinding]);
+    // Convert lpPoolPubkey to field element if it's a base58 string
+    const lpPoolPubkeyField = pubkeyToFieldElement(lpPoolPubkey);
+    return poseidonHash([totalLpSupply, lpPoolPubkeyField, lpBlinding]);
 }
 
 /**
@@ -99,6 +103,33 @@ export function randomFieldElement() {
         value = value * 256n + BigInt(bytes[i]);
     }
     return value.toString();
+}
+
+/**
+ * Convert base58 public key to field element
+ * Used for ZK circuit inputs that need numeric representation of addresses
+ */
+const BASE58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+const BN254_FIELD_PRIME = 21888242871839275222246405745257275088548364400416034343698204186575808495617n;
+
+export function pubkeyToFieldElement(pubkeyBase58) {
+    // If already a number string, return as-is
+    if (/^\d+$/.test(pubkeyBase58)) {
+        return pubkeyBase58;
+    }
+
+    // Decode base58 to BigInt
+    let num = BigInt(0);
+    for (const char of pubkeyBase58) {
+        const idx = BASE58_ALPHABET.indexOf(char);
+        if (idx === -1) throw new Error(`Invalid base58 character: ${char}`);
+        num = num * 58n + BigInt(idx);
+    }
+
+    // Reduce modulo BN254 field prime to fit in a field element
+    num = num % BN254_FIELD_PRIME;
+
+    return num.toString();
 }
 
 /**
@@ -193,7 +224,9 @@ export async function generateSwapProof(params) {
         newPoolState.poolBlinding
     );
 
-    // Prepare circuit input
+    // Prepare circuit input (convert pubkeys to field elements)
+    const poolPubkeyField = pubkeyToFieldElement(poolState.poolPubkey);
+
     const circuitInput = {
         root,
         inputNullifier: inputNullifiers,
@@ -213,7 +246,7 @@ export async function generateSwapProof(params) {
         outBlinding: outputUtxos.map(u => u.blinding),
         reserveA: poolState.reserveA,
         reserveB: poolState.reserveB,
-        poolPubkey: poolState.poolPubkey,
+        poolPubkey: poolPubkeyField,
         poolBlinding: poolState.poolBlinding,
         newReserveA: newPoolState.reserveA,
         newReserveB: newPoolState.reserveB,
@@ -316,7 +349,10 @@ export async function generateAddLiquidityProof(params) {
         newLpState.lpBlinding
     );
 
-    // Prepare circuit input
+    // Prepare circuit input (convert pubkeys to field elements)
+    const poolPubkeyField = pubkeyToFieldElement(poolState.poolPubkey);
+    const lpPoolPubkeyField = pubkeyToFieldElement(lpState.lpPoolPubkey);
+
     const circuitInput = {
         root,
         inputNullifier: inputNullifiers,
@@ -337,13 +373,13 @@ export async function generateAddLiquidityProof(params) {
         outBlinding: outputUtxo.blinding,
         reserveA: poolState.reserveA,
         reserveB: poolState.reserveB,
-        poolPubkey: poolState.poolPubkey,
+        poolPubkey: poolPubkeyField,
         poolBlinding: poolState.poolBlinding,
         newReserveA: newPoolState.reserveA,
         newReserveB: newPoolState.reserveB,
         newPoolBlinding: newPoolState.poolBlinding,
         totalLpSupply: lpState.totalLpSupply,
-        lpPoolPubkey: lpState.lpPoolPubkey,
+        lpPoolPubkey: lpPoolPubkeyField,
         lpBlinding: lpState.lpBlinding,
         newTotalLpSupply: newLpState.totalLpSupply,
         newLpBlinding: newLpState.lpBlinding,
@@ -440,7 +476,10 @@ export async function generateRemoveLiquidityProof(params) {
         newLpState.lpBlinding
     );
 
-    // Prepare circuit input
+    // Prepare circuit input (convert pubkeys to field elements)
+    const poolPubkeyField = pubkeyToFieldElement(poolState.poolPubkey);
+    const lpPoolPubkeyField = pubkeyToFieldElement(lpState.lpPoolPubkey);
+
     const circuitInput = {
         root,
         inputNullifier,
@@ -463,13 +502,13 @@ export async function generateRemoveLiquidityProof(params) {
         outBlindingB: outputUtxos[1].blinding,
         reserveA: poolState.reserveA,
         reserveB: poolState.reserveB,
-        poolPubkey: poolState.poolPubkey,
+        poolPubkey: poolPubkeyField,
         poolBlinding: poolState.poolBlinding,
         newReserveA: newPoolState.reserveA,
         newReserveB: newPoolState.reserveB,
         newPoolBlinding: newPoolState.poolBlinding,
         totalLpSupply: lpState.totalLpSupply,
-        lpPoolPubkey: lpState.lpPoolPubkey,
+        lpPoolPubkey: lpPoolPubkeyField,
         lpBlinding: lpState.lpBlinding,
         newTotalLpSupply: newLpState.totalLpSupply,
         newLpBlinding: newLpState.lpBlinding,
