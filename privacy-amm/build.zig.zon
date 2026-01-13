@@ -1,0 +1,20 @@
+.{
+    .name = .@"privacy-amm",
+    .version = "0.1.0",
+    .minimum_zig_version = "0.15.2",
+
+    .dependencies = .{
+        .solana_program_sdk = .{
+            .path = "../../solana-program-sdk-zig",
+        },
+    },
+
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "solana-program",
+        "cli",
+        "relayer",
+        "README.md",
+    },
+}
