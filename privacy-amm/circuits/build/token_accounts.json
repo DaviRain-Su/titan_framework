@@ -1,0 +1,33 @@
+{
+  "programId": "GZfqgHqekzR4D8TAq165XB8U2boVdK5ehEEH4n7u4Xts",
+  "poolAccount": "3Lz9gKbA1kB4V4bu4cGVpXrvStpUs48iBKX56ksw6Wbt",
+  "poolAuthority": "G9RBbC84Q4b9v7pSsCB2hXXDtUrKKuSLsPRaQnHPxstL",
+  "poolAuthorityBump": 253,
+  "tokenA": {
+    "mint": "So11111111111111111111111111111111111111112",
+    "decimals": 9,
+    "symbol": "wSOL",
+    "name": "Wrapped SOL",
+    "isNative": true
+  },
+  "tokenB": {
+    "mint": "BnU4dtHYG9vbKeK6SnWEvtUtqEtuTBUx4YoyRDChHfqL",
+    "decimals": 6,
+    "symbol": "tUSDC",
+    "name": "Test USDC"
+  },
+  "lpToken": {
+    "mint": "5ffm8kwQxT2oKtf4xAkudekBTCE1dVSHCqwp2v7boXgH",
+    "decimals": 9,
+    "symbol": "wSOL-tUSDC-LP"
+  },
+  "poolVaults": {
+    "wsolVault": "9f1gWJG3eWbUA8xAcYnkTRwGWnVLeNEwghG2NS95e5Q4",
+    "usdcVault": "99fwf6zkdQB1iD11XEzpsKwF4b8VCKYH4a1abSFqL89V"
+  },
+  "userAccounts": {
+    "wsol": "BXRaShwnjx11e9kSedkFsA53hKyvVdtyeXAxcciA8hm5",
+    "usdc": "CK4bzSPfqdjP6sGhZPyYcYdbK4eRQ5zWi2dXr4qJQLxy",
+    "lp": "89Av7X1T7LLUrbY2zrwR7spYHTXMaDPGyQvZG4stFTbT"
+  }
+}
