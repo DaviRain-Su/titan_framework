@@ -3,6 +3,10 @@
  * Main application logic with real ZK proof integration
  */
 
+// Polyfill Buffer for browser (required by snarkjs/circomlibjs)
+import { Buffer } from 'buffer';
+window.Buffer = Buffer;
+
 import {
     initPoseidon,
     computeCommitment,
@@ -28,7 +32,7 @@ import {
 
 // Configuration
 const CONFIG = {
-    relayerUrl: 'https://privacy-amm-relayer.workers.dev', // Update after deployment
+    relayerUrl: 'https://privacy-amm-relayer-staging.davirain-yin.workers.dev',
     rpcUrl: 'https://api.testnet.solana.com',
     wsUrl: 'wss://api.testnet.solana.com',
     network: 'testnet',
@@ -138,19 +142,21 @@ function initWallet() {
 
 async function connectWallet() {
     try {
-        // Check for Phantom wallet
-        if (!window.solana || !window.solana.isPhantom) {
-            alert('Please install Phantom wallet to use this app.\nhttps://phantom.app/');
+        // Check for Solana wallet (Phantom, Backpack, or other)
+        const wallet = window.backpack?.solana || window.solana;
+
+        if (!wallet) {
+            alert('Please install a Solana wallet (Phantom, Backpack, etc.) to use this app.');
             return;
         }
 
-        const response = await window.solana.connect();
+        const response = await wallet.connect();
         state.publicKey = response.publicKey.toString();
-        state.wallet = window.solana;
+        state.wallet = wallet;
 
         // Initialize encrypted UTXO storage
         state.utxoStorage = createUTXOStorage();
-        const encryptionEnabled = await state.utxoStorage.init(window.solana, state.publicKey);
+        const encryptionEnabled = await state.utxoStorage.init(state.wallet, state.publicKey);
 
         if (encryptionEnabled) {
             console.log('UTXO storage initialized with encryption');
@@ -215,9 +221,11 @@ function disconnectWallet() {
 }
 
 function checkWalletConnection() {
-    if (window.solana && window.solana.isPhantom && window.solana.isConnected) {
-        state.wallet = window.solana;
-        state.publicKey = window.solana.publicKey?.toString();
+    const wallet = window.backpack?.solana || window.solana;
+
+    if (wallet && wallet.isConnected) {
+        state.wallet = wallet;
+        state.publicKey = wallet.publicKey?.toString();
 
         if (state.publicKey) {
             // Re-initialize on page refresh
@@ -890,7 +898,7 @@ async function executeDeposit() {
         return;
     }
 
-    if (!state.utxoStorage) {
+    if (!state.utxoStorage || !state.wallet) {
         alert('Please connect wallet first');
         return;
     }
@@ -911,42 +919,113 @@ async function executeDeposit() {
             blinding
         );
 
-        updateTxStatus('Submitting deposit...');
+        updateTxStatus('Building transaction...');
 
-        const response = await fetch(`${CONFIG.relayerUrl}/deposit`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                commitment,
-                amount: amountRaw,
-                assetType: assetId,
-            }),
+        // Build instruction data for deposit
+        const instructionData = buildDepositInstructionData(commitment, amountRaw, assetId);
+
+        // Build transaction using @solana/web3.js (loaded via CDN)
+        const { Connection, PublicKey, Transaction, TransactionInstruction, SystemProgram, LAMPORTS_PER_SOL } = window.solanaWeb3 || await loadSolanaWeb3();
+
+        const connection = new Connection(CONFIG.rpcUrl, 'confirmed');
+
+        // Get recent blockhash
+        const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
+
+        // Create transaction
+        const transaction = new Transaction({
+            recentBlockhash: blockhash,
+            feePayer: new PublicKey(state.publicKey),
         });
 
-        const result = await response.json();
+        // Add deposit instruction
+        const depositInstruction = new TransactionInstruction({
+            programId: new PublicKey(CONFIG.programId),
+            keys: [
+                { pubkey: new PublicKey(state.publicKey), isSigner: true, isWritable: true },
+                { pubkey: new PublicKey(CONFIG.poolAccounts.poolAccount), isSigner: false, isWritable: true },
+                { pubkey: new PublicKey(CONFIG.poolAccounts.merkleAccount), isSigner: false, isWritable: true },
+            ],
+            data: Buffer.from(instructionData),
+        });
+        transaction.add(depositInstruction);
 
-        if (result.success) {
-            // Add UTXO to local storage
-            await state.utxoStorage.addUtxo({
-                commitment,
-                amount: amountRaw.toString(),
-                assetId,
-                blinding,
-                leafIndex: state.merkleTree.getLeafCount(),
-            });
+        updateTxStatus('Please approve in wallet...');
 
-            // Update local Merkle tree
-            await state.merkleTree.insert(commitment);
+        // Sign and send transaction
+        const signed = await state.wallet.signTransaction(transaction);
+        const signature = await connection.sendRawTransaction(signed.serialize());
 
-            updatePortfolio();
-            showTxSuccess(result.signature, result.explorer);
-        } else {
-            showTxError(result.error || 'Deposit failed');
-        }
+        updateTxStatus('Confirming transaction...');
+
+        // Wait for confirmation
+        await connection.confirmTransaction({
+            signature,
+            blockhash,
+            lastValidBlockHeight,
+        });
+
+        // Add UTXO to local storage
+        await state.utxoStorage.addUtxo({
+            commitment,
+            amount: amountRaw.toString(),
+            assetId,
+            blinding,
+            leafIndex: state.merkleTree.getLeafCount(),
+        });
+
+        // Update local Merkle tree
+        await state.merkleTree.insert(commitment);
+
+        updatePortfolio();
+        showTxSuccess(signature, `https://explorer.solana.com/tx/${signature}?cluster=testnet`);
+
     } catch (err) {
         console.error('Deposit failed:', err);
         showTxError(err.message);
     }
+}
+
+// Build deposit instruction data
+function buildDepositInstructionData(commitment, amount, assetType) {
+    // Layout: [instruction_id: u8, commitment: [32]u8, amount: u64, asset_type: u8]
+    const data = new Uint8Array(1 + 32 + 8 + 1);
+    let offset = 0;
+
+    // Instruction ID: 1 = Deposit
+    data[offset++] = 1;
+
+    // Commitment (32 bytes, big-endian)
+    const commitmentBigInt = BigInt(commitment);
+    for (let i = 31; i >= 0; i--) {
+        data[offset + i] = Number((commitmentBigInt >> BigInt((31 - i) * 8)) & 0xFFn);
+    }
+    offset += 32;
+
+    // Amount (8 bytes, little-endian)
+    let amountBigInt = BigInt(amount);
+    for (let i = 0; i < 8; i++) {
+        data[offset++] = Number(amountBigInt & 0xFFn);
+        amountBigInt >>= 8n;
+    }
+
+    // Asset type (1 byte)
+    data[offset++] = assetType;
+
+    return data;
+}
+
+// Load Solana Web3.js dynamically
+async function loadSolanaWeb3() {
+    if (window.solanaWeb3) return window.solanaWeb3;
+
+    return new Promise((resolve, reject) => {
+        const script = document.createElement('script');
+        script.src = 'https://unpkg.com/@solana/web3.js@latest/lib/index.iife.min.js';
+        script.onload = () => resolve(window.solanaWeb3);
+        script.onerror = reject;
+        document.head.appendChild(script);
+    });
 }
 
 async function executeWithdraw() {

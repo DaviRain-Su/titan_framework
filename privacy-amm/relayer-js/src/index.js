@@ -304,7 +304,7 @@ async function handleDeposit(body, env) {
     };
 
     // If relayer has a funded keypair, it can submit directly
-    if (env.RELAYER_PRIVATE_KEY) {
+    if (env.RELAYER_SECRET_KEY) {
         const result = await buildAndSendTransaction(
             env,
             instructionData,
