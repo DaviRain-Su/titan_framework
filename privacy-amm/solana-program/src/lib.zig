@@ -10,6 +10,7 @@ pub const merkle = @import("merkle.zig");
 pub const pool = @import("pool.zig");
 pub const nullifier_set = @import("nullifier_set.zig");
 pub const vk = @import("vk.zig");
+pub const spl_token = @import("spl_token.zig");
 
 // 指令类型
 pub const Instruction = enum(u8) {
@@ -231,7 +232,19 @@ fn handleSwap(context: sol.context.Context, data: []const u8) u64 {
 fn handleAddLiquidity(context: sol.context.Context, data: []const u8) u64 {
     sol.log.log("AddLiquidity");
 
-    if (context.accounts.len < 5) {
+    // Account layout:
+    // [0] provider: LP provider (signer)
+    // [1] pool_account: Pool state
+    // [2] user_token_a: User's token A account
+    // [3] user_token_b: User's token B account
+    // [4] pool_vault_a: Pool's token A vault
+    // [5] pool_vault_b: Pool's token B vault
+    // [6] lp_mint: LP token mint
+    // [7] user_lp_account: User's LP token account
+    // [8] pool_authority: PDA authority for the pool
+    // [9] token_program: SPL Token program
+
+    if (context.accounts.len < 10) {
         return @intFromEnum(ErrorCode.NotEnoughAccountKeys);
     }
 
@@ -241,10 +254,14 @@ fn handleAddLiquidity(context: sol.context.Context, data: []const u8) u64 {
     }
 
     const pool_account = context.accounts[1];
-    // accounts[2] = token_a_account (LP 的 token A)
-    // accounts[3] = token_b_account (LP 的 token B)
-    // accounts[4] = pool_token_a_vault
-    // accounts[5] = pool_token_b_vault
+    const user_token_a = context.accounts[2];
+    const user_token_b = context.accounts[3];
+    const pool_vault_a = context.accounts[4];
+    const pool_vault_b = context.accounts[5];
+    const lp_mint = context.accounts[6];
+    const user_lp_account = context.accounts[7];
+    const pool_authority = context.accounts[8];
+    // accounts[9] = token_program (not directly used, passed via CPI)
 
     const params = pool.AddLiquidityParams.deserialize(data) catch {
         return @intFromEnum(ErrorCode.InvalidInstructionData);
@@ -258,12 +275,27 @@ fn handleAddLiquidity(context: sol.context.Context, data: []const u8) u64 {
         };
     };
 
-    // TODO: 执行实际的 SPL Token 转账
-    // - 从 provider 的 token_a_account 转移 result.a 到 pool_token_a_vault
-    // - 从 provider 的 token_b_account 转移 result.b 到 pool_token_b_vault
-    // - 铸造 result.lp 个 LP token 给 provider
+    // Transfer token A from user to pool vault
+    spl_token.transfer(user_token_a, pool_vault_a, provider, result.a) catch {
+        sol.log.log("Token A transfer failed");
+        return @intFromEnum(ErrorCode.InvalidAccountData);
+    };
 
-    _ = result;
+    // Transfer token B from user to pool vault
+    spl_token.transfer(user_token_b, pool_vault_b, provider, result.b) catch {
+        sol.log.log("Token B transfer failed");
+        return @intFromEnum(ErrorCode.InvalidAccountData);
+    };
+
+    // Mint LP tokens to user (pool_authority is PDA signer)
+    // Get PDA seeds for pool authority
+    const pool_info = pool_account.info();
+    const pool_seeds = getPoolAuthoritySeedsFromInfo(pool_info);
+    spl_token.mintToSigned(lp_mint, user_lp_account, pool_authority, result.lp, &pool_seeds) catch {
+        sol.log.log("LP mint failed");
+        return @intFromEnum(ErrorCode.InvalidAccountData);
+    };
+
     sol.log.log("AddLiquidity done");
     return 0;
 }
@@ -271,7 +303,19 @@ fn handleAddLiquidity(context: sol.context.Context, data: []const u8) u64 {
 fn handleRemoveLiquidity(context: sol.context.Context, data: []const u8) u64 {
     sol.log.log("RemoveLiquidity");
 
-    if (context.accounts.len < 5) {
+    // Account layout:
+    // [0] provider: LP provider (signer)
+    // [1] pool_account: Pool state
+    // [2] user_token_a: User's token A account
+    // [3] user_token_b: User's token B account
+    // [4] pool_vault_a: Pool's token A vault
+    // [5] pool_vault_b: Pool's token B vault
+    // [6] lp_mint: LP token mint
+    // [7] user_lp_account: User's LP token account
+    // [8] pool_authority: PDA authority for the pool
+    // [9] token_program: SPL Token program
+
+    if (context.accounts.len < 10) {
         return @intFromEnum(ErrorCode.NotEnoughAccountKeys);
     }
 
@@ -281,6 +325,14 @@ fn handleRemoveLiquidity(context: sol.context.Context, data: []const u8) u64 {
     }
 
     const pool_account = context.accounts[1];
+    const user_token_a = context.accounts[2];
+    const user_token_b = context.accounts[3];
+    const pool_vault_a = context.accounts[4];
+    const pool_vault_b = context.accounts[5];
+    const lp_mint = context.accounts[6];
+    const user_lp_account = context.accounts[7];
+    const pool_authority = context.accounts[8];
+    // accounts[9] = token_program
 
     const params = pool.RemoveLiquidityParams.deserialize(data) catch {
         return @intFromEnum(ErrorCode.InvalidInstructionData);
@@ -294,14 +346,40 @@ fn handleRemoveLiquidity(context: sol.context.Context, data: []const u8) u64 {
         };
     };
 
-    // TODO: 执行实际的 SPL Token 转账
-    // - 从 pool_token_a_vault 转移 result.a 到 provider 的 token_a_account
-    // - 从 pool_token_b_vault 转移 result.b 到 provider 的 token_b_account
-    // - 销毁 provider 的 LP token
+    // Burn LP tokens from user
+    spl_token.burn(user_lp_account, lp_mint, provider, params.lp_amount) catch {
+        sol.log.log("LP burn failed");
+        return @intFromEnum(ErrorCode.InvalidAccountData);
+    };
 
-    _ = result;
+    // Transfer token A from pool vault to user (pool_authority is PDA signer)
+    const pool_info = pool_account.info();
+    const pool_seeds = getPoolAuthoritySeedsFromInfo(pool_info);
+    spl_token.transferSigned(pool_vault_a, user_token_a, pool_authority, result.a, &pool_seeds) catch {
+        sol.log.log("Token A transfer failed");
+        return @intFromEnum(ErrorCode.InvalidAccountData);
+    };
+
+    // Transfer token B from pool vault to user
+    spl_token.transferSigned(pool_vault_b, user_token_b, pool_authority, result.b, &pool_seeds) catch {
+        sol.log.log("Token B transfer failed");
+        return @intFromEnum(ErrorCode.InvalidAccountData);
+    };
+
     sol.log.log("RemoveLiquidity done");
     return 0;
+}
+
+/// Pool authority PDA seed prefix
+const POOL_AUTHORITY_SEED: []const u8 = "pool_authority";
+
+/// Get PDA seeds for pool authority using pool account info
+/// The pool authority PDA is derived from: ["pool_authority", pool_pubkey]
+fn getPoolAuthoritySeedsFromInfo(pool_info: sol.account.Account.Info) [2][]const u8 {
+    return .{
+        POOL_AUTHORITY_SEED,
+        &pool_info.id.bytes,
+    };
 }
 
 /// 包装验证函数以隔离栈使用
@@ -337,4 +415,5 @@ test "imports" {
     _ = pool;
     _ = nullifier_set;
     _ = vk;
+    _ = spl_token;
 }
