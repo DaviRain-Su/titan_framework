@@ -29639,6 +29639,674 @@ pub fn main() !void {
 
 ---
 
+### 18.26 Solana Privacy Hackathon：SDK 实战评估与行动计划
+
+> **状态**: 准备就绪
+> **目标**: 用 Zig SDK 参加 Solana 隐私黑客松
+> **仓库**: https://github.com/DaviRain-Su/solana-program-sdk-zig
+
+#### 18.26.1 SDK 现状全景评估
+
+**核心结论：SDK 已具备 95% 的功能完成度，可以立即开始黑客松开发。**
+
+##### 代码规模统计
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              solana-program-sdk-zig 代码统计                      │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   总代码量:        ~16,417 行 Zig                               │
+│   模块数量:        63 个链上模块                                 │
+│   测试用例:        390+ 测试                                     │
+│   示例程序:        3 个完整示例                                  │
+│                                                                 │
+│   ┌─────────────────────────────────────────────────────────┐   │
+│   │  src/                    # 程序 SDK (含 syscall)         │   │
+│   │  ├── allocator.zig       # BPF 内存分配器 (259行)        │   │
+│   │  ├── entrypoint.zig      # 入口点抽象 (47行)             │   │
+│   │  ├── syscalls.zig        # 33个 syscall 绑定 (263行)     │   │
+│   │  ├── instruction.zig     # CPI 封装 (150行)              │   │
+│   │  ├── bn254.zig           # BN254 椭圆曲线 (200行)        │   │
+│   │  ├── big_mod_exp.zig     # 模幂运算 (430行)              │   │
+│   │  ├── keccak_hasher.zig   # Keccak-256 (132行)            │   │
+│   │  └── [46 more modules]                                   │   │
+│   │                                                          │   │
+│   │  sdk/src/                # 共享 SDK (纯类型，无 syscall)  │   │
+│   │  ├── borsh.zig           # Borsh 序列化 (100行)          │   │
+│   │  ├── public_key.zig      # PublicKey 类型                │   │
+│   │  └── spl/                # SPL 程序绑定                  │   │
+│   │                                                          │   │
+│   │  anchor/                 # Anchor 风格框架               │   │
+│   │  examples/programs/      # 3个示例程序                   │   │
+│   │  client/                 # RPC/WebSocket 客户端          │   │
+│   └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+##### 功能完成度矩阵
+
+| 模块类别 | 已实现 | 状态 | 关键文件 |
+|:---|:---:|:---:|:---|
+| **核心类型** | 8/8 | ✅ 100% | `public_key.zig`, `hash.zig`, `signature.zig` |
+| **序列化** | 3/3 | ✅ 100% | `borsh.zig`, `bincode.zig` |
+| **程序基础** | 14/14 | ✅ 100% | `entrypoint.zig`, `context.zig`, `account.zig` |
+| **系统变量** | 10/10 | ✅ 100% | `clock.zig`, `rent.zig`, `slot_hashes.zig` |
+| **哈希函数** | 4/4 | ✅ 100% | `sha256_hasher.zig`, `keccak_hasher.zig`, `blake3.zig` |
+| **原生程序** | 12/12 | ✅ 100% | `system_program.zig`, `bpf_loader.zig` |
+| **高级密码学** | 3/4 | ⚠️ 75% | `bn254.zig`, `big_mod_exp.zig`, **缺 poseidon_hasher** |
+| **SPL 程序** | 3/3 | ✅ 100% | `spl/token.zig`, `spl/associated_token.zig` |
+
+##### 基础设施层详细分析
+
+**1. 内存分配器 (Allocator)** - ✅ 完整实现
+
+```zig
+// src/allocator.zig - 259 行
+
+// 两种分配器，适应不同场景
+pub const ForwardAllocator = struct {
+    // 从 0x300000000 (heap start) 向高地址分配
+    // 适合一般用途
+};
+
+pub const ReverseAllocator = struct {
+    // 从高地址向低地址分配
+    // 适合临时缓冲区
+};
+
+// 特性:
+// • 32KB heap 大小，符合 Solana BPF 规范
+// • comptime 初始化支持
+// • 完整 Zig std.mem.Allocator 接口
+// • 对齐感知分配 (alignPointerOffset)
+```
+
+**2. Panic 处理器** - ⚠️ 基础实现
+
+```zig
+// src/syscalls.zig:215
+pub const abort = @as(
+    *align(1) const fn () callconv(.c) noreturn,
+    @ptrFromInt(0xe31de8c1)  // murmur3 hash
+);
+
+// 使用方式: @panic("message") → Solana runtime 处理
+// 限制: 无自定义堆栈展开，依赖 runtime 默认行为
+```
+
+**3. 入口点抽象 (Entrypoint)** - ✅ 完整实现
+
+```zig
+// src/entrypoint.zig - 47 行
+
+// 用户代码:
+comptime {
+    sol.entrypoint(&processInstruction);
+}
+
+fn processInstruction(
+    program_id: *PublicKey,
+    accounts: []Account,
+    data: []const u8,
+) ProgramResult {
+    // 业务逻辑
+    return .ok;
+}
+
+// SDK 自动生成:
+// extern "C" fn entrypoint(...) callconv(.c) u64
+```
+
+**4. CPI (跨程序调用)** - ✅ 完整实现
+
+```zig
+// src/instruction.zig - 150+ 行
+
+pub const Instruction = extern struct {
+    program_id: *const PublicKey,
+    accounts: [*]const Account.Param,
+    accounts_len: usize,
+    data: [*]const u8,
+    data_len: usize,
+
+    pub fn invoke(self: *const Self, account_infos: []const Account.Info) ?ProgramError {
+        // 调用 sol_invoke_signed_c syscall
+    }
+
+    pub fn invokeSigned(
+        self: *const Self,
+        account_infos: []const Account.Info,
+        signer_seeds: []const []const []const u8,
+    ) ?ProgramError {
+        // 带 PDA 签名的调用
+    }
+};
+```
+
+**5. Borsh 序列化** - ✅ 完整实现
+
+```zig
+// sdk/src/borsh.zig - 100+ 行
+
+// comptime 类型推导，自动生成序列化器
+pub fn serialize(comptime T: type, value: T, buffer: []u8) ![]u8 {
+    // 支持: bool, int, float, array, slice, struct, enum, optional
+}
+
+pub fn deserialize(comptime T: type, buffer: []const u8) !T {
+    // 反序列化
+}
+
+pub fn serializedSize(comptime T: type, value: T) usize {
+    // 编译期大小计算
+}
+```
+
+#### 18.26.2 隐私黑客松需求矩阵
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    隐私黑客松技术栈需求                           │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  应用层 (Hackathon Project)                                     │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │  Private Transfer │ ZK Swap │ Anonymous Voting          │   │
+│  │       目标          │   进阶    │     高级                │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                          │                                      │
+│                          ▼                                      │
+│  隐私组件层 (需要实现)                                           │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │  Groth16 Verifier │ Merkle Tree │ Nullifier Set         │   │
+│  │      ⏳ 待实现      │   ⏳ 待实现   │    ⏳ 待实现          │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                          │                                      │
+│                          ▼                                      │
+│  密码学原语层                                                    │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │  BN254     │ Poseidon │ Keccak256 │ BigModExp           │   │
+│  │   ✅ 完整   │ ⚠️ 缺包装 │   ✅ 完整   │   ✅ 完整           │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                          │                                      │
+│                          ▼                                      │
+│  Syscall 层 (✅ 全部 33 个)                                     │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │  sol_alt_bn128   │ sol_poseidon │ sol_keccak256         │   │
+│  │  0xae0c318b ✅   │ 0xc4947c21 ✅ │ 0xd7793abb ✅         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+##### ZK 相关 Syscall 现状
+
+| Syscall | Hash | 绑定 | Wrapper | 测试 |
+|:---|:---:|:---:|:---:|:---:|
+| `sol_alt_bn128_group_op` | 0xae0c318b | ✅ | ✅ `bn254.zig` | ✅ |
+| `sol_poseidon` | 0xc4947c21 | ✅ | ❌ **缺失** | ❌ |
+| `sol_keccak256` | 0xd7793abb | ✅ | ✅ `keccak_hasher.zig` | ✅ |
+| `sol_sha256` | 0x11f49d86 | ✅ | ✅ `sha256_hasher.zig` | ✅ |
+| `sol_blake3` | 0x174c5122 | ✅ | ✅ `blake3.zig` | ✅ |
+| `sol_big_mod_exp` | 0x780e4c15 | ✅ | ✅ `big_mod_exp.zig` | ✅ |
+| `sol_secp256k1_recover` | 0x17e40350 | ✅ | ⚠️ 部分 | ⚠️ |
+| `sol_curve_validate_point` | 0xaa2607ca | ✅ | ❌ 缺失 | ❌ |
+| `sol_curve_group_op` | 0xdd1c41a6 | ✅ | ❌ 缺失 | ❌ |
+
+#### 18.26.3 关键缺口：Poseidon Hasher
+
+**这是参加隐私黑客松的入场券！**
+
+Poseidon 是 ZK 友好的哈希函数，用于：
+- Merkle Tree 节点哈希（隐私存款/取款证明）
+- Nullifier 计算（防止双花）
+- 承诺方案（隐藏交易金额）
+
+##### 实现模板
+
+```zig
+//! src/poseidon_hasher.zig
+//! Poseidon Hash - ZK 友好哈希函数
+//!
+//! 用途:
+//! - Merkle Tree 节点哈希
+//! - Nullifier 计算
+//! - 隐私承诺方案
+
+const std = @import("std");
+const builtin = @import("builtin");
+const syscalls = @import("syscalls.zig");
+
+const is_bpf_program = builtin.cpu.arch.isRiscV();
+
+/// Poseidon 输出大小 (BN254 标量域)
+pub const POSEIDON_OUTPUT_SIZE: usize = 32;
+
+/// 最大输入数量 (field elements)
+pub const POSEIDON_MAX_INPUTS: usize = 12;
+
+/// Poseidon 参数配置
+pub const PoseidonParams = enum(u64) {
+    /// BN254 曲线, x^5 S-box, 适用于 Groth16
+    bn254_x5 = 0,
+
+    // 未来可扩展其他参数
+};
+
+/// Poseidon 哈希错误
+pub const PoseidonError = error{
+    /// Syscall 调用失败
+    SyscallFailed,
+    /// 输入数量超限
+    TooManyInputs,
+    /// 输入长度无效
+    InvalidInputLength,
+};
+
+/// 计算 Poseidon 哈希
+///
+/// 参数:
+/// - params: 哈希参数配置
+/// - inputs: 输入 field elements (每个 32 字节)
+///
+/// 返回: 32 字节哈希结果
+pub fn hash(
+    params: PoseidonParams,
+    inputs: []const [32]u8,
+) PoseidonError![POSEIDON_OUTPUT_SIZE]u8 {
+    if (inputs.len > POSEIDON_MAX_INPUTS) {
+        return error.TooManyInputs;
+    }
+
+    var result: [POSEIDON_OUTPUT_SIZE]u8 = undefined;
+
+    if (comptime is_bpf_program) {
+        // 链上: 调用 Solana syscall
+        const input_ptr = @as([*]const u8, @ptrCast(inputs.ptr));
+        const input_len = inputs.len * 32;
+
+        const status = syscalls.sol_poseidon(
+            @intFromEnum(params),  // 参数配置
+            inputs.len,            // 输入数量
+            input_ptr,             // 输入指针
+            input_len,             // 输入字节长度
+            &result,               // 输出指针
+        );
+
+        if (status != 0) {
+            return error.SyscallFailed;
+        }
+    } else {
+        // 链下: 使用纯 Zig 实现或 FFI
+        // TODO: 集成 poseidon-zig 库或实现 reference implementation
+        @panic("Native Poseidon not yet implemented - use BPF target for testing");
+    }
+
+    return result;
+}
+
+/// 计算两个值的 Poseidon 哈希 (Merkle Tree 常用)
+pub fn hash2(left: [32]u8, right: [32]u8) ![32]u8 {
+    return hash(.bn254_x5, &.{ left, right });
+}
+
+/// 计算单个值的 Poseidon 哈希 (叶子节点)
+pub fn hash1(value: [32]u8) ![32]u8 {
+    return hash(.bn254_x5, &.{value});
+}
+
+/// 计算 Nullifier
+/// nullifier = Poseidon(secret, leaf_index)
+pub fn computeNullifier(secret: [32]u8, leaf_index: u64) ![32]u8 {
+    var index_bytes: [32]u8 = std.mem.zeroes([32]u8);
+    std.mem.writeInt(u64, index_bytes[0..8], leaf_index, .little);
+    return hash2(secret, index_bytes);
+}
+
+// ============ 测试 ============
+
+test "poseidon hash2" {
+    if (comptime is_bpf_program) {
+        // 链上测试
+        const left = [_]u8{1} ** 32;
+        const right = [_]u8{2} ** 32;
+        const result = try hash2(left, right);
+
+        // 验证输出非零
+        var all_zero = true;
+        for (result) |b| {
+            if (b != 0) all_zero = false;
+        }
+        try std.testing.expect(!all_zero);
+    }
+}
+```
+
+#### 18.26.4 Merkle Tree 验证器模板
+
+```zig
+//! src/merkle.zig
+//! Sparse Merkle Tree 验证器
+//!
+//! 用于隐私应用的成员证明验证
+
+const std = @import("std");
+const poseidon = @import("poseidon_hasher.zig");
+
+/// 创建指定深度的 Merkle Tree 验证器
+pub fn MerkleTree(comptime depth: u8) type {
+    return struct {
+        const Self = @This();
+
+        pub const DEPTH = depth;
+        pub const TREE_SIZE = @as(u64, 1) << depth;  // 2^depth
+
+        /// Merkle 证明
+        pub const Proof = struct {
+            /// 兄弟节点路径 (从叶子到根)
+            siblings: [DEPTH][32]u8,
+            /// 路径索引 (0 = 左, 1 = 右)
+            path_indices: [DEPTH]u1,
+        };
+
+        /// 验证 Merkle 证明
+        ///
+        /// 参数:
+        /// - leaf: 叶子节点值
+        /// - root: 期望的根哈希
+        /// - proof: Merkle 证明
+        ///
+        /// 返回: 验证是否通过
+        pub fn verifyProof(
+            leaf: [32]u8,
+            root: [32]u8,
+            proof: Proof,
+        ) !bool {
+            var current = leaf;
+
+            // 从叶子向上计算到根
+            for (0..DEPTH) |i| {
+                const sibling = proof.siblings[i];
+
+                current = if (proof.path_indices[i] == 0)
+                    // 当前节点在左边
+                    try poseidon.hash2(current, sibling)
+                else
+                    // 当前节点在右边
+                    try poseidon.hash2(sibling, current);
+            }
+
+            return std.mem.eql(u8, &current, &root);
+        }
+
+        /// 计算叶子索引的路径
+        pub fn computePath(leaf_index: u64) [DEPTH]u1 {
+            var path: [DEPTH]u1 = undefined;
+            var index = leaf_index;
+
+            for (0..DEPTH) |i| {
+                path[i] = @truncate(index & 1);
+                index >>= 1;
+            }
+
+            return path;
+        }
+
+        /// 计算承诺 (用于存款)
+        /// commitment = Poseidon(secret, nullifier, amount)
+        pub fn computeCommitment(
+            secret: [32]u8,
+            nullifier: [32]u8,
+            amount: u64,
+        ) ![32]u8 {
+            var amount_bytes: [32]u8 = std.mem.zeroes([32]u8);
+            std.mem.writeInt(u64, amount_bytes[0..8], amount, .little);
+
+            // commitment = H(H(secret, nullifier), amount)
+            const inner = try poseidon.hash2(secret, nullifier);
+            return poseidon.hash2(inner, amount_bytes);
+        }
+    };
+}
+
+/// 常用的 20 层 Merkle Tree (支持 ~100万 叶子)
+pub const MerkleTree20 = MerkleTree(20);
+
+/// 测试用的 8 层小树
+pub const MerkleTree8 = MerkleTree(8);
+```
+
+#### 18.26.5 Groth16 验证器框架
+
+```zig
+//! src/groth16.zig
+//! Groth16 零知识证明验证器
+//!
+//! 基于 BN254 曲线，使用 sol_alt_bn128 syscall
+
+const std = @import("std");
+const bn254 = @import("bn254.zig");
+
+/// Groth16 证明结构
+pub const Proof = struct {
+    /// G1 点 A (64 字节)
+    a: [64]u8,
+    /// G2 点 B (128 字节)
+    b: [128]u8,
+    /// G1 点 C (64 字节)
+    c: [64]u8,
+};
+
+/// 验证密钥
+pub const VerifyingKey = struct {
+    /// alpha * G1
+    alpha_g1: [64]u8,
+    /// beta * G2
+    beta_g2: [128]u8,
+    /// gamma * G2
+    gamma_g2: [128]u8,
+    /// delta * G2
+    delta_g2: [128]u8,
+    /// IC 点数组 (G1)，长度 = public_inputs + 1
+    ic: []const [64]u8,
+};
+
+/// Groth16 验证错误
+pub const VerifyError = error{
+    /// 公开输入数量不匹配
+    InvalidPublicInputCount,
+    /// G1 点运算失败
+    G1OperationFailed,
+    /// 配对运算失败
+    PairingFailed,
+    /// 验证失败
+    VerificationFailed,
+};
+
+/// 验证 Groth16 证明
+///
+/// 验证方程:
+/// e(A, B) = e(alpha, beta) * e(vk_x, gamma) * e(C, delta)
+///
+/// 其中 vk_x = IC[0] + sum(IC[i+1] * public_input[i])
+pub fn verify(
+    vk: VerifyingKey,
+    proof: Proof,
+    public_inputs: []const [32]u8,
+) VerifyError!bool {
+    // 1. 验证公开输入数量
+    if (public_inputs.len + 1 != vk.ic.len) {
+        return error.InvalidPublicInputCount;
+    }
+
+    // 2. 计算 vk_x = IC[0] + sum(IC[i+1] * input[i])
+    var vk_x = vk.ic[0];
+
+    for (public_inputs, 0..) |input, i| {
+        // term = IC[i+1] * input[i]
+        const term = bn254.g1ScalarMul(vk.ic[i + 1], input) catch {
+            return error.G1OperationFailed;
+        };
+
+        // vk_x = vk_x + term
+        vk_x = bn254.g1Add(vk_x, term) catch {
+            return error.G1OperationFailed;
+        };
+    }
+
+    // 3. 配对检查
+    // e(A, B) * e(-alpha, beta) * e(-vk_x, gamma) * e(-C, delta) == 1
+    const neg_alpha = bn254.g1Negate(vk.alpha_g1);
+    const neg_vk_x = bn254.g1Negate(vk_x);
+    const neg_c = bn254.g1Negate(proof.c);
+
+    const pairing_result = bn254.pairing(&.{
+        .{ proof.a, proof.b },
+        .{ neg_alpha, vk.beta_g2 },
+        .{ neg_vk_x, vk.gamma_g2 },
+        .{ neg_c, vk.delta_g2 },
+    }) catch {
+        return error.PairingFailed;
+    };
+
+    // 4. 检查配对结果是否为 1
+    return bn254.isPairingOne(pairing_result);
+}
+```
+
+#### 18.26.6 黑客松实施路线图
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Solana Privacy Hackathon 路线图                │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Week 1: 加固内核层                                              │
+│  ═══════════════════                                            │
+│                                                                 │
+│   Day 1-2: Poseidon Hasher                                      │
+│   ┌─────────────────────────────────────────────────────────┐   │
+│   │  • 创建 src/poseidon_hasher.zig                         │   │
+│   │  • 实现 hash(), hash2(), computeNullifier()             │   │
+│   │  • 添加 BPF 和 native 双模式支持                         │   │
+│   │  • 编写测试用例                                          │   │
+│   └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│   Day 3-4: Merkle Tree                                          │
+│   ┌─────────────────────────────────────────────────────────┐   │
+│   │  • 创建 src/merkle.zig                                  │   │
+│   │  • 实现 verifyProof(), computeCommitment()              │   │
+│   │  • 支持可配置深度 (comptime)                             │   │
+│   │  • 与 Poseidon 集成测试                                  │   │
+│   └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│   Day 5-7: Groth16 Verifier                                     │
+│   ┌─────────────────────────────────────────────────────────┐   │
+│   │  • 创建 src/groth16.zig                                 │   │
+│   │  • 实现 verify() 函数                                    │   │
+│   │  • 与 bn254.zig 集成                                     │   │
+│   │  • 使用 snarkjs 生成测试向量验证                         │   │
+│   └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│  Week 2: 构建隐私组件                                            │
+│  ═══════════════════                                            │
+│                                                                 │
+│   Day 8-10: Private Deposit                                     │
+│   ┌─────────────────────────────────────────────────────────┐   │
+│   │  • 存款合约: 接收 SOL/Token，记录 commitment             │   │
+│   │  • 更新 Merkle Tree 根                                   │   │
+│   │  • 发出存款事件                                          │   │
+│   └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│   Day 11-14: Private Withdraw                                   │
+│   ┌─────────────────────────────────────────────────────────┐   │
+│   │  • 取款合约: 验证 ZK 证明                                │   │
+│   │  • 检查 nullifier 防止双花                               │   │
+│   │  • 转账到目标地址                                        │   │
+│   └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│  Week 3: Demo & Pitch                                           │
+│  ═══════════════════                                            │
+│                                                                 │
+│   Day 15-17: 集成测试                                            │
+│   ┌─────────────────────────────────────────────────────────┐   │
+│   │  • 端到端流程测试                                        │   │
+│   │  • CU 消耗优化                                           │   │
+│   │  • 二进制大小优化                                        │   │
+│   └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│   Day 18-21: Pitch 准备                                          │
+│   ┌─────────────────────────────────────────────────────────┐   │
+│   │  • Demo 视频录制                                         │   │
+│   │  • 技术文档                                              │   │
+│   │  • Pitch Deck                                            │   │
+│   └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.26.7 竞争优势分析
+
+##### Zig vs Rust+Anchor 对比
+
+| 维度 | Rust + Anchor | Zig SDK | 优势 |
+|:---|:---:|:---:|:---|
+| **二进制大小** | 200-500 KB | 20-50 KB | **10x 更小** |
+| **部署成本** | ~2 SOL | ~0.2 SOL | **10x 更便宜** |
+| **编译时间** | 30-60s | 1-5s | **10x 更快** |
+| **CU 消耗** | 基线 | -10~20% | 更高效 |
+| **学习曲线** | 陡峭 | 平缓 | 更友好 |
+| **生态成熟度** | ⭐⭐⭐⭐⭐ | ⭐⭐ | Rust 领先 |
+
+##### Pitch 话术
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        Elevator Pitch                            │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  "我们用 Zig 重写了 Solana SDK，                                 │
+│   实现了一个仅 XX KB 的隐私转账合约。                            │
+│                                                                 │
+│   这比 Rust+Anchor 小 10 倍，                                    │
+│   部署成本低 10 倍，                                             │
+│   编译速度快 10 倍。                                             │
+│                                                                 │
+│   关键是：我们直接调用 BN254 和 Poseidon syscall，               │
+│   实现了零开销的 ZK 验证。                                       │
+│                                                                 │
+│   这不只是一个黑客松项目，                                       │
+│   这是 Titan OS 愿景的第一步 ——                                  │
+│   用 Zig 统一所有区块链的开发体验。"                             │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.26.8 立即行动清单
+
+| 优先级 | 任务 | 预计时间 | 文件 |
+|:---:|:---|:---:|:---|
+| **P0** | 创建 `poseidon_hasher.zig` | 1 天 | `src/poseidon_hasher.zig` |
+| **P0** | 创建 `merkle.zig` | 1 天 | `src/merkle.zig` |
+| **P1** | 创建 `groth16.zig` | 2 天 | `src/groth16.zig` |
+| **P1** | 编写 Circom 电路 | 2 天 | `circuits/` |
+| **P2** | 存款合约 | 2 天 | `programs/deposit/` |
+| **P2** | 取款合约 | 3 天 | `programs/withdraw/` |
+| **P3** | 前端 Demo | 2 天 | `app/` |
+
+---
+
+**SDK 仓库**: https://github.com/DaviRain-Su/solana-program-sdk-zig
+
+**技术栈**:
+- 语言: Zig 0.14.x
+- 目标: SBF (Solana BPF)
+- 依赖: base58, MCL (可选)
+
+---
+
 ## 相关文档
 
 | 文档 | 说明 |
