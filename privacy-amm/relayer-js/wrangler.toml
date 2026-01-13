@@ -1,0 +1,10 @@
+name = "privacy-amm-relayer"
+main = "src/index.js"
+compatibility_date = "2024-01-01"
+
+[vars]
+SOLANA_RPC_URL = "https://api.testnet.solana.com"
+PROGRAM_ID = "7DGg2ouvHsZecGDocaY1nu6ZmSDvSq9NsLSHd16ENHbQ"
+
+# For production, use secrets instead of vars for sensitive data
+# wrangler secret put RELAYER_PRIVATE_KEY

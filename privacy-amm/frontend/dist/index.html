@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Privacy AMM - Solana's First Private DEX</title>
+  <script type="module" crossorigin src="/assets/index-B6LgiG80.js"></script>
+  <link rel="stylesheet" crossorigin href="/assets/index-Df830-tL.css">
+</head>
+<body>
+    <div id="app">
+        <!-- Header -->
+        <header class="header">
+            <div class="logo">
+                <span class="logo-icon">🔒</span>
+                <span class="logo-text">Privacy AMM</span>
+            </div>
+            <nav class="nav">
+                <a href="#swap" class="nav-link active" data-tab="swap">Swap</a>
+                <a href="#liquidity" class="nav-link" data-tab="liquidity">Liquidity</a>
+                <a href="#portfolio" class="nav-link" data-tab="portfolio">Portfolio</a>
+            </nav>
+            <div class="wallet-section">
+                <button id="connect-wallet" class="btn btn-primary">Connect Wallet</button>
+                <div id="wallet-info" class="wallet-info hidden">
+                    <span id="wallet-address"></span>
+                    <button id="disconnect-wallet" class="btn btn-small">Disconnect</button>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="main">
+            <!-- Swap Tab -->
+            <div id="swap-tab" class="tab-content active">
+                <div class="card swap-card">
+                    <h2>Private Swap</h2>
+                    <p class="subtitle">Swap tokens with zero-knowledge privacy</p>
+
+                    <div class="swap-form">
+                        <div class="input-group">
+                            <label>From</label>
+                            <div class="token-input">
+                                <input type="number" id="swap-from-amount" placeholder="0.0" step="0.000001">
+                                <select id="swap-from-token">
+                                    <option value="SOL">SOL</option>
+                                    <option value="USDC">USDC</option>
+                                </select>
+                            </div>
+                            <div class="balance">Balance: <span id="from-balance">0.00</span></div>
+                        </div>
+
+                        <button class="swap-direction" id="swap-direction">⇅</button>
+
+                        <div class="input-group">
+                            <label>To</label>
+                            <div class="token-input">
+                                <input type="number" id="swap-to-amount" placeholder="0.0" readonly>
+                                <select id="swap-to-token">
+                                    <option value="USDC">USDC</option>
+                                    <option value="SOL">SOL</option>
+                                </select>
+                            </div>
+                            <div class="balance">Balance: <span id="to-balance">0.00</span></div>
+                        </div>
+
+                        <div class="swap-info">
+                            <div class="info-row">
+                                <span>Rate</span>
+                                <span id="swap-rate">1 SOL = 150 USDC</span>
+                            </div>
+                            <div class="info-row">
+                                <span>Price Impact</span>
+                                <span id="price-impact">0.01%</span>
+                            </div>
+                            <div class="info-row">
+                                <span>Slippage Tolerance</span>
+                                <span id="slippage">0.5%</span>
+                            </div>
+                        </div>
+
+                        <button id="swap-btn" class="btn btn-primary btn-large" disabled>
+                            Connect Wallet to Swap
+                        </button>
+                    </div>
+
+                    <div class="privacy-badge">
+                        <span class="badge-icon">🛡️</span>
+                        <span>Protected by Zero-Knowledge Proofs</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Liquidity Tab -->
+            <div id="liquidity-tab" class="tab-content">
+                <div class="card">
+                    <h2>Private Liquidity</h2>
+                    <p class="subtitle">Provide liquidity and earn fees privately</p>
+
+                    <div class="tabs-inner">
+                        <button class="tab-btn active" data-action="add">Add Liquidity</button>
+                        <button class="tab-btn" data-action="remove">Remove Liquidity</button>
+                    </div>
+
+                    <!-- Add Liquidity -->
+                    <div id="add-liquidity" class="liquidity-form">
+                        <div class="input-group">
+                            <label>Token A (SOL)</label>
+                            <div class="token-input">
+                                <input type="number" id="add-token-a" placeholder="0.0">
+                                <span class="token-label">SOL</span>
+                            </div>
+                        </div>
+
+                        <div class="input-group">
+                            <label>Token B (USDC)</label>
+                            <div class="token-input">
+                                <input type="number" id="add-token-b" placeholder="0.0">
+                                <span class="token-label">USDC</span>
+                            </div>
+                        </div>
+
+                        <div class="swap-info">
+                            <div class="info-row">
+                                <span>LP Tokens to Receive</span>
+                                <span id="lp-receive">0.00</span>
+                            </div>
+                            <div class="info-row">
+                                <span>Share of Pool</span>
+                                <span id="pool-share">0.00%</span>
+                            </div>
+                        </div>
+
+                        <button id="add-liquidity-btn" class="btn btn-primary btn-large" disabled>
+                            Add Liquidity
+                        </button>
+                    </div>
+
+                    <!-- Remove Liquidity -->
+                    <div id="remove-liquidity" class="liquidity-form hidden">
+                        <div class="input-group">
+                            <label>LP Tokens</label>
+                            <div class="token-input">
+                                <input type="number" id="remove-lp" placeholder="0.0">
+                                <span class="token-label">LP</span>
+                            </div>
+                            <div class="balance">Your LP Balance: <span id="lp-balance">0.00</span></div>
+                        </div>
+
+                        <div class="swap-info">
+                            <div class="info-row">
+                                <span>SOL to Receive</span>
+                                <span id="receive-sol">0.00</span>
+                            </div>
+                            <div class="info-row">
+                                <span>USDC to Receive</span>
+                                <span id="receive-usdc">0.00</span>
+                            </div>
+                        </div>
+
+                        <button id="remove-liquidity-btn" class="btn btn-primary btn-large" disabled>
+                            Remove Liquidity
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Portfolio Tab -->
+            <div id="portfolio-tab" class="tab-content">
+                <div class="card">
+                    <h2>Private Portfolio</h2>
+                    <p class="subtitle">Your hidden assets (only visible to you)</p>
+
+                    <div class="portfolio-summary">
+                        <div class="summary-item">
+                            <span class="label">Total Value</span>
+                            <span class="value" id="total-value">$0.00</span>
+                        </div>
+                        <div class="summary-item">
+                            <span class="label">Private UTXOs</span>
+                            <span class="value" id="utxo-count">0</span>
+                        </div>
+                    </div>
+
+                    <div class="asset-list">
+                        <h3>Private Assets</h3>
+                        <div id="asset-list-content">
+                            <p class="empty-state">Connect wallet to view your private assets</p>
+                        </div>
+                    </div>
+
+                    <div class="actions">
+                        <button id="deposit-btn" class="btn btn-secondary" disabled>
+                            Deposit (Public → Private)
+                        </button>
+                        <button id="withdraw-btn" class="btn btn-secondary" disabled>
+                            Withdraw (Private → Public)
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <div class="footer-links">
+                <a href="https://github.com/anthropics/titan_framework" target="_blank">GitHub</a>
+                <a href="https://explorer.solana.com/?cluster=testnet" target="_blank">Explorer</a>
+                <a href="#" id="docs-link">Docs</a>
+            </div>
+            <div class="footer-info">
+                <span>Network: Solana Testnet</span>
+                <span>•</span>
+                <span>Powered by Zero-Knowledge Proofs</span>
+            </div>
+        </footer>
+
+        <!-- Modals -->
+        <div id="modal-overlay" class="modal-overlay hidden">
+            <!-- Transaction Modal -->
+            <div id="tx-modal" class="modal hidden">
+                <div class="modal-header">
+                    <h3>Transaction Status</h3>
+                    <button class="modal-close">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <div class="tx-status">
+                        <div class="spinner" id="tx-spinner"></div>
+                        <p id="tx-status-text">Generating ZK Proof...</p>
+                    </div>
+                    <div id="tx-success" class="hidden">
+                        <div class="success-icon">✓</div>
+                        <p>Transaction Successful!</p>
+                        <a id="tx-explorer-link" href="#" target="_blank" class="btn btn-secondary">
+                            View on Explorer
+                        </a>
+                    </div>
+                    <div id="tx-error" class="hidden">
+                        <div class="error-icon">✗</div>
+                        <p id="tx-error-text">Transaction failed</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Deposit Modal -->
+            <div id="deposit-modal" class="modal hidden">
+                <div class="modal-header">
+                    <h3>Deposit to Private Pool</h3>
+                    <button class="modal-close">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <div class="input-group">
+                        <label>Amount</label>
+                        <div class="token-input">
+                            <input type="number" id="deposit-amount" placeholder="0.0">
+                            <select id="deposit-token">
+                                <option value="SOL">SOL</option>
+                                <option value="USDC">USDC</option>
+                            </select>
+                        </div>
+                    </div>
+                    <p class="info-text">
+                        This will convert your public tokens to private UTXOs.
+                        Only you will know your balance.
+                    </p>
+                    <button id="confirm-deposit" class="btn btn-primary btn-large">
+                        Deposit
+                    </button>
+                </div>
+            </div>
+
+            <!-- Withdraw Modal -->
+            <div id="withdraw-modal" class="modal hidden">
+                <div class="modal-header">
+                    <h3>Withdraw from Private Pool</h3>
+                    <button class="modal-close">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <div class="input-group">
+                        <label>Amount</label>
+                        <div class="token-input">
+                            <input type="number" id="withdraw-amount" placeholder="0.0">
+                            <select id="withdraw-token">
+                                <option value="SOL">SOL</option>
+                                <option value="USDC">USDC</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="input-group">
+                        <label>Recipient Address</label>
+                        <input type="text" id="withdraw-recipient" placeholder="Solana address...">
+                    </div>
+                    <p class="info-text">
+                        This will convert your private UTXOs to public tokens.
+                        A ZK proof will be generated to verify ownership.
+                    </p>
+                    <button id="confirm-withdraw" class="btn btn-primary btn-large">
+                        Withdraw
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+</body>
+</html>
