@@ -20208,6 +20208,1182 @@ component main {public [
 
 ---
 
+### 18.15 Titan ID: 全链身份统一层 (The Universal Identity Layer)
+
+> **核心命题**: 如果 Titan OS 是操作系统，那么 **Titan ID** 就是它的 **Apple ID** —— 一个通行的、底层的、用户无感的身份层。
+
+#### 18.15.1 问题的本质：碎片化身份
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     传统 Web3 身份模型：噩梦                                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  用户想使用 Web3:                                                           │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                      │   │
+│  │   Ethereum:  0xAbc123...  (记住助记词 A)                            │   │
+│  │   Solana:    D8s7Kp2...   (记住助记词 B)                            │   │
+│  │   TON:       EQBv...       (记住助记词 C)                            │   │
+│  │   Bitcoin:   bc1q...       (记住助记词 D)                            │   │
+│  │   Cosmos:    cosmos1...    (记住助记词 E)                            │   │
+│  │                                                                      │   │
+│  │   每条链一个钱包，每个钱包一套助记词                                 │   │
+│  │   用户需要安全保管 5 套 12-24 个单词                                │   │
+│  │                                                                      │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  结果:                                                                      │
+│  • 99% 的普通人直接放弃                                                    │
+│  • 剩下 1% 的人不断丢失资产                                                │
+│  • Web3 永远停留在"极客玩具"阶段                                          │
+│                                                                             │
+│  ─────────────────────────────────────────────────────────────────────────  │
+│                                                                             │
+│  这不是用户体验问题，这是 **架构问题**。                                   │
+│  没有统一的身份层，就不可能有大规模采用。                                  │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.15.2 Titan ID：终极解决方案
+
+**核心思想**：将"钱包"概念彻底抹除，取而代之的是"账户" (Account)。
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     Titan ID 架构：一个身份，所有链                          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│                         用户唯一的输入                                      │
+│                              │                                              │
+│                              ▼                                              │
+│                    ┌─────────────────┐                                     │
+│                    │  user@gmail.com │                                     │
+│                    │   (Email 登录)  │                                     │
+│                    └────────┬────────┘                                     │
+│                             │                                               │
+│                             ▼                                               │
+│                    ┌─────────────────┐                                     │
+│                    │   Titan ID      │                                     │
+│                    │  ┌───────────┐  │                                     │
+│                    │  │ Identity  │  │                                     │
+│                    │  │ Commitment│  │  hash(email || master_salt)         │
+│                    │  └───────────┘  │                                     │
+│                    └────────┬────────┘                                     │
+│                             │                                               │
+│              ┌──────────────┼──────────────┬──────────────┐                │
+│              │              │              │              │                │
+│              ▼              ▼              ▼              ▼                │
+│        ┌─────────┐   ┌─────────┐   ┌─────────┐   ┌─────────┐             │
+│        │   EVM   │   │ Solana  │   │   TON   │   │ Cosmos  │             │
+│        │ Driver  │   │ Driver  │   │ Driver  │   │ Driver  │             │
+│        └────┬────┘   └────┬────┘   └────┬────┘   └────┬────┘             │
+│             │             │             │             │                    │
+│             ▼             ▼             ▼             ▼                    │
+│        0xAbc...      D8s7Kp2...    EQBv...     cosmos1...                  │
+│       (ERC-4337      (PDA 派生)   (v4 合约)   (Authz 模块)                 │
+│        智能账户)                                                           │
+│                                                                             │
+│  ─────────────────────────────────────────────────────────────────────────  │
+│                                                                             │
+│  用户视角:                                                                  │
+│  • 登录: "Continue with Google"                                            │
+│  • 看到: "Balance: $1,234.56" (所有链资产汇总)                            │
+│  • 操作: 点击发送，输入金额，完成                                          │
+│  • 不需要知道: 哪条链、什么地址、Gas 费多少                               │
+│                                                                             │
+│  这就是 **操作系统** 该做的事。                                            │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.15.3 确定性地址派生 (Deterministic Derivation)
+
+**关键洞察**：从一个身份，数学上确定性地派生出所有链的地址。
+
+```zig
+// ============================================================================
+// Titan ID: 全链地址派生
+// ============================================================================
+
+const std = @import("std");
+const poseidon = @import("poseidon.zig");
+
+/// 支持的链类型
+pub const ChainType = enum(u8) {
+    evm = 1,        // Ethereum, Polygon, Arbitrum, etc.
+    solana = 2,     // Solana
+    ton = 3,        // TON
+    cosmos = 4,     // Cosmos Hub, Osmosis, etc.
+    bitcoin = 5,    // Bitcoin (Taproot)
+    sui = 6,        // Sui
+    aptos = 7,      // Aptos
+};
+
+/// Titan ID 核心结构
+pub const TitanID = struct {
+    /// 身份承诺 = poseidon(email_hash, master_salt)
+    identity_commitment: [32]u8,
+
+    /// 主盐值 (用户本地派生，永不上链)
+    master_salt: [32]u8,
+
+    /// 从 Titan ID 派生指定链的地址
+    pub fn deriveAddress(self: *const TitanID, chain: ChainType) [32]u8 {
+        // Domain Separation: 每条链使用不同的前缀
+        const domain = switch (chain) {
+            .evm => "titan:derive:evm:v1",
+            .solana => "titan:derive:solana:v1",
+            .ton => "titan:derive:ton:v1",
+            .cosmos => "titan:derive:cosmos:v1",
+            .bitcoin => "titan:derive:bitcoin:v1",
+            .sui => "titan:derive:sui:v1",
+            .aptos => "titan:derive:aptos:v1",
+        };
+
+        // 确定性派生: 相同输入永远得到相同地址
+        return poseidon.hash(&[_][]const u8{
+            &self.identity_commitment,
+            domain,
+        });
+    }
+
+    /// 派生指定链的私钥 (仅在客户端执行)
+    pub fn derivePrivateKey(self: *const TitanID, chain: ChainType) [32]u8 {
+        // 私钥派生使用 master_salt (永不离开客户端)
+        const domain = switch (chain) {
+            .evm => "titan:privkey:evm:v1",
+            .solana => "titan:privkey:solana:v1",
+            .ton => "titan:privkey:ton:v1",
+            .cosmos => "titan:privkey:cosmos:v1",
+            .bitcoin => "titan:privkey:bitcoin:v1",
+            .sui => "titan:privkey:sui:v1",
+            .aptos => "titan:privkey:aptos:v1",
+        };
+
+        return poseidon.hash(&[_][]const u8{
+            &self.identity_commitment,
+            &self.master_salt,
+            domain,
+        });
+    }
+
+    /// 从 Email 和密码创建 Titan ID
+    pub fn fromCredentials(email: []const u8, password: []const u8) TitanID {
+        // 使用 Argon2id 从密码派生盐值 (抗暴力破解)
+        const master_salt = argon2id.hash(password, email);
+
+        // 计算 email hash
+        const email_hash = poseidon.hashBytes(email);
+
+        // 生成身份承诺 (可以公开)
+        const identity_commitment = poseidon.hash(&[_][]const u8{
+            &email_hash,
+            &master_salt,
+        });
+
+        return TitanID{
+            .identity_commitment = identity_commitment,
+            .master_salt = master_salt,
+        };
+    }
+};
+
+/// 使用示例
+pub fn example() void {
+    // 用户只需要记住 Email 和密码
+    const titan_id = TitanID.fromCredentials(
+        "alice@gmail.com",
+        "MySecurePassword123!",
+    );
+
+    // 自动派生所有链的地址
+    const evm_addr = titan_id.deriveAddress(.evm);      // -> 0xAbc...
+    const sol_addr = titan_id.deriveAddress(.solana);   // -> D8s7Kp...
+    const ton_addr = titan_id.deriveAddress(.ton);      // -> EQBv...
+    const btc_addr = titan_id.deriveAddress(.bitcoin);  // -> bc1q...
+
+    // 相同的 Email + 密码 → 永远得到相同的地址
+    // 用户可以在任何设备上恢复所有账户
+}
+```
+
+#### 18.15.4 跨链控制模型 (Cross-Chain Control)
+
+**为什么只有 Titan OS 能做到**：因为我们拥有 OS 层的"上帝视角"，可以屏蔽底层差异。
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     跨链控制架构                                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│                         Titan OS Kernel                                     │
+│                              │                                              │
+│                    ┌─────────┴─────────┐                                   │
+│                    │   Titan ID Core   │                                   │
+│                    │  ┌─────────────┐  │                                   │
+│                    │  │ ZK Verifier │  │                                   │
+│                    │  └─────────────┘  │                                   │
+│                    └─────────┬─────────┘                                   │
+│                              │                                              │
+│         ┌────────────────────┼────────────────────┐                        │
+│         │                    │                    │                        │
+│         ▼                    ▼                    ▼                        │
+│  ┌─────────────┐     ┌─────────────┐     ┌─────────────┐                  │
+│  │  EVM Driver │     │Solana Driver│     │  TON Driver │                  │
+│  ├─────────────┤     ├─────────────┤     ├─────────────┤                  │
+│  │             │     │             │     │             │                  │
+│  │ 部署:       │     │ 部署:       │     │ 部署:       │                  │
+│  │ ERC-4337    │     │ PDA 账户    │     │ v4 合约     │                  │
+│  │ Smart       │     │             │     │             │                  │
+│  │ Account     │     │ 只有 Titan  │     │ 只有 Titan  │                  │
+│  │             │     │ Program     │     │ ZK Verifier │                  │
+│  │ Owner:      │     │ 能控制      │     │ 能控制      │                  │
+│  │ Titan ZK    │     │             │     │             │                  │
+│  │ Verifier    │     │             │     │             │                  │
+│  │             │     │             │     │             │                  │
+│  └──────┬──────┘     └──────┬──────┘     └──────┬──────┘                  │
+│         │                   │                   │                          │
+│         ▼                   ▼                   ▼                          │
+│    Ethereum            Solana               TON                            │
+│    Polygon             Mainnet              Mainnet                        │
+│    Arbitrum                                                                │
+│    ...                                                                     │
+│                                                                             │
+│  ─────────────────────────────────────────────────────────────────────────  │
+│                                                                             │
+│  用户操作流程:                                                              │
+│                                                                             │
+│  1. 用户点击 "Send 100 USDC to Bob"                                        │
+│  2. Titan OS 检测: USDC 在 Ethereum 上                                     │
+│  3. 生成 ZK Proof: "我是 alice@gmail.com"                                  │
+│  4. 调用 EVM Driver                                                        │
+│  5. Driver 构造 ERC-4337 UserOperation                                     │
+│  6. 提交到 Ethereum, 验证 ZK Proof, 执行转账                               │
+│  7. 用户看到: "Transfer complete ✓"                                        │
+│                                                                             │
+│  用户不需要知道:                                                            │
+│  • 这是 Ethereum 还是 Polygon                                              │
+│  • 什么是 ERC-4337                                                         │
+│  • Gas 费是多少 (Paymaster 代付)                                           │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.15.5 各链适配方案
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     各链 Titan ID 适配方案                                   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Chain        │ 账户类型              │ 控制方式                            │
+│  ─────────────┼───────────────────────┼──────────────────────────────────── │
+│               │                       │                                     │
+│  EVM          │ ERC-4337 Smart        │ ZK Verifier 作为 Owner             │
+│  (ETH/Polygon)│ Account               │ 验证 Groth16 Proof                 │
+│               │                       │ 支持 Paymaster (Gas 抽象)          │
+│               │                       │                                     │
+│  ─────────────┼───────────────────────┼──────────────────────────────────── │
+│               │                       │                                     │
+│  Solana       │ PDA (Program          │ Titan ID Program 作为 Owner        │
+│               │ Derived Address)      │ PDA = hash(titan_program, id)      │
+│               │                       │ CPI 验证 ZK Proof                  │
+│               │                       │                                     │
+│  ─────────────┼───────────────────────┼──────────────────────────────────── │
+│               │                       │                                     │
+│  TON          │ v4 Wallet Contract    │ 合约内嵌 ZK Verifier               │
+│               │ (自定义)              │ 接收消息时验证 Proof               │
+│               │                       │ 异步消息传递                       │
+│               │                       │                                     │
+│  ─────────────┼───────────────────────┼──────────────────────────────────── │
+│               │                       │                                     │
+│  Cosmos       │ AuthZ Module +        │ Interchain Account 授权            │
+│               │ Interchain Account    │ ZK Verifier Module 验证            │
+│               │                       │ IBC 跨链消息                       │
+│               │                       │                                     │
+│  ─────────────┼───────────────────────┼──────────────────────────────────── │
+│               │                       │                                     │
+│  Bitcoin      │ Taproot Script        │ Script 包含 ZK 验证逻辑            │
+│               │                       │ MAST 隐藏复杂脚本                  │
+│               │                       │ (需要 BitVM 类技术)                │
+│               │                       │                                     │
+│  ─────────────┼───────────────────────┼──────────────────────────────────── │
+│               │                       │                                     │
+│  Sui/Aptos    │ Object/Resource       │ zkLogin 原生支持                   │
+│  (Move 链)    │ Account               │ 直接调用系统模块                   │
+│               │                       │ (参考 Sui zkLogin 实现)            │
+│               │                       │                                     │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.15.6 EVM 适配：ERC-4337 智能账户
+
+```solidity
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+import "@account-abstraction/contracts/core/BaseAccount.sol";
+import "./TitanZKVerifier.sol";
+
+/// @title TitanSmartAccount
+/// @notice ERC-4337 账户，由 Titan ID ZK Proof 控制
+contract TitanSmartAccount is BaseAccount {
+
+    /// @notice 身份承诺 (不可变)
+    bytes32 public immutable identityCommitment;
+
+    /// @notice ZK 验证器
+    ITitanZKVerifier public immutable zkVerifier;
+
+    /// @notice 当前 nonce (防重放)
+    uint256 private _nonce;
+
+    constructor(
+        IEntryPoint _entryPoint,
+        bytes32 _identityCommitment,
+        ITitanZKVerifier _zkVerifier
+    ) BaseAccount(_entryPoint) {
+        identityCommitment = _identityCommitment;
+        zkVerifier = _zkVerifier;
+    }
+
+    /// @notice 验证 UserOperation 签名
+    function _validateSignature(
+        UserOperation calldata userOp,
+        bytes32 userOpHash
+    ) internal override returns (uint256 validationData) {
+        // 解析 signature 字段为 ZK Proof
+        (
+            uint256[2] memory pi_a,
+            uint256[2][2] memory pi_b,
+            uint256[2] memory pi_c,
+            uint256[] memory publicInputs
+        ) = abi.decode(userOp.signature, (uint256[2], uint256[2][2], uint256[2], uint256[]));
+
+        // 公共输入检查
+        require(publicInputs[0] == uint256(identityCommitment), "Invalid identity");
+        require(publicInputs[1] == uint256(userOpHash), "Invalid userOp hash");
+
+        // 验证 Groth16 证明
+        bool valid = zkVerifier.verifyProof(pi_a, pi_b, pi_c, publicInputs);
+
+        if (!valid) {
+            return SIG_VALIDATION_FAILED;
+        }
+
+        return 0; // Valid
+    }
+
+    /// @notice 执行调用
+    function execute(
+        address dest,
+        uint256 value,
+        bytes calldata data
+    ) external onlyEntryPoint {
+        (bool success, ) = dest.call{value: value}(data);
+        require(success, "Execution failed");
+    }
+
+    /// @notice 批量执行
+    function executeBatch(
+        address[] calldata dests,
+        uint256[] calldata values,
+        bytes[] calldata datas
+    ) external onlyEntryPoint {
+        require(dests.length == values.length && dests.length == datas.length, "Length mismatch");
+        for (uint256 i = 0; i < dests.length; i++) {
+            (bool success, ) = dests[i].call{value: values[i]}(datas[i]);
+            require(success, "Batch execution failed");
+        }
+    }
+
+    function nonce() public view override returns (uint256) {
+        return _nonce;
+    }
+}
+```
+
+#### 18.15.7 Gas 抽象：Titan Paymaster
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     Titan Paymaster: 消灭 Gas 概念                           │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  问题:                                                                      │
+│  用户用 Email 登录了，但他没有 ETH/SOL 付 Gas 费。                         │
+│  第一笔交易就卡住了。                                                       │
+│                                                                             │
+│  解决方案: Titan Paymaster (Gas 代付服务)                                   │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                      │   │
+│  │  用户视角:                                                           │   │
+│  │                                                                      │   │
+│  │  1. 用 Apple Pay 充值 "Titan Credits" ($10)                         │   │
+│  │  2. 执行任何交易 (发送、Swap、NFT...)                               │   │
+│  │  3. 屏幕显示: "Fee: 0.02 Credits" (点击确认)                        │   │
+│  │  4. 完成                                                             │   │
+│  │                                                                      │   │
+│  │  用户不需要知道:                                                     │   │
+│  │  • 这笔交易在 Ethereum 还是 Solana                                  │   │
+│  │  • Gas 费实际是 0.0001 ETH 还是 0.00001 SOL                         │   │
+│  │  • Titan 在后台用 Paymaster 代付了 Gas                              │   │
+│  │                                                                      │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  技术实现:                                                                  │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                      │   │
+│  │  用户充值:                                                           │   │
+│  │  ┌─────────┐     ┌─────────┐     ┌─────────┐                       │   │
+│  │  │ Apple   │ --> │ Stripe  │ --> │ Titan   │                       │   │
+│  │  │ Pay     │     │ Payment │     │ Credits │                       │   │
+│  │  │ $10     │     │         │     │ +$9.70  │ (扣除支付费用)         │   │
+│  │  └─────────┘     └─────────┘     └─────────┘                       │   │
+│  │                                                                      │   │
+│  │  交易执行:                                                           │   │
+│  │  ┌─────────┐     ┌─────────┐     ┌─────────┐     ┌─────────┐       │   │
+│  │  │ 用户    │ --> │ Titan   │ --> │ Chain   │ --> │ 扣除    │       │   │
+│  │  │ 请求    │     │Paymaster│     │ Driver  │     │ Credits │       │   │
+│  │  │ 交易    │     │ 代付Gas │     │ 执行    │     │ $0.02   │       │   │
+│  │  └─────────┘     └─────────┘     └─────────┘     └─────────┘       │   │
+│  │                                                                      │   │
+│  │  Paymaster 盈利模式:                                                 │   │
+│  │  • 实际 Gas 费: $0.015                                              │   │
+│  │  • 收取用户: $0.02                                                   │   │
+│  │  • 利润: $0.005 (25% 利润率)                                        │   │
+│  │                                                                      │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  支持的链:                                                                  │
+│  • EVM: ERC-4337 Paymaster (标准)                                          │
+│  • Solana: 由 Titan Program 代付 (fee payer)                               │
+│  • TON: 合约内嵌代付逻辑                                                   │
+│  • Cosmos: FeeGrant Module                                                 │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.15.8 安全模型与恢复机制
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     Titan ID 安全模型                                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  核心原则: 私钥永远不离开客户端，没有任何服务器托管。                       │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                     安全边界分析                                     │   │
+│  ├─────────────────────────────────────────────────────────────────────┤   │
+│  │                                                                      │   │
+│  │  链上存储 (公开):                                                    │   │
+│  │  • identity_commitment = hash(email || salt)                        │   │
+│  │  • 无法从 commitment 反推出 email                                   │   │
+│  │                                                                      │   │
+│  │  客户端存储 (加密):                                                  │   │
+│  │  • master_salt (用密码加密后存储)                                   │   │
+│  │  • 可选: 备份到 iCloud Keychain (端到端加密)                        │   │
+│  │                                                                      │   │
+│  │  从不存储:                                                           │   │
+│  │  • 用户密码 (只在内存中短暂存在)                                    │   │
+│  │  • 派生的私钥 (用完即销毁)                                          │   │
+│  │                                                                      │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  攻击场景分析:                                                              │
+│                                                                             │
+│  场景 1: Google 账号被盗                                                    │
+│  ────────────────────────                                                   │
+│  • 攻击者: 获得 Google JWT                                                  │
+│  • 能做的: 无，因为还需要 master_salt                                      │
+│  • master_salt = argon2id(password, email)                                 │
+│  • 没有密码就无法派生 salt                                                 │
+│                                                                             │
+│  场景 2: 本地设备被盗                                                       │
+│  ─────────────────────                                                      │
+│  • 攻击者: 获得加密的 master_salt                                          │
+│  • 能做的: 暴力破解密码 (Argon2id 防护)                                    │
+│  • 建议: 使用强密码 + 设置设备 PIN                                         │
+│                                                                             │
+│  场景 3: Titan 服务器被黑                                                   │
+│  ───────────────────────                                                    │
+│  • 攻击者: 获得 Titan 服务器数据                                           │
+│  • 能做的: 无，服务器不存储任何敏感信息                                    │
+│  • 只有 identity_commitment (公开信息)                                     │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     账户恢复机制                                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  方案 A: 密码恢复 (默认)                                                    │
+│  ──────────────────────                                                     │
+│  • 用户记住 Email + 密码                                                    │
+│  • 换设备: 重新登录 Google + 输入密码                                      │
+│  • 自动恢复所有链的账户 (确定性派生)                                       │
+│                                                                             │
+│  方案 B: Social Recovery (可选)                                             │
+│  ────────────────────────────                                               │
+│  • 用户设置 3-5 个 Guardian (朋友/家人)                                    │
+│  • 丢失密码时，联系 3 个 Guardian 签名授权                                 │
+│  • 链上合约验证 Guardian 签名后允许更换控制权                              │
+│                                                                             │
+│  方案 C: Time-locked Recovery (可选)                                        │
+│  ──────────────────────────────────                                         │
+│  • 用户设置一个恢复地址 (如硬件钱包)                                       │
+│  • 请求恢复 → 7 天等待期 → 期间可以取消                                    │
+│  • 防止攻击者快速转移资产                                                   │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                     恢复流程示意                                     │   │
+│  ├─────────────────────────────────────────────────────────────────────┤   │
+│  │                                                                      │   │
+│  │  正常使用:                                                           │   │
+│  │  Email + Password → Titan ID → 所有链资产                           │   │
+│  │                                                                      │   │
+│  │  忘记密码:                                                           │   │
+│  │  ┌───────────────────────────────────────────────────────────────┐  │   │
+│  │  │                                                                │  │   │
+│  │  │  Step 1: 在 Titan App 点击 "Forgot Password"                   │  │   │
+│  │  │                                                                │  │   │
+│  │  │  Step 2: 选择恢复方式                                          │  │   │
+│  │  │          [Social Recovery]  [Time-locked Recovery]             │  │   │
+│  │  │                                                                │  │   │
+│  │  │  Step 3a (Social):                                             │  │   │
+│  │  │          联系 3/5 Guardian → 他们在 App 中批准                 │  │   │
+│  │  │          → 设置新密码 → 恢复完成                               │  │   │
+│  │  │                                                                │  │   │
+│  │  │  Step 3b (Time-locked):                                        │  │   │
+│  │  │          用恢复地址发起请求 → 等待 7 天                        │  │   │
+│  │  │          → 期间无异议 → 转移控制权                             │  │   │
+│  │  │                                                                │  │   │
+│  │  └───────────────────────────────────────────────────────────────┘  │   │
+│  │                                                                      │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.15.9 交易签名流程
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     Titan ID 交易签名完整流程                                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  场景: 用户在 Titan App 中点击 "Send 100 USDC to Bob"                       │
+│                                                                             │
+│  ┌──────────────────────────────────────────────────────────────────────┐  │
+│  │                                                                       │  │
+│  │  Step 1: 用户操作                                                     │  │
+│  │  ─────────────────                                                    │  │
+│  │  • 点击 "Send"                                                        │  │
+│  │  • 输入金额: 100 USDC                                                 │  │
+│  │  • 输入收款人: bob@gmail.com (或扫码)                                 │  │
+│  │  • 点击 "Confirm"                                                     │  │
+│  │                                                                       │  │
+│  │  Step 2: Face ID / 密码验证                                           │  │
+│  │  ──────────────────────────                                           │  │
+│  │  • 弹窗: "Authenticate to send 100 USDC"                              │  │
+│  │  • 用户: 人脸识别 / 输入密码                                          │  │
+│  │                                                                       │  │
+│  │  Step 3: 客户端处理 (用户看到 loading)                                │  │
+│  │  ──────────────────────────────────────                               │  │
+│  │                                                                       │  │
+│  │  ┌───────────────────────────────────────────────────────────────┐   │  │
+│  │  │                    Titan Client (Zig Wasm)                     │   │  │
+│  │  ├───────────────────────────────────────────────────────────────┤   │  │
+│  │  │                                                                │   │  │
+│  │  │  A. 从密码恢复 master_salt                                     │   │  │
+│  │  │     salt = decrypt(encrypted_salt, password)                   │   │  │
+│  │  │                                                                │   │  │
+│  │  │  B. 派生目标链私钥                                             │   │  │
+│  │  │     // USDC 在 Ethereum 上，需要 EVM 私钥                      │   │  │
+│  │  │     priv_key = poseidon(identity, salt, "titan:privkey:evm")   │   │  │
+│  │  │                                                                │   │  │
+│  │  │  C. 生成 ZK Proof                                              │   │  │
+│  │  │     proof = groth16_prove(                                     │   │  │
+│  │  │         circuit: "titan_id_auth",                              │   │  │
+│  │  │         public: [identity_commitment, tx_hash],                │   │  │
+│  │  │         private: [email, salt, google_jwt]                     │   │  │
+│  │  │     )                                                          │   │  │
+│  │  │                                                                │   │  │
+│  │  │  D. 构造 UserOperation                                         │   │  │
+│  │  │     userOp = {                                                 │   │  │
+│  │  │         sender: titan_smart_account,                           │   │  │
+│  │  │         callData: transfer(bob_addr, 100_usdc),                │   │  │
+│  │  │         signature: proof  // ZK Proof 作为签名                 │   │  │
+│  │  │     }                                                          │   │  │
+│  │  │                                                                │   │  │
+│  │  │  E. 清除敏感数据                                               │   │  │
+│  │  │     memset(priv_key, 0)                                        │   │  │
+│  │  │     memset(salt, 0)                                            │   │  │
+│  │  │                                                                │   │  │
+│  │  └───────────────────────────────────────────────────────────────┘   │  │
+│  │                                                                       │  │
+│  │  Step 4: 提交交易                                                     │  │
+│  │  ────────────────                                                     │  │
+│  │  • UserOperation → ERC-4337 Bundler → EntryPoint → SmartAccount      │  │
+│  │  • SmartAccount 验证 ZK Proof                                         │  │
+│  │  • 验证通过 → 执行 USDC transfer                                      │  │
+│  │                                                                       │  │
+│  │  Step 5: 确认                                                         │  │
+│  │  ─────────                                                            │  │
+│  │  • 显示: "100 USDC sent to Bob ✓"                                     │  │
+│  │  • 推送通知: "Transaction confirmed"                                  │  │
+│  │                                                                       │  │
+│  └──────────────────────────────────────────────────────────────────────┘  │
+│                                                                             │
+│  整个流程用户感知: 点击确认 → Face ID → 完成 (约 5 秒)                     │
+│  与 Venmo/支付宝 体验相同                                                  │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.15.10 Zig 客户端实现
+
+```zig
+// ============================================================================
+// Titan Client: 跨链交易签名
+// ============================================================================
+
+const std = @import("std");
+const poseidon = @import("poseidon.zig");
+const groth16 = @import("groth16.zig");
+const evm = @import("drivers/evm.zig");
+const solana = @import("drivers/solana.zig");
+const ton = @import("drivers/ton.zig");
+
+/// 交易请求 (链无关)
+pub const TransactionRequest = struct {
+    /// 操作类型
+    action: Action,
+    /// 目标地址 (可以是 Email 或链上地址)
+    recipient: []const u8,
+    /// 资产
+    asset: Asset,
+    /// 金额 (最小单位)
+    amount: u128,
+
+    pub const Action = enum {
+        transfer,
+        swap,
+        stake,
+        unstake,
+    };
+
+    pub const Asset = struct {
+        symbol: []const u8,     // "USDC", "ETH", "SOL"
+        chain: ChainType,       // 资产所在链
+        contract: ?[32]u8,      // 代币合约地址 (null = 原生代币)
+    };
+};
+
+/// Titan 客户端核心
+pub const TitanClient = struct {
+    titan_id: TitanID,
+    encrypted_salt: []const u8,
+
+    /// 执行交易
+    pub fn executeTransaction(
+        self: *TitanClient,
+        request: TransactionRequest,
+        password: []const u8,
+    ) !TransactionResult {
+        // 1. 解密 master_salt
+        var master_salt: [32]u8 = undefined;
+        defer std.crypto.utils.secureZero(u8, &master_salt);
+        try self.decryptSalt(password, &master_salt);
+
+        // 2. 根据目标链选择驱动
+        const result = switch (request.asset.chain) {
+            .evm => try self.executeEVM(request, &master_salt),
+            .solana => try self.executeSolana(request, &master_salt),
+            .ton => try self.executeTON(request, &master_salt),
+            else => return error.UnsupportedChain,
+        };
+
+        return result;
+    }
+
+    /// EVM 链交易
+    fn executeEVM(
+        self: *TitanClient,
+        request: TransactionRequest,
+        master_salt: *const [32]u8,
+    ) !TransactionResult {
+        // 派生 EVM 私钥 (用完即销毁)
+        var priv_key: [32]u8 = undefined;
+        defer std.crypto.utils.secureZero(u8, &priv_key);
+        priv_key = self.titan_id.derivePrivateKey(.evm);
+
+        // 构造交易数据
+        const call_data = switch (request.action) {
+            .transfer => evm.encodeTransfer(request.recipient, request.amount),
+            .swap => evm.encodeSwap(request.asset, request.amount),
+            else => return error.UnsupportedAction,
+        };
+
+        // 生成 ZK Proof
+        const tx_hash = evm.hashUserOp(call_data);
+        const proof = try groth16.prove(.titan_id_auth, .{
+            .public = .{
+                .identity_commitment = self.titan_id.identity_commitment,
+                .tx_hash = tx_hash,
+            },
+            .private = .{
+                .master_salt = master_salt.*,
+            },
+        });
+
+        // 构造 ERC-4337 UserOperation
+        const user_op = evm.UserOperation{
+            .sender = self.getSmartAccountAddress(.evm),
+            .call_data = call_data,
+            .signature = proof.serialize(),  // ZK Proof 作为签名
+        };
+
+        // 提交到 Bundler
+        const tx_hash_result = try evm.submitUserOp(user_op);
+
+        return TransactionResult{
+            .chain = .evm,
+            .tx_hash = tx_hash_result,
+            .status = .pending,
+        };
+    }
+
+    /// Solana 交易
+    fn executeSolana(
+        self: *TitanClient,
+        request: TransactionRequest,
+        master_salt: *const [32]u8,
+    ) !TransactionResult {
+        // Solana 使用 PDA，不需要直接签名
+        // 只需要生成 ZK Proof 证明身份
+
+        const proof = try groth16.prove(.titan_id_auth, .{
+            .public = .{
+                .identity_commitment = self.titan_id.identity_commitment,
+                .action_hash = solana.hashAction(request),
+            },
+            .private = .{
+                .master_salt = master_salt.*,
+            },
+        });
+
+        // 构造 Solana 指令
+        const ix = solana.Instruction{
+            .program_id = TITAN_PROGRAM_ID,
+            .accounts = &[_]solana.AccountMeta{
+                .{ .pubkey = self.getPDA(.solana), .is_signer = false, .is_writable = true },
+                .{ .pubkey = request.recipient, .is_signer = false, .is_writable = true },
+            },
+            .data = solana.encodeInstruction(.{
+                .action = request.action,
+                .amount = request.amount,
+                .proof = proof.serialize(),
+            }),
+        };
+
+        // 提交交易 (Titan Relayer 代付 Gas)
+        const signature = try solana.submitWithRelayer(ix);
+
+        return TransactionResult{
+            .chain = .solana,
+            .tx_hash = signature,
+            .status = .pending,
+        };
+    }
+
+    /// TON 交易
+    fn executeTON(
+        self: *TitanClient,
+        request: TransactionRequest,
+        master_salt: *const [32]u8,
+    ) !TransactionResult {
+        // TON 使用内部消息
+        const proof = try groth16.prove(.titan_id_auth, .{
+            .public = .{
+                .identity_commitment = self.titan_id.identity_commitment,
+                .action_hash = ton.hashAction(request),
+            },
+            .private = .{
+                .master_salt = master_salt.*,
+            },
+        });
+
+        // 构造 TON 内部消息
+        const message = ton.InternalMessage{
+            .dest = self.getTitanWallet(.ton),
+            .value = ton.toNano(0.05),  // Gas 费
+            .body = ton.encodeBody(.{
+                .action = request.action,
+                .recipient = request.recipient,
+                .amount = request.amount,
+                .proof = proof.serialize(),
+            }),
+        };
+
+        // 发送消息
+        const msg_hash = try ton.sendMessage(message);
+
+        return TransactionResult{
+            .chain = .ton,
+            .tx_hash = msg_hash,
+            .status = .pending,
+        };
+    }
+};
+```
+
+#### 18.15.11 统一资产视图
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     Titan 统一资产视图                                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  用户界面展示:                                                              │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                      │   │
+│  │   ┌────────────────────────────────────────────────────────────┐    │   │
+│  │   │              Welcome, alice@gmail.com                       │    │   │
+│  │   ├────────────────────────────────────────────────────────────┤    │   │
+│  │   │                                                             │    │   │
+│  │   │              Total Balance                                  │    │   │
+│  │   │              $12,345.67                                     │    │   │
+│  │   │                                                             │    │   │
+│  │   │  ┌─────────────────────────────────────────────────────┐   │    │   │
+│  │   │  │  Asset      │  Amount    │  Value    │  Chain       │   │    │   │
+│  │   │  ├─────────────┼────────────┼───────────┼──────────────┤   │    │   │
+│  │   │  │  USDC       │  5,000     │  $5,000   │  ● ● ●      │   │    │   │
+│  │   │  │  ETH        │  2.5       │  $4,500   │  ●          │   │    │   │
+│  │   │  │  SOL        │  50        │  $2,000   │    ●        │   │    │   │
+│  │   │  │  TON        │  100       │  $345     │      ●      │   │    │   │
+│  │   │  │  ATOM       │  25        │  $500     │        ●    │   │    │   │
+│  │   │  └─────────────┴────────────┴───────────┴──────────────┘   │    │   │
+│  │   │                                                             │    │   │
+│  │   │  ● Ethereum  ● Solana  ● TON  ● Cosmos                     │    │   │
+│  │   │                                                             │    │   │
+│  │   │  ─────────────────────────────────────────────────────────  │    │   │
+│  │   │                                                             │    │   │
+│  │   │  注: USDC 显示 ● ● ● 表示在多条链上都有余额                │    │   │
+│  │   │      用户不需要关心具体在哪条链                             │    │   │
+│  │   │      发送时系统自动选择最优路径                             │    │   │
+│  │   │                                                             │    │   │
+│  │   └────────────────────────────────────────────────────────────┘    │   │
+│  │                                                                      │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  背后技术:                                                                  │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                      │   │
+│  │  Titan OS 自动完成:                                                  │   │
+│  │                                                                      │   │
+│  │  1. 派生所有链地址                                                   │   │
+│  │     evm_addr = derive(id, "evm")     → 0xAbc...                     │   │
+│  │     sol_addr = derive(id, "solana")  → D8s7...                      │   │
+│  │     ton_addr = derive(id, "ton")     → EQBv...                      │   │
+│  │                                                                      │   │
+│  │  2. 并行查询所有链余额                                               │   │
+│  │     eth_balance = query(evm_addr, ETH)                              │   │
+│  │     sol_balance = query(sol_addr, SOL)                              │   │
+│  │     ton_balance = query(ton_addr, TON)                              │   │
+│  │     ...                                                              │   │
+│  │                                                                      │   │
+│  │  3. 汇总 + 换算为法币                                                │   │
+│  │     total_usd = sum(balance * price for each asset)                 │   │
+│  │                                                                      │   │
+│  │  4. 缓存 + 实时更新                                                  │   │
+│  │     WebSocket 订阅价格变化                                          │   │
+│  │     定期刷新余额                                                     │   │
+│  │                                                                      │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.15.12 商业价值分析
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     Titan ID 商业价值                                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  1. 流量入口级产品                                                          │
+│  ────────────────────                                                       │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                      │   │
+│  │  传统路径:                                                           │   │
+│  │  用户 → 下载钱包 → 记住助记词 → 购买 Gas → 使用 DApp               │   │
+│  │           ↓              ↓           ↓                              │   │
+│  │         90% 流失      5% 流失     3% 流失  → 最终: 2% 转化率        │   │
+│  │                                                                      │   │
+│  │  Titan 路径:                                                         │   │
+│  │  用户 → Google 登录 → 使用                                          │   │
+│  │                    → 70%+ 转化率 (与 Web2 持平)                      │   │
+│  │                                                                      │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  2. 收入模型                                                                │
+│  ────────────                                                               │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                      │   │
+│  │  A. Paymaster 费用 (Gas 代付)                                        │   │
+│  │     • 每笔交易收取 0.1% - 0.5% 服务费                               │   │
+│  │     • 规模: 假设日均 100 万笔交易，$10 平均金额                     │   │
+│  │     • 收入: $10M/天 × 0.2% = $20,000/天 = $7.3M/年                  │   │
+│  │                                                                      │   │
+│  │  B. 法币入金 (Onramp)                                                │   │
+│  │     • Apple Pay / 信用卡充值手续费 1-2%                              │   │
+│  │     • 规模: 假设月充值 $100M                                        │   │
+│  │     • 收入: $100M × 1.5% = $1.5M/月 = $18M/年                       │   │
+│  │                                                                      │   │
+│  │  C. 跨链桥接费用                                                     │   │
+│  │     • 用户在 Titan 内跨链转账收取 0.05%                             │   │
+│  │     • 规模: 假设月跨链量 $500M                                      │   │
+│  │     • 收入: $500M × 0.05% = $250K/月 = $3M/年                       │   │
+│  │                                                                      │   │
+│  │  D. B2B 授权                                                         │   │
+│  │     • 向 DApp 收取 Titan ID 集成授权费                              │   │
+│  │     • 类似 "Sign in with Apple" 模式                                │   │
+│  │     • 收入: 取决于生态规模                                          │   │
+│  │                                                                      │   │
+│  │  预估年收入 (成熟期): $30M - $100M+                                  │   │
+│  │                                                                      │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  3. 战略价值                                                                │
+│  ────────────                                                               │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                      │   │
+│  │  A. 数据护城河                                                       │   │
+│  │     • 用户行为数据 (匿名)                                           │   │
+│  │     • 跨链资产流向分析                                               │   │
+│  │     • 可向机构出售市场洞察                                          │   │
+│  │                                                                      │   │
+│  │  B. 生态锁定                                                         │   │
+│  │     • 用户一旦用 Titan ID 在多条链创建账户                          │   │
+│  │     • 迁移成本极高 (需要转移所有链资产)                             │   │
+│  │     • 类似 Apple 生态锁定效应                                       │   │
+│  │                                                                      │   │
+│  │  C. 协议级影响力                                                     │   │
+│  │     • Titan ID 成为多链身份标准                                     │   │
+│  │     • 新链/DApp 主动适配                                            │   │
+│  │     • 类似 ERC-4337 的标准制定者地位                                │   │
+│  │                                                                      │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  4. 竞争壁垒                                                                │
+│  ────────────                                                               │
+│                                                                             │
+│  | 壁垒层级 | 内容                      | 复制难度 |                        │
+│  | :------- | :------------------------ | :------- |                        │
+│  | L1 技术  | ZK Login + 多链驱动      | 18-24 月 |                        │
+│  | L2 覆盖  | EVM + Solana + TON + ... | 12-18 月 |                        │
+│  | L3 生态  | DApp 集成 + 用户基数     | 持续积累 |                        │
+│  | L4 品牌  | "Web3 Apple ID" 心智     | 先发优势 |                        │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.15.13 与 Titan 整体架构的关系
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     Titan 完整架构图                                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│                              用户                                           │
+│                               │                                             │
+│                               ▼                                             │
+│                    ┌─────────────────┐                                     │
+│                    │   Titan App     │                                     │
+│                    │   (Frontend)    │                                     │
+│                    └────────┬────────┘                                     │
+│                             │                                               │
+│                             ▼                                               │
+│  ┌──────────────────────────────────────────────────────────────────────┐  │
+│  │                       Titan OS Kernel                                 │  │
+│  │  ┌────────────────────────────────────────────────────────────────┐  │  │
+│  │  │                                                                 │  │  │
+│  │  │  ┌─────────────┐   ┌─────────────┐   ┌─────────────┐          │  │  │
+│  │  │  │  Titan ID   │   │  Dark Pool  │   │  Paymaster  │          │  │  │
+│  │  │  │  (身份层)   │   │  (隐私层)   │   │  (Gas 层)   │          │  │  │
+│  │  │  │             │   │             │   │             │          │  │  │
+│  │  │  │ • ZK Login  │   │ • CSV AMM   │   │ • Gas 代付  │          │  │  │
+│  │  │  │ • 地址派生  │   │ • ZK Proof  │   │ • 法币入金  │          │  │  │
+│  │  │  │ • 跨链身份  │   │ • MEV 防护  │   │ • Credits   │          │  │  │
+│  │  │  └──────┬──────┘   └──────┬──────┘   └──────┬──────┘          │  │  │
+│  │  │         │                 │                 │                  │  │  │
+│  │  │         └────────────┬────┴────────────────┘                  │  │  │
+│  │  │                      │                                         │  │  │
+│  │  │                      ▼                                         │  │  │
+│  │  │           ┌─────────────────────┐                             │  │  │
+│  │  │           │   Driver Manager    │                             │  │  │
+│  │  │           └──────────┬──────────┘                             │  │  │
+│  │  │                      │                                         │  │  │
+│  │  └──────────────────────┼─────────────────────────────────────────┘  │  │
+│  │                         │                                             │  │
+│  └─────────────────────────┼─────────────────────────────────────────────┘  │
+│                            │                                                │
+│         ┌──────────────────┼──────────────────┬────────────────┐           │
+│         │                  │                  │                │           │
+│         ▼                  ▼                  ▼                ▼           │
+│  ┌─────────────┐   ┌─────────────┐   ┌─────────────┐   ┌─────────────┐    │
+│  │ EVM Driver  │   │Solana Driver│   │ TON Driver  │   │Cosmos Driver│    │
+│  │             │   │             │   │             │   │             │    │
+│  │ • ERC-4337  │   │ • PDA       │   │ • TVM       │   │ • IBC       │    │
+│  │ • Paymaster │   │ • CPI       │   │ • FunC      │   │ • AuthZ     │    │
+│  └──────┬──────┘   └──────┬──────┘   └──────┬──────┘   └──────┬──────┘    │
+│         │                 │                 │                 │            │
+│         ▼                 ▼                 ▼                 ▼            │
+│     Ethereum          Solana              TON             Cosmos           │
+│     Polygon           Mainnet           Mainnet            Hub             │
+│     Arbitrum                                              Osmosis          │
+│     ...                                                   ...              │
+│                                                                             │
+│  ─────────────────────────────────────────────────────────────────────────  │
+│                                                                             │
+│  Titan OS = Titan ID (身份) + Dark Pool (隐私) + Drivers (执行)            │
+│                                                                             │
+│  这三者共同构成 "Web3 操作系统":                                           │
+│  • 身份层: 一个账号走遍所有链                                              │
+│  • 隐私层: 交易金额和对手方隐藏                                            │
+│  • 执行层: 底层链差异完全屏蔽                                              │
+│                                                                             │
+│  用户只看到: 一个 App，一个账户，一个余额，无限可能。                      │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.15.14 实施路线图
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     Titan ID 实施路线                                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Phase 1: MVP (当前 Hackathon)                                              │
+│  ──────────────────────────────                                             │
+│  • 重点: Dark Pool + 传统钱包签名                                          │
+│  • 目标: 证明 Zig 在 ZK 领域的性能优势                                     │
+│  • Titan ID: 作为架构文档展示，不做完整实现                                │
+│                                                                             │
+│  Phase 2: Single-Chain Titan ID                                             │
+│  ─────────────────────────────────                                          │
+│  • 实现 Solana 单链 Titan ID                                               │
+│  • 复用 ZK Email 社区的 Circom 电路                                        │
+│  • 完成 Zig Wasm 客户端 Proof 生成                                         │
+│  • 集成 Dark Pool                                                          │
+│                                                                             │
+│  Phase 3: Multi-Chain Expansion                                             │
+│  ────────────────────────────────                                           │
+│  • 实现 EVM Driver (ERC-4337)                                              │
+│  • 实现 TON Driver                                                         │
+│  • 统一资产视图                                                            │
+│  • Paymaster 服务上线                                                      │
+│                                                                             │
+│  Phase 4: Full Product                                                      │
+│  ────────────────────────                                                   │
+│  • Cosmos / Bitcoin 支持                                                   │
+│  • 法币入金集成                                                            │
+│  • B2B SDK 发布                                                            │
+│  • 开放 DApp 集成                                                          │
+│                                                                             │
+│  Phase 5: Ecosystem                                                         │
+│  ────────────────────                                                       │
+│  • Titan ID 成为行业标准                                                   │
+│  • 主流 DApp 原生支持                                                      │
+│  • 机构级产品 (企业版)                                                     │
+│                                                                             │
+│  ─────────────────────────────────────────────────────────────────────────  │
+│                                                                             │
+│  时间线示意:                                                                │
+│                                                                             │
+│  Hackathon ───► Phase 2 ───► Phase 3 ───► Phase 4 ───► Phase 5            │
+│     MVP          Solana       Multi        Full        Ecosystem           │
+│                  ID           Chain        Product                          │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.15.15 Pitch 话术
+
+**项目名**: Titan ID
+**Tagline**: "The Apple ID for Web3"
+
+**一句话定义**:
+> "一个邮箱，所有区块链。"
+
+**30 秒电梯演讲**:
+> "每条链一个钱包，每个钱包一套助记词 —— 这是 Web3 的噩梦。
+>
+> **Titan ID** 解决这个问题。
+>
+> 用户只需要 Google 登录，我们用零知识证明验证身份，然后用数学确定性地派生出所有链的地址。
+>
+> 一个邮箱 = Ethereum + Solana + TON + Bitcoin + Cosmos...
+>
+> 没有助记词，没有私钥管理，没有 Gas 概念。
+>
+> 这是 **Web3 的 Apple ID**。"
+
+**2 分钟深度讲解**:
+> "Web3 有 10 亿美元的 TVL，但只有 1000 万活跃用户。
+>
+> 为什么？因为门槛太高了。
+>
+> 我们做了用户调研：90% 的人在看到'请保存这 12 个单词'的时候就放弃了。
+> 剩下的 10% 里，有一半人在半年内丢失过资产。
+>
+> Phantom 试图解决这个问题，推出了 Google 登录。
+> 但他们用的是 MPC —— 服务器持有你一半的私钥。
+> Phantom 被黑，你的钱就没了。
+>
+> **Titan ID 完全不同。**
+>
+> 我们用零知识证明验证 Google 身份，但没有任何服务器持有任何密钥。
+> 你的私钥从数学中诞生：
+>
+> `private_key = hash(email + password + chain)`
+>
+> 相同的输入永远得到相同的私钥。
+> 换手机？重新登录就行。
+> 所有链的地址都自动恢复。
+>
+> 更强大的是：因为我们是**操作系统**，我们可以统一所有链。
+>
+> 用户看到的是：
+> - 一个余额：$12,345（汇总了 ETH、SOL、TON...）
+> - 一个按钮：发送
+> - 输入金额，确认，完成
+>
+> 他不需要知道这笔钱在哪条链，不需要知道 Gas 费是什么，不需要知道什么是私钥。
+>
+> **这就是 Web3 的 Apple ID。**
+> **这就是大规模采用的最后一道门槛。**
+>
+> 我们用 Zig 实现，ZK 证明生成速度比 JS 快 10 倍。
+> 我们已经在 Solana 上实现了原型。
+>
+> 接下来，我们要把它推广到每一条链。"
+
+---
+
 ## 相关文档
 
 | 文档 | 说明 |
