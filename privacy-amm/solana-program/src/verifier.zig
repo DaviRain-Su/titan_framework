@@ -126,34 +126,28 @@ pub fn verifySwapProof(
     expected_root: [32]u8,
 ) VerifyError!bool {
     _ = expected_root; // TODO: 实现链上 Poseidon 后启用根检查
-    _ = inputs;
 
     // 1. 验证证明不为零
     if (isZeroPoint(&proof.pi_a) or isZeroPoint(&proof.pi_c)) {
         return false;
     }
 
-    // NOTE: 完整的 Groth16 验证由于 ELF 跳转限制暂时禁用
-    // 在 Solana 支持更大的跳转范围或我们采用多指令验证时启用
-    // 当前版本仅检查证明格式有效性
-    return true;
-
-    // 完整验证代码（保留供参考）:
-    // const public_inputs = buildPublicInputArray(&inputs);
-    // return verifyProofFull(&proof, &public_inputs);
+    // 2. 构建公开输入数组并执行完整的 Groth16 验证
+    const public_inputs = buildPublicInputArray(&inputs);
+    return verifyProofFull(&proof, &public_inputs);
 }
 
 /// 将 SwapPublicInputs 转换为公开输入数组
 fn buildPublicInputArray(inputs: *const SwapPublicInputs) [vk.N_PUBLIC][32]u8 {
     return .{
-        inputs.root,                   // [0] root
-        inputs.input_nullifier[0],     // [1] nullifier 0
-        inputs.input_nullifier[1],     // [2] nullifier 1
-        inputs.output_commitment[0],   // [3] commitment 0
-        inputs.output_commitment[1],   // [4] commitment 1
-        inputs.pool_state_hash,        // [5] pool state hash
-        inputs.new_pool_state_hash,    // [6] new pool state hash
-        inputs.ext_data_hash,          // [7] ext data hash
+        inputs.root, // [0] root
+        inputs.input_nullifier[0], // [1] nullifier 0
+        inputs.input_nullifier[1], // [2] nullifier 1
+        inputs.output_commitment[0], // [3] commitment 0
+        inputs.output_commitment[1], // [4] commitment 1
+        inputs.pool_state_hash, // [5] pool state hash
+        inputs.new_pool_state_hash, // [6] new pool state hash
+        inputs.ext_data_hash, // [7] ext data hash
     };
 }
 
@@ -237,22 +231,56 @@ noinline fn g1AddDirect(p1: *const [64]u8, p2: *const [64]u8, result: *[64]u8) !
     if (ret != 0) return error.ComputeError;
 }
 
-/// 计算 vk_x = IC[0] + sum(input[i] * IC[i+1]) (noinline)
+/// 计算 vk_x = IC[0] + sum(input[i] * IC[i+1])
+/// 使用完全展开的循环以避免 ELF 跳转限制
+/// N_PUBLIC = 8, 所以我们手动展开 8 次
 noinline fn computeVkX(public_inputs: *const [vk.N_PUBLIC][32]u8, result: *[64]u8) !void {
     // 从 IC[0] 开始
     @memcpy(result, &vk.VK_IC[0]);
 
-    // 逐个累加 input[i] * IC[i+1]
     var temp: [64]u8 = undefined;
     var sum: [64]u8 = undefined;
 
-    for (0..vk.N_PUBLIC) |i| {
-        // temp = input[i] * IC[i+1]
-        try g1MulDirect(&vk.VK_IC[i + 1], &public_inputs[i], &temp);
-        // result = result + temp
-        try g1AddDirect(result, &temp, &sum);
-        @memcpy(result, &sum);
-    }
+    // 手动展开循环 - 每个公开输入单独处理
+    // Input 0: root
+    try g1MulDirect(&vk.VK_IC[1], &public_inputs[0], &temp);
+    try g1AddDirect(result, &temp, &sum);
+    @memcpy(result, &sum);
+
+    // Input 1: nullifier[0]
+    try g1MulDirect(&vk.VK_IC[2], &public_inputs[1], &temp);
+    try g1AddDirect(result, &temp, &sum);
+    @memcpy(result, &sum);
+
+    // Input 2: nullifier[1]
+    try g1MulDirect(&vk.VK_IC[3], &public_inputs[2], &temp);
+    try g1AddDirect(result, &temp, &sum);
+    @memcpy(result, &sum);
+
+    // Input 3: commitment[0]
+    try g1MulDirect(&vk.VK_IC[4], &public_inputs[3], &temp);
+    try g1AddDirect(result, &temp, &sum);
+    @memcpy(result, &sum);
+
+    // Input 4: commitment[1]
+    try g1MulDirect(&vk.VK_IC[5], &public_inputs[4], &temp);
+    try g1AddDirect(result, &temp, &sum);
+    @memcpy(result, &sum);
+
+    // Input 5: poolStateHash
+    try g1MulDirect(&vk.VK_IC[6], &public_inputs[5], &temp);
+    try g1AddDirect(result, &temp, &sum);
+    @memcpy(result, &sum);
+
+    // Input 6: newPoolStateHash
+    try g1MulDirect(&vk.VK_IC[7], &public_inputs[6], &temp);
+    try g1AddDirect(result, &temp, &sum);
+    @memcpy(result, &sum);
+
+    // Input 7: extDataHash
+    try g1MulDirect(&vk.VK_IC[8], &public_inputs[7], &temp);
+    try g1AddDirect(result, &temp, &sum);
+    @memcpy(result, &sum);
 }
 
 /// 取反 G1 点

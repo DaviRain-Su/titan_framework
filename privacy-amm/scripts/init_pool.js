@@ -15,8 +15,8 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-// Program ID (deployed to testnet - with SPL Token transfers)
-const PROGRAM_ID = new PublicKey('GZfqgHqekzR4D8TAq165XB8U2boVdK5ehEEH4n7u4Xts');
+// Program ID (deployed to testnet - with full Groth16 verification)
+const PROGRAM_ID = new PublicKey('2mZrAMAKJ2R1Gmqwkj8vhNoLmzhfczP8wPnwq7V358Wk');
 
 // Instruction discriminator for InitializePool = 0
 const INIT_INSTRUCTION = 0;
