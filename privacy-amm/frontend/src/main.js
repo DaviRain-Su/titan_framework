@@ -38,9 +38,9 @@ const CONFIG = {
     network: 'testnet',
     programId: 'GZfqgHqekzR4D8TAq165XB8U2boVdK5ehEEH4n7u4Xts',
     poolAccounts: {
-        poolAccount: 'DEMitabV4NqSZQUqiK8PQNiPJ3DYbHYJotgA9MgMQkpS',
-        merkleAccount: 'DEt4dARcaRZasHWusbMtUPtqYdTaUL72rza5T9z1dw68',
-        nullifierAccount: '8tqoDduwnZvCHLm5UEHZk9f74FrTdCbr8hnvp1dTU7Bm',
+        poolAccount: '3Lz9gKbA1kB4V4bu4cGVpXrvStpUs48iBKX56ksw6Wbt',
+        merkleAccount: 'DNNEL3RqN2kNYdGn65VgLHiMoUEoi49mms15nsYFVwgQ',
+        nullifierAccount: 'Hh6pbngRGfnQ7T5casM4eobwQyJe1LDSRjAA9EVx2rtE',
     },
 };
 
