@@ -47330,6 +47330,1258 @@ fn main(
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
+### 18.48 zig-to-noir: 统一 ZK 后端转译器
+
+> 状态: **核心架构设计**
+> 目的: 实现 Titan "一次编写，多端编译" 的 ZK 后端支持
+> 重要性: **关键** - 这是 Titan 哲学的核心体现
+
+#### 18.48.1 架构哲学纠偏
+
+**问题**: 前面章节 (18.45-18.47) 的方案偏离了 Titan 核心哲学。
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    架构哲学对比                                          │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  ❌ 错误方案 (偏离 Titan 哲学):                                         │
+│  ════════════════════════════════                                       │
+│                                                                         │
+│     开发者需要学习多种语言:                                             │
+│     • Zig (链上程序)                                                    │
+│     • Noir (ZK 电路)          ← 额外学习成本                           │
+│     • 手动维护两套代码        ← 容易不一致                              │
+│                                                                         │
+│  ✅ 正确方案 (Titan 哲学):                                              │
+│  ══════════════════════════                                             │
+│                                                                         │
+│     开发者只写 Zig，编译器处理其余:                                     │
+│     • Zig → Solana SBF   (solana-sdk-zig)                              │
+│     • Zig → EVM Yul      (zig-to-yul)                                  │
+│     • Zig → Noir         (zig-to-noir) ← 需要开发                      │
+│     • Zig → Wasm         (Zig 原生)                                    │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.48.2 统一架构图
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Titan 统一多后端架构                                  │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│                          ┌─────────────────┐                           │
+│                          │    Zig 源码     │                           │
+│                          │   (唯一入口)    │                           │
+│                          └────────┬────────┘                           │
+│                                   │                                     │
+│                    ┌──────────────┼──────────────┐                     │
+│                    │              │              │                      │
+│           ┌────────┴────────┐    │    ┌────────┴────────┐             │
+│           │                 │    │    │                 │             │
+│           ▼                 ▼    ▼    ▼                 ▼             │
+│    ┌────────────┐   ┌────────────┐   ┌────────────┐   ┌────────────┐ │
+│    │ --target   │   │ --target   │   │ --target   │   │ --target   │ │
+│    │ solana     │   │ evm        │   │ noir       │   │ wasm       │ │
+│    └─────┬──────┘   └─────┬──────┘   └─────┬──────┘   └─────┬──────┘ │
+│          │                │                │                │         │
+│          ▼                ▼                ▼                ▼         │
+│    ┌────────────┐   ┌────────────┐   ┌────────────┐   ┌────────────┐ │
+│    │ solana-    │   │ zig-to-yul │   │ zig-to-    │   │ Zig 原生   │ │
+│    │ sdk-zig    │   │            │   │ noir       │   │ LLVM       │ │
+│    │  ✅ 已有   │   │  ✅ 已有   │   │  ❌ 需开发 │   │  ✅ 已有   │ │
+│    └─────┬──────┘   └─────┬──────┘   └─────┬──────┘   └─────┬──────┘ │
+│          │                │                │                │         │
+│          ▼                ▼                ▼                ▼         │
+│       SBF 字节码      Yul 代码         Noir 代码        Wasm 字节码  │
+│          │                │                │                │         │
+│          ▼                ▼                ▼                ▼         │
+│       Solana VM         EVM           nargo+sunspot       任意 Wasm  │
+│                                            │               运行时     │
+│                                            ▼                          │
+│                                       Groth16 Proof                   │
+│                                                                        │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.48.3 titan-zk-sdk: ZK 原语库
+
+```zig
+// titan-zk-sdk/src/root.zig
+// ═══════════════════════════════════════════════════════════════════════
+// Titan ZK SDK - 统一的 ZK 原语
+//
+// 设计原则:
+// • comptime 时: 生成约束描述 (供 zig-to-noir 转译)
+// • runtime 时: 实际计算 (供测试和模拟)
+
+const std = @import("std");
+
+/// ZK 域元素 (BN254 曲线的标量域)
+pub const Field = u256;
+
+/// 公开输入标记
+/// 用法: comptime pub x: Field
+pub const Public = Field;
+
+// ═══════════════════════════════════════════════════════════════════════
+// 哈希函数
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Poseidon 哈希 (ZK 友好，约 ~300 约束)
+pub fn poseidon(inputs: []const Field) Field {
+    if (@inComptime()) {
+        // comptime: 仅记录调用，供转译器分析
+        return comptime_poseidon_marker(inputs.len);
+    } else {
+        // runtime: 实际计算 (用于本地测试)
+        return poseidon_impl(inputs);
+    }
+}
+
+/// 两输入 Poseidon (最常用)
+pub fn poseidon2(a: Field, b: Field) Field {
+    return poseidon(&.{ a, b });
+}
+
+/// Pedersen 哈希 (基于椭圆曲线)
+pub fn pedersen(inputs: []const Field) Field {
+    if (@inComptime()) {
+        return comptime_pedersen_marker(inputs.len);
+    } else {
+        return pedersen_impl(inputs);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Merkle 树操作
+// ═══════════════════════════════════════════════════════════════════════
+
+/// 验证 Merkle 路径
+pub fn verify_merkle(
+    root: Field,
+    leaf: Field,
+    path: []const Field,
+    indices: []const u1,
+) void {
+    if (@inComptime()) {
+        comptime_merkle_marker(path.len);
+    } else {
+        var computed = leaf;
+        for (path, indices) |sibling, idx| {
+            computed = if (idx == 0)
+                poseidon2(computed, sibling)
+            else
+                poseidon2(sibling, computed);
+        }
+        if (computed != root) {
+            @panic("Merkle verification failed");
+        }
+    }
+}
+
+/// 计算 Merkle 根 (从叶子和路径)
+pub fn compute_merkle_root(
+    leaf: Field,
+    path: []const Field,
+    indices: []const u1,
+) Field {
+    var computed = leaf;
+    for (path, indices) |sibling, idx| {
+        computed = if (idx == 0)
+            poseidon2(computed, sibling)
+        else
+            poseidon2(sibling, computed);
+    }
+    return computed;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Nullifier 操作
+// ═══════════════════════════════════════════════════════════════════════
+
+/// 计算 Nullifier (防双花)
+pub fn compute_nullifier(
+    commitment: Field,
+    owner_secret: Field,
+    leaf_index: Field,
+) Field {
+    return poseidon(&.{ commitment, owner_secret, leaf_index });
+}
+
+/// 验证 Nullifier
+pub fn verify_nullifier(
+    expected: Field,
+    commitment: Field,
+    owner_secret: Field,
+    leaf_index: Field,
+) void {
+    const computed = compute_nullifier(commitment, owner_secret, leaf_index);
+    assert_eq(expected, computed);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 断言 (约束生成)
+// ═══════════════════════════════════════════════════════════════════════
+
+/// 相等断言
+pub fn assert_eq(a: Field, b: Field) void {
+    if (@inComptime()) {
+        comptime_assert_eq_marker();
+    } else {
+        if (a != b) {
+            @panic("assert_eq failed");
+        }
+    }
+}
+
+/// 不等断言
+pub fn assert_neq(a: Field, b: Field) void {
+    if (@inComptime()) {
+        comptime_assert_neq_marker();
+    } else {
+        if (a == b) {
+            @panic("assert_neq failed");
+        }
+    }
+}
+
+/// 布尔断言
+pub fn assert(condition: bool) void {
+    if (@inComptime()) {
+        comptime_assert_marker();
+    } else {
+        if (!condition) {
+            @panic("assert failed");
+        }
+    }
+}
+
+/// 范围断言: 0 ≤ value < 2^bits
+pub fn assert_range(value: Field, comptime bits: u8) void {
+    if (@inComptime()) {
+        comptime_range_marker(bits);
+    } else {
+        const max = @as(Field, 1) << bits;
+        if (value >= max) {
+            @panic("range check failed");
+        }
+    }
+}
+
+/// 大于等于断言
+pub fn assert_gte(a: Field, b: Field) void {
+    if (@inComptime()) {
+        comptime_gte_marker();
+    } else {
+        if (a < b) {
+            @panic("assert_gte failed");
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 所有权验证
+// ═══════════════════════════════════════════════════════════════════════
+
+/// 验证所有者身份 (secret → public key 推导)
+pub fn verify_ownership(note_owner: Field, sender_secret: Field) void {
+    const derived = poseidon(&.{sender_secret});
+    assert_eq(note_owner, derived);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Note 结构
+// ═══════════════════════════════════════════════════════════════════════
+
+/// 标准 Note 结构 (UTXO 模型)
+pub const Note = struct {
+    amount: Field,
+    asset: Field,
+    owner: Field,
+    nonce: Field,
+
+    /// 计算 Note commitment
+    pub fn commitment(self: Note) Field {
+        return poseidon(&.{ self.amount, self.asset, self.owner, self.nonce });
+    }
+
+    /// 计算 Nullifier
+    pub fn nullifier(self: Note, secret: Field, index: Field) Field {
+        return compute_nullifier(self.commitment(), secret, index);
+    }
+};
+
+// ═══════════════════════════════════════════════════════════════════════
+// 内部实现 (runtime)
+// ═══════════════════════════════════════════════════════════════════════
+
+fn poseidon_impl(inputs: []const Field) Field {
+    // 实际 Poseidon 哈希实现
+    // 使用 BN254 曲线参数
+    _ = inputs;
+    return 0; // TODO: 实现
+}
+
+fn pedersen_impl(inputs: []const Field) Field {
+    _ = inputs;
+    return 0; // TODO: 实现
+}
+
+// comptime 标记函数 (供转译器识别)
+fn comptime_poseidon_marker(n: usize) Field {
+    _ = n;
+    return 0;
+}
+fn comptime_pedersen_marker(n: usize) Field {
+    _ = n;
+    return 0;
+}
+fn comptime_merkle_marker(depth: usize) void {
+    _ = depth;
+}
+fn comptime_assert_eq_marker() void {}
+fn comptime_assert_neq_marker() void {}
+fn comptime_assert_marker() void {}
+fn comptime_range_marker(bits: u8) void {
+    _ = bits;
+}
+fn comptime_gte_marker() void {}
+```
+
+#### 18.48.4 zig-to-noir 转译器架构
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    zig-to-noir 转译流程                                  │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│   ┌──────────────┐                                                     │
+│   │  Zig 源码    │                                                     │
+│   │ (带 zk.*)   │                                                     │
+│   └──────┬───────┘                                                     │
+│          │                                                              │
+│          ▼                                                              │
+│   ┌──────────────┐     复用 zig-to-yul                                 │
+│   │   Lexer      │ ◄── 词法分析器                                      │
+│   └──────┬───────┘                                                     │
+│          │                                                              │
+│          ▼                                                              │
+│   ┌──────────────┐     复用 zig-to-yul                                 │
+│   │   Parser     │ ◄── 语法分析器                                      │
+│   └──────┬───────┘                                                     │
+│          │                                                              │
+│          ▼                                                              │
+│   ┌──────────────┐                                                     │
+│   │   Zig AST    │                                                     │
+│   └──────┬───────┘                                                     │
+│          │                                                              │
+│          ▼                                                              │
+│   ┌──────────────┐     ZK 特化                                         │
+│   │  ZK Semantic │ ◄── • 识别 zk.* 调用                               │
+│   │   Analysis   │     • 提取 pub 参数                                 │
+│   └──────┬───────┘     • 分析约束依赖                                  │
+│          │             • 验证 ZK 兼容性                                 │
+│          ▼                                                              │
+│   ┌──────────────┐                                                     │
+│   │    ZK IR     │ ◄── 中间表示 (约束系统)                            │
+│   │  (Constraint │     • Wire (变量)                                   │
+│   │   System)    │     • Gate (门)                                     │
+│   └──────┬───────┘     • Constraint (约束)                             │
+│          │                                                              │
+│          ▼                                                              │
+│   ┌──────────────┐                                                     │
+│   │    Noir      │ ◄── 代码生成                                        │
+│   │   CodeGen    │     • fn main(...) 签名                            │
+│   └──────┬───────┘     • use 语句                                     │
+│          │             • assert 语句                                   │
+│          ▼                                                              │
+│   ┌──────────────┐                                                     │
+│   │  Noir 源码   │                                                     │
+│   │ (main.nr)    │                                                     │
+│   └──────────────┘                                                     │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.48.5 核心模块设计
+
+##### 5.1 ZK 语义分析器 (zk_semantic.zig)
+
+```zig
+// zig-to-noir/src/zk_semantic.zig
+// ═══════════════════════════════════════════════════════════════════════
+
+const std = @import("std");
+const ast = @import("ast.zig");
+
+pub const ZkSemanticAnalyzer = struct {
+    allocator: std.mem.Allocator,
+
+    /// 分析结果
+    pub const Analysis = struct {
+        /// 公开输入列表
+        public_inputs: []const PublicInput,
+        /// 私有输入列表
+        private_inputs: []const PrivateInput,
+        /// 约束列表
+        constraints: []const Constraint,
+        /// 电路名称
+        circuit_name: []const u8,
+    };
+
+    pub const PublicInput = struct {
+        name: []const u8,
+        typ: ZkType,
+    };
+
+    pub const PrivateInput = struct {
+        name: []const u8,
+        typ: ZkType,
+    };
+
+    pub const ZkType = enum {
+        field,
+        field_array,
+        u64,
+        bool,
+    };
+
+    pub const Constraint = union(enum) {
+        assert_eq: struct { lhs: Expr, rhs: Expr },
+        assert_neq: struct { lhs: Expr, rhs: Expr },
+        assert_bool: Expr,
+        assert_range: struct { value: Expr, bits: u8 },
+        assert_gte: struct { lhs: Expr, rhs: Expr },
+        poseidon_hash: struct { output: Expr, inputs: []const Expr },
+        merkle_verify: struct { root: Expr, leaf: Expr, path: Expr },
+    };
+
+    /// 分析 Zig AST，提取 ZK 信息
+    pub fn analyze(self: *ZkSemanticAnalyzer, zig_ast: *ast.Ast) !Analysis {
+        var public_inputs = std.ArrayList(PublicInput).init(self.allocator);
+        var private_inputs = std.ArrayList(PrivateInput).init(self.allocator);
+        var constraints = std.ArrayList(Constraint).init(self.allocator);
+
+        // 1. 查找标记为电路的函数
+        const circuit_fn = try self.findCircuitFunction(zig_ast);
+
+        // 2. 分析参数 (区分 pub 和非 pub)
+        for (circuit_fn.params) |param| {
+            if (param.is_comptime and param.is_pub) {
+                try public_inputs.append(.{
+                    .name = param.name,
+                    .typ = self.mapType(param.typ),
+                });
+            } else {
+                try private_inputs.append(.{
+                    .name = param.name,
+                    .typ = self.mapType(param.typ),
+                });
+            }
+        }
+
+        // 3. 分析函数体，提取约束
+        try self.analyzeBody(circuit_fn.body, &constraints);
+
+        return Analysis{
+            .public_inputs = public_inputs.toOwnedSlice(),
+            .private_inputs = private_inputs.toOwnedSlice(),
+            .constraints = constraints.toOwnedSlice(),
+            .circuit_name = circuit_fn.name,
+        };
+    }
+
+    /// 识别 zk.* 调用并转换为约束
+    fn analyzeBody(
+        self: *ZkSemanticAnalyzer,
+        body: *ast.Block,
+        constraints: *std.ArrayList(Constraint),
+    ) !void {
+        for (body.statements) |stmt| {
+            switch (stmt) {
+                .call => |call| {
+                    if (std.mem.startsWith(u8, call.func_name, "zk.")) {
+                        try self.handleZkCall(call, constraints);
+                    }
+                },
+                .var_decl => |decl| {
+                    // 追踪变量定义
+                    if (decl.init) |init| {
+                        try self.analyzeExpr(init, constraints);
+                    }
+                },
+                // ... 其他语句类型
+                else => {},
+            }
+        }
+    }
+
+    /// 处理 zk.* 调用
+    fn handleZkCall(
+        self: *ZkSemanticAnalyzer,
+        call: ast.Call,
+        constraints: *std.ArrayList(Constraint),
+    ) !void {
+        const func = call.func_name[3..]; // 去掉 "zk." 前缀
+
+        if (std.mem.eql(u8, func, "assert_eq")) {
+            try constraints.append(.{
+                .assert_eq = .{
+                    .lhs = call.args[0],
+                    .rhs = call.args[1],
+                },
+            });
+        } else if (std.mem.eql(u8, func, "assert")) {
+            try constraints.append(.{
+                .assert_bool = call.args[0],
+            });
+        } else if (std.mem.eql(u8, func, "poseidon")) {
+            // poseidon 调用会被内联为约束
+            try constraints.append(.{
+                .poseidon_hash = .{
+                    .output = call.result_var,
+                    .inputs = call.args,
+                },
+            });
+        } else if (std.mem.eql(u8, func, "verify_merkle")) {
+            try constraints.append(.{
+                .merkle_verify = .{
+                    .root = call.args[0],
+                    .leaf = call.args[1],
+                    .path = call.args[2],
+                },
+            });
+        }
+        // ... 其他 zk.* 函数
+    }
+};
+```
+
+##### 5.2 Noir 代码生成器 (noir_codegen.zig)
+
+```zig
+// zig-to-noir/src/noir_codegen.zig
+// ═══════════════════════════════════════════════════════════════════════
+
+const std = @import("std");
+const semantic = @import("zk_semantic.zig");
+
+pub const NoirCodeGen = struct {
+    allocator: std.mem.Allocator,
+    output: std.ArrayList(u8),
+    indent_level: usize,
+
+    pub fn init(allocator: std.mem.Allocator) NoirCodeGen {
+        return .{
+            .allocator = allocator,
+            .output = std.ArrayList(u8).init(allocator),
+            .indent_level = 0,
+        };
+    }
+
+    /// 从语义分析结果生成 Noir 代码
+    pub fn generate(self: *NoirCodeGen, analysis: semantic.ZkSemanticAnalyzer.Analysis) ![]const u8 {
+        // 1. 生成文件头
+        try self.emitHeader();
+
+        // 2. 生成 main 函数签名
+        try self.emitFunctionSignature(analysis);
+
+        // 3. 生成函数体
+        try self.emitFunctionBody(analysis);
+
+        return self.output.toOwnedSlice();
+    }
+
+    fn emitHeader(self: *NoirCodeGen) !void {
+        try self.writeLine("// Auto-generated by zig-to-noir");
+        try self.writeLine("// DO NOT EDIT MANUALLY");
+        try self.writeLine("");
+        try self.writeLine("use std::hash::poseidon2;");
+        try self.writeLine("");
+    }
+
+    fn emitFunctionSignature(
+        self: *NoirCodeGen,
+        analysis: semantic.ZkSemanticAnalyzer.Analysis,
+    ) !void {
+        try self.write("fn main(\n");
+        self.indent_level += 1;
+
+        // 公开输入
+        if (analysis.public_inputs.len > 0) {
+            try self.writeIndent();
+            try self.writeLine("// === 公开输入 ===");
+            for (analysis.public_inputs) |input| {
+                try self.writeIndent();
+                try self.write("pub ");
+                try self.write(input.name);
+                try self.write(": ");
+                try self.write(self.mapTypeToNoir(input.typ));
+                try self.writeLine(",");
+            }
+        }
+
+        // 私有输入
+        if (analysis.private_inputs.len > 0) {
+            try self.writeIndent();
+            try self.writeLine("// === 私有输入 ===");
+            for (analysis.private_inputs) |input| {
+                try self.writeIndent();
+                try self.write(input.name);
+                try self.write(": ");
+                try self.write(self.mapTypeToNoir(input.typ));
+                try self.writeLine(",");
+            }
+        }
+
+        self.indent_level -= 1;
+        try self.writeLine(") {");
+    }
+
+    fn emitFunctionBody(
+        self: *NoirCodeGen,
+        analysis: semantic.ZkSemanticAnalyzer.Analysis,
+    ) !void {
+        self.indent_level += 1;
+
+        for (analysis.constraints) |constraint| {
+            try self.emitConstraint(constraint);
+        }
+
+        self.indent_level -= 1;
+        try self.writeLine("}");
+    }
+
+    fn emitConstraint(
+        self: *NoirCodeGen,
+        constraint: semantic.ZkSemanticAnalyzer.Constraint,
+    ) !void {
+        switch (constraint) {
+            .assert_eq => |eq| {
+                try self.writeIndent();
+                try self.write("assert(");
+                try self.emitExpr(eq.lhs);
+                try self.write(" == ");
+                try self.emitExpr(eq.rhs);
+                try self.writeLine(");");
+            },
+            .assert_bool => |expr| {
+                try self.writeIndent();
+                try self.write("assert(");
+                try self.emitExpr(expr);
+                try self.writeLine(");");
+            },
+            .assert_range => |range| {
+                try self.writeIndent();
+                try self.write("let _ = ");
+                try self.emitExpr(range.value);
+                try self.write(" as u");
+                try self.write(std.fmt.digits(range.bits));
+                try self.writeLine(";");
+            },
+            .poseidon_hash => |hash| {
+                try self.writeIndent();
+                try self.write("let ");
+                try self.emitExpr(hash.output);
+                try self.write(" = poseidon2([");
+                for (hash.inputs, 0..) |input, i| {
+                    if (i > 0) try self.write(", ");
+                    try self.emitExpr(input);
+                }
+                try self.writeLine("]);");
+            },
+            .merkle_verify => |merkle| {
+                // 内联展开 Merkle 验证
+                try self.emitMerkleVerification(merkle);
+            },
+            // ... 其他约束类型
+            else => {},
+        }
+    }
+
+    fn emitMerkleVerification(
+        self: *NoirCodeGen,
+        merkle: anytype,
+    ) !void {
+        try self.writeIndent();
+        try self.writeLine("// Merkle verification (inlined)");
+        try self.writeIndent();
+        try self.write("let mut computed = ");
+        try self.emitExpr(merkle.leaf);
+        try self.writeLine(";");
+
+        try self.writeIndent();
+        try self.writeLine("for i in 0..MERKLE_DEPTH {");
+        self.indent_level += 1;
+
+        try self.writeIndent();
+        try self.write("computed = poseidon2([computed, ");
+        try self.emitExpr(merkle.path);
+        try self.writeLine("[i]]);");
+
+        self.indent_level -= 1;
+        try self.writeIndent();
+        try self.writeLine("}");
+
+        try self.writeIndent();
+        try self.write("assert(computed == ");
+        try self.emitExpr(merkle.root);
+        try self.writeLine(", \"Merkle verification failed\");");
+    }
+
+    fn mapTypeToNoir(self: *NoirCodeGen, typ: semantic.ZkSemanticAnalyzer.ZkType) []const u8 {
+        _ = self;
+        return switch (typ) {
+            .field => "Field",
+            .field_array => "[Field; N]", // N 需要替换
+            .u64 => "u64",
+            .bool => "bool",
+        };
+    }
+
+    // 辅助写入函数
+    fn write(self: *NoirCodeGen, s: []const u8) !void {
+        try self.output.appendSlice(s);
+    }
+
+    fn writeLine(self: *NoirCodeGen, s: []const u8) !void {
+        try self.output.appendSlice(s);
+        try self.output.append('\n');
+    }
+
+    fn writeIndent(self: *NoirCodeGen) !void {
+        for (0..self.indent_level) |_| {
+            try self.output.appendSlice("    ");
+        }
+    }
+};
+```
+
+#### 18.48.6 Zig → Noir 映射规则
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Zig → Noir 映射规则                                   │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  类型映射                                                               │
+│  ════════                                                               │
+│                                                                         │
+│  ┌─────────────────────────────┬─────────────────────────────┐         │
+│  │           Zig               │           Noir              │         │
+│  ├─────────────────────────────┼─────────────────────────────┤         │
+│  │ zk.Field                    │ Field                       │         │
+│  │ u64                         │ u64                         │         │
+│  │ u32                         │ u32                         │         │
+│  │ bool                        │ bool                        │         │
+│  │ [N]zk.Field                 │ [Field; N]                  │         │
+│  │ [N]u1                       │ [u1; N]                     │         │
+│  │ struct { a: Field, b: Field}│ (Field, Field) 或展开参数   │         │
+│  └─────────────────────────────┴─────────────────────────────┘         │
+│                                                                         │
+│  参数映射                                                               │
+│  ════════                                                               │
+│                                                                         │
+│  ┌─────────────────────────────┬─────────────────────────────┐         │
+│  │           Zig               │           Noir              │         │
+│  ├─────────────────────────────┼─────────────────────────────┤         │
+│  │ comptime pub x: zk.Field    │ pub x: Field  (公开输入)    │         │
+│  │ x: zk.Field                 │ x: Field      (私有输入)    │         │
+│  └─────────────────────────────┴─────────────────────────────┘         │
+│                                                                         │
+│  函数映射                                                               │
+│  ════════                                                               │
+│                                                                         │
+│  ┌─────────────────────────────┬─────────────────────────────┐         │
+│  │           Zig               │           Noir              │         │
+│  ├─────────────────────────────┼─────────────────────────────┤         │
+│  │ zk.poseidon(&.{a, b})       │ poseidon2([a, b])           │         │
+│  │ zk.poseidon2(a, b)          │ poseidon2([a, b])           │         │
+│  │ zk.assert_eq(a, b)          │ assert(a == b)              │         │
+│  │ zk.assert_neq(a, b)         │ assert(a != b)              │         │
+│  │ zk.assert(cond)             │ assert(cond)                │         │
+│  │ zk.assert_range(v, 64)      │ let _ = v as u64            │         │
+│  │ zk.assert_gte(a, b)         │ assert(a >= b) (需 u64 cast)│         │
+│  │ zk.verify_merkle(...)       │ (内联展开为 for 循环)       │         │
+│  │ zk.verify_ownership(o, s)   │ assert(poseidon([s]) == o)  │         │
+│  └─────────────────────────────┴─────────────────────────────┘         │
+│                                                                         │
+│  控制流映射                                                             │
+│  ══════════                                                             │
+│                                                                         │
+│  ┌─────────────────────────────┬─────────────────────────────┐         │
+│  │           Zig               │           Noir              │         │
+│  ├─────────────────────────────┼─────────────────────────────┤         │
+│  │ if (c) a else b             │ if c { a } else { b }       │         │
+│  │ for (arr) |x| { ... }       │ for i in 0..N { arr[i] }    │         │
+│  │ const x = expr;             │ let x = expr;               │         │
+│  │ var x = expr;               │ let mut x = expr;           │         │
+│  └─────────────────────────────┴─────────────────────────────┘         │
+│                                                                         │
+│  不支持的 Zig 特性 (ZK 电路限制)                                        │
+│  ════════════════════════════════                                       │
+│                                                                         │
+│  • while 循环 (迭代次数必须编译时已知)                                  │
+│  • 递归函数 (电路必须展开)                                              │
+│  • 动态内存分配                                                         │
+│  • 指针 (除编译时常量)                                                  │
+│  • 浮点数                                                               │
+│  • 标准库 I/O                                                           │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.48.7 完整转译示例
+
+##### 输入: Zig 源码
+
+```zig
+// contracts/private_swap.zig
+// ═══════════════════════════════════════════════════════════════════════
+// Titan 私有 Swap 合约 - 单一源码，多目标编译
+
+const titan = @import("titan");
+const zk = titan.zk;
+
+/// 私有 Swap 电路
+/// 可编译为: Solana (测试) | Noir (ZK 证明)
+pub fn private_swap(
+    // === 公开输入 (链上可见) ===
+    comptime pub merkle_root: zk.Field,
+    comptime pub nullifier: zk.Field,
+    comptime pub output_commitment: zk.Field,
+    comptime pub pool_state_hash: zk.Field,
+
+    // === 私有输入 (链下保密) ===
+    note_amount: zk.Field,
+    note_owner: zk.Field,
+    note_nonce: zk.Field,
+    merkle_path: [20]zk.Field,
+    merkle_indices: [20]u1,
+    sender_secret: zk.Field,
+    swap_amount_in: zk.Field,
+    swap_amount_out: zk.Field,
+    pool_reserve_a: zk.Field,
+    pool_reserve_b: zk.Field,
+) void {
+    // ─────────────────────────────────────────────────────────────────
+    // 1. 计算 Note commitment
+    // ─────────────────────────────────────────────────────────────────
+    const commitment = zk.poseidon(&.{
+        note_amount,
+        note_owner,
+        note_nonce,
+    });
+
+    // ─────────────────────────────────────────────────────────────────
+    // 2. 验证 Merkle 路径 (证明 Note 存在于状态树中)
+    // ─────────────────────────────────────────────────────────────────
+    zk.verify_merkle(merkle_root, commitment, &merkle_path, &merkle_indices);
+
+    // ─────────────────────────────────────────────────────────────────
+    // 3. 验证 Nullifier (防止双花)
+    // ─────────────────────────────────────────────────────────────────
+    const leaf_index = zk.poseidon(&.{merkle_indices[0..10].*});
+    const computed_nullifier = zk.compute_nullifier(commitment, sender_secret, leaf_index);
+    zk.assert_eq(nullifier, computed_nullifier);
+
+    // ─────────────────────────────────────────────────────────────────
+    // 4. 验证所有权 (证明调用者拥有 Note)
+    // ─────────────────────────────────────────────────────────────────
+    zk.verify_ownership(note_owner, sender_secret);
+
+    // ─────────────────────────────────────────────────────────────────
+    // 5. 验证余额充足
+    // ─────────────────────────────────────────────────────────────────
+    zk.assert_gte(note_amount, swap_amount_in);
+
+    // ─────────────────────────────────────────────────────────────────
+    // 6. AMM 价格验证 (恒定乘积公式: x * y = k)
+    // ─────────────────────────────────────────────────────────────────
+    const k_before = pool_reserve_a * pool_reserve_b;
+    const new_reserve_a = pool_reserve_a + swap_amount_in;
+    const new_reserve_b = pool_reserve_b - swap_amount_out;
+    const k_after = new_reserve_a * new_reserve_b;
+
+    // k_after >= k_before * 0.997 (允许 0.3% 手续费)
+    zk.assert(k_after * 1000 >= k_before * 997);
+
+    // ─────────────────────────────────────────────────────────────────
+    // 7. 验证 Pool 状态哈希
+    // ─────────────────────────────────────────────────────────────────
+    const computed_pool_hash = zk.poseidon2(pool_reserve_a, pool_reserve_b);
+    zk.assert_eq(pool_state_hash, computed_pool_hash);
+
+    // ─────────────────────────────────────────────────────────────────
+    // 8. 验证输出 commitment (找零 + 获得的代币)
+    // ─────────────────────────────────────────────────────────────────
+    const change_amount = note_amount - swap_amount_in;
+    const output_note = zk.Note{
+        .amount = change_amount + swap_amount_out,
+        .asset = note_owner, // 简化: 同资产
+        .owner = note_owner,
+        .nonce = zk.poseidon2(note_nonce, nullifier), // 新 nonce
+    };
+    zk.assert_eq(output_commitment, output_note.commitment());
+}
+
+// 注册为 Titan 电路
+pub const __titan_circuits = .{
+    .private_swap = private_swap,
+};
+```
+
+##### 输出: Noir 代码 (自动生成)
+
+```noir
+// circuits/private_swap/src/main.nr
+// ═══════════════════════════════════════════════════════════════════════
+// Auto-generated by zig-to-noir v0.1.0
+// Source: contracts/private_swap.zig
+// DO NOT EDIT MANUALLY
+// ═══════════════════════════════════════════════════════════════════════
+
+use std::hash::poseidon2;
+
+fn main(
+    // === 公开输入 ===
+    pub merkle_root: Field,
+    pub nullifier: Field,
+    pub output_commitment: Field,
+    pub pool_state_hash: Field,
+
+    // === 私有输入 ===
+    note_amount: Field,
+    note_owner: Field,
+    note_nonce: Field,
+    merkle_path: [Field; 20],
+    merkle_indices: [u1; 20],
+    sender_secret: Field,
+    swap_amount_in: Field,
+    swap_amount_out: Field,
+    pool_reserve_a: Field,
+    pool_reserve_b: Field,
+) {
+    // ─────────────────────────────────────────────────────────────────
+    // 1. 计算 Note commitment
+    // ─────────────────────────────────────────────────────────────────
+    let commitment = poseidon2([note_amount, poseidon2([note_owner, note_nonce])]);
+
+    // ─────────────────────────────────────────────────────────────────
+    // 2. 验证 Merkle 路径
+    // ─────────────────────────────────────────────────────────────────
+    let mut computed = commitment;
+    for i in 0..20 {
+        let (left, right) = if merkle_indices[i] == 0 {
+            (computed, merkle_path[i])
+        } else {
+            (merkle_path[i], computed)
+        };
+        computed = poseidon2([left, right]);
+    }
+    assert(computed == merkle_root, "Merkle verification failed");
+
+    // ─────────────────────────────────────────────────────────────────
+    // 3. 验证 Nullifier
+    // ─────────────────────────────────────────────────────────────────
+    let leaf_index = poseidon2([
+        merkle_indices[0] as Field,
+        merkle_indices[1] as Field,
+        // ... (展开)
+    ]);
+    let computed_nullifier = poseidon2([commitment, poseidon2([sender_secret, leaf_index])]);
+    assert(nullifier == computed_nullifier, "Invalid nullifier");
+
+    // ─────────────────────────────────────────────────────────────────
+    // 4. 验证所有权
+    // ─────────────────────────────────────────────────────────────────
+    let derived_owner = poseidon2([sender_secret]);
+    assert(note_owner == derived_owner, "Not the owner");
+
+    // ─────────────────────────────────────────────────────────────────
+    // 5. 验证余额充足
+    // ─────────────────────────────────────────────────────────────────
+    let note_u64 = note_amount as u64;
+    let swap_in_u64 = swap_amount_in as u64;
+    assert(note_u64 >= swap_in_u64, "Insufficient balance");
+
+    // ─────────────────────────────────────────────────────────────────
+    // 6. AMM 价格验证
+    // ─────────────────────────────────────────────────────────────────
+    let k_before = pool_reserve_a * pool_reserve_b;
+    let new_reserve_a = pool_reserve_a + swap_amount_in;
+    let new_reserve_b = pool_reserve_b - swap_amount_out;
+    let k_after = new_reserve_a * new_reserve_b;
+    assert(k_after * 1000 >= k_before * 997, "Price slippage exceeded");
+
+    // ─────────────────────────────────────────────────────────────────
+    // 7. 验证 Pool 状态哈希
+    // ─────────────────────────────────────────────────────────────────
+    let computed_pool_hash = poseidon2([pool_reserve_a, pool_reserve_b]);
+    assert(pool_state_hash == computed_pool_hash, "Invalid pool state");
+
+    // ─────────────────────────────────────────────────────────────────
+    // 8. 验证输出 commitment
+    // ─────────────────────────────────────────────────────────────────
+    let change_amount = note_amount - swap_amount_in;
+    let new_amount = change_amount + swap_amount_out;
+    let new_nonce = poseidon2([note_nonce, nullifier]);
+    let new_commitment = poseidon2([new_amount, poseidon2([note_owner, new_nonce])]);
+    assert(output_commitment == new_commitment, "Invalid output commitment");
+}
+```
+
+#### 18.48.8 CLI 集成
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Titan CLI - 统一编译命令                              │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  # 编译为不同目标                                                       │
+│  ══════════════════                                                     │
+│                                                                         │
+│  # Solana (链上执行，用于测试)                                          │
+│  $ titan build contracts/private_swap.zig --target=solana               │
+│  Output: target/solana/private_swap.so                                 │
+│                                                                         │
+│  # EVM (Yul → EVM bytecode)                                            │
+│  $ titan build contracts/private_swap.zig --target=evm                  │
+│  Output: target/evm/private_swap.bin                                   │
+│                                                                         │
+│  # ZK (Noir 电路)                                                       │
+│  $ titan build contracts/private_swap.zig --target=noir                 │
+│  Output: circuits/private_swap/src/main.nr                             │
+│                                                                         │
+│  # Wasm (Near, Cosmos 等)                                              │
+│  $ titan build contracts/private_swap.zig --target=wasm                 │
+│  Output: target/wasm/private_swap.wasm                                 │
+│                                                                         │
+│  # ZK 证明生成                                                          │
+│  ════════════════                                                       │
+│                                                                         │
+│  # 生成 witness 模板                                                    │
+│  $ titan zk witness contracts/private_swap.zig                          │
+│  Output: circuits/private_swap/Prover.toml.template                    │
+│                                                                         │
+│  # 生成证明                                                             │
+│  $ titan zk prove --circuit=private_swap --witness=witness.toml        │
+│  Output: proofs/private_swap.proof                                     │
+│                                                                         │
+│  # 提交证明到链上                                                       │
+│  $ titan zk submit --proof=proofs/private_swap.proof --chain=solana    │
+│  Output: Transaction signature                                         │
+│                                                                         │
+│  # 一键完整流程                                                         │
+│  ══════════════════                                                     │
+│                                                                         │
+│  $ titan zk run contracts/private_swap.zig \                           │
+│      --witness=my_witness.toml \                                       │
+│      --chain=solana \                                                  │
+│      --submit                                                          │
+│                                                                         │
+│  # 等价于:                                                              │
+│  # 1. titan build --target=noir                                        │
+│  # 2. nargo execute                                                    │
+│  # 3. sunspot prove                                                    │
+│  # 4. titan zk submit                                                  │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.48.9 项目结构
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    zig-to-noir 项目结构                                  │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  titan-framework/                                                       │
+│  │                                                                      │
+│  ├── titan-zk-sdk/              # ZK 原语 SDK                          │
+│  │   ├── src/                                                          │
+│  │   │   ├── root.zig          # 主入口                                │
+│  │   │   ├── field.zig         # Field 类型                            │
+│  │   │   ├── hash.zig          # Poseidon, Pedersen                    │
+│  │   │   ├── merkle.zig        # Merkle 验证                           │
+│  │   │   ├── nullifier.zig     # Nullifier 计算                        │
+│  │   │   ├── range.zig         # 范围证明                              │
+│  │   │   ├── ownership.zig     # 所有权验证                            │
+│  │   │   └── note.zig          # Note 结构                             │
+│  │   ├── build.zig                                                     │
+│  │   └── README.md                                                     │
+│  │                                                                      │
+│  ├── zig-to-noir/               # 转译器                               │
+│  │   ├── src/                                                          │
+│  │   │   ├── main.zig          # CLI 入口                              │
+│  │   │   ├── lexer.zig         # 词法分析 (复用 zig-to-yul)           │
+│  │   │   ├── parser.zig        # 语法分析 (复用 zig-to-yul)           │
+│  │   │   ├── ast.zig           # AST 定义                              │
+│  │   │   ├── zk_semantic.zig   # ZK 语义分析                           │
+│  │   │   ├── zk_ir.zig         # ZK 中间表示                           │
+│  │   │   ├── noir_codegen.zig  # Noir 代码生成                         │
+│  │   │   ├── witness_gen.zig   # Witness 模板生成                      │
+│  │   │   └── constraint_counter.zig  # 约束计数                        │
+│  │   ├── build.zig                                                     │
+│  │   └── README.md                                                     │
+│  │                                                                      │
+│  ├── titan-cli/                 # 统一 CLI                             │
+│  │   ├── src/                                                          │
+│  │   │   ├── main.zig                                                  │
+│  │   │   ├── cmd_build.zig     # build 命令                            │
+│  │   │   ├── cmd_zk.zig        # zk 子命令                             │
+│  │   │   └── target_router.zig # 目标路由                              │
+│  │   └── build.zig                                                     │
+│  │                                                                      │
+│  └── examples/                                                         │
+│      └── zk-amm/                                                       │
+│          ├── contracts/                                                │
+│          │   └── private_swap.zig  # 源码                              │
+│          ├── circuits/             # 生成的 Noir                       │
+│          │   └── private_swap/                                         │
+│          │       └── src/main.nr                                       │
+│          └── README.md                                                 │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.48.10 工作量估算
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    开发工作量估算                                        │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  组件                          代码量        复用情况                   │
+│  ════════════════════════════════════════════════════════════════════  │
+│                                                                         │
+│  titan-zk-sdk                                                          │
+│  ├─ field.zig                  ~200 行      新开发                      │
+│  ├─ hash.zig                   ~300 行      新开发                      │
+│  ├─ merkle.zig                 ~200 行      新开发                      │
+│  ├─ nullifier.zig              ~100 行      新开发                      │
+│  ├─ range.zig                  ~100 行      新开发                      │
+│  ├─ ownership.zig              ~50 行       新开发                      │
+│  └─ note.zig                   ~150 行      新开发                      │
+│  小计                          ~1100 行                                 │
+│                                                                         │
+│  zig-to-noir                                                           │
+│  ├─ lexer.zig                  ~0 行        复用 zig-to-yul            │
+│  ├─ parser.zig                 ~0 行        复用 zig-to-yul            │
+│  ├─ ast.zig                    ~200 行      部分复用                    │
+│  ├─ zk_semantic.zig            ~1500 行     新开发                      │
+│  ├─ zk_ir.zig                  ~800 行      新开发                      │
+│  ├─ noir_codegen.zig           ~1200 行     新开发                      │
+│  ├─ witness_gen.zig            ~500 行      新开发                      │
+│  └─ constraint_counter.zig     ~300 行      新开发                      │
+│  小计                          ~4500 行                                 │
+│                                                                         │
+│  titan-cli (ZK 部分)                                                   │
+│  ├─ cmd_zk.zig                 ~400 行      新开发                      │
+│  └─ target_router.zig          ~100 行      扩展                        │
+│  小计                          ~500 行                                  │
+│                                                                         │
+│  ────────────────────────────────────────────────────────────────────  │
+│  总计                          ~6100 行 Zig                            │
+│                                                                         │
+│  对比:                                                                  │
+│  • zig-to-yul: ~8000 行 (类似复杂度)                                   │
+│  • solana-sdk-zig: ~5000 行                                            │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.48.11 与 Section 18.47 方案的对比
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    方案对比                                              │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  ┌─────────────────────────────┬─────────────────────────────┐         │
+│  │   18.47 方案 (TypeScript)   │   18.48 方案 (zig-to-noir)  │         │
+│  ├─────────────────────────────┼─────────────────────────────┤         │
+│  │                             │                             │         │
+│  │ 开发者需要:                 │ 开发者需要:                 │         │
+│  │ • 学 Zig (链上)            │ • 只学 Zig                  │         │
+│  │ • 学 Noir (ZK)             │                             │         │
+│  │ • 维护两套代码              │ • 一套代码，多目标          │         │
+│  │                             │                             │         │
+│  │ 工作流:                     │ 工作流:                     │         │
+│  │ 1. 写 Zig (链上逻辑)       │ 1. 写 Zig                   │         │
+│  │ 2. 写 Noir (ZK 电路)       │ 2. titan build --target=X   │         │
+│  │ 3. 手动同步两边             │ 3. 自动生成目标代码         │         │
+│  │                             │                             │         │
+│  │ 一致性保证:                 │ 一致性保证:                 │         │
+│  │ ❌ 容易不一致               │ ✅ 编译器保证               │         │
+│  │                             │                             │         │
+│  │ 符合 Titan 哲学:           │ 符合 Titan 哲学:           │         │
+│  │ ❌ 否                       │ ✅ 是                       │         │
+│  │                             │                             │         │
+│  └─────────────────────────────┴─────────────────────────────┘         │
+│                                                                         │
+│  结论: 18.48 方案是正确的 Titan 架构                                   │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.48.12 总结
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                                                                         │
+│                    zig-to-noir - 总结                                   │
+│                                                                         │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  核心理念:                                                              │
+│  ══════════                                                             │
+│                                                                         │
+│  "Write Zig Once, Compile to Anywhere"                                 │
+│  一次编写 Zig，编译到任何目标                                          │
+│                                                                         │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │                                                                 │   │
+│  │                         Zig 源码                                │   │
+│  │                            │                                    │   │
+│  │          ┌─────────────────┼─────────────────┐                 │   │
+│  │          │                 │                 │                 │   │
+│  │          ▼                 ▼                 ▼                 │   │
+│  │       Solana            EVM/Yul           Noir                │   │
+│  │     (链上执行)         (链上执行)        (ZK 证明)            │   │
+│  │                                                                 │   │
+│  │   同一业务逻辑，根据场景选择执行方式                           │   │
+│  │                                                                 │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                                                                         │
+│  需要开发:                                                              │
+│  ══════════                                                             │
+│                                                                         │
+│  ┌──────────────────────┬──────────┬──────────────────────────┐        │
+│  │ 组件                 │ 代码量   │ 状态                     │        │
+│  ├──────────────────────┼──────────┼──────────────────────────┤        │
+│  │ titan-zk-sdk         │ ~1100 行 │ 需开发                   │        │
+│  │ zig-to-noir          │ ~4500 行 │ 需开发 (复用 lexer/parser)│        │
+│  │ titan-cli (ZK 部分)  │ ~500 行  │ 需开发                   │        │
+│  ├──────────────────────┼──────────┼──────────────────────────┤        │
+│  │ 总计                 │ ~6100 行 │                          │        │
+│  └──────────────────────┴──────────┴──────────────────────────┘        │
+│                                                                         │
+│  价值:                                                                  │
+│  ══════                                                                 │
+│                                                                         │
+│  • 开发者只需学 Zig，不需学 Noir/Solidity/Rust                        │
+│  • 业务逻辑编译器保证一致，无人为错误                                  │
+│  • 可本地测试 (Zig 直接运行) 后再生成 ZK 证明                         │
+│  • 完全符合 Titan "一次编写，多端编译" 的核心哲学                     │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
 ---
 
 ## 相关文档
