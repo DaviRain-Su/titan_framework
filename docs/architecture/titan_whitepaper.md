@@ -21384,6 +21384,1360 @@ pub const TitanClient = struct {
 
 ---
 
+### 18.16 Passkeys 集成: 无感区块链的终极形态 (Invisible Blockchain)
+
+> **核心命题**: 连密码都不需要了。Face ID 扫一下，交易完成。这是区块链进入主流的最后一步。
+
+#### 18.16.1 签名方式的演进
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     区块链签名方式演进史                                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Era 1: 助记词时代 (2015-2020)                                             │
+│  ─────────────────────────────                                              │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                      │   │
+│  │  用户流程:                                                           │   │
+│  │  1. 下载钱包 App                                                     │   │
+│  │  2. 抄写 12-24 个助记词                                             │   │
+│  │  3. 每次交易手动确认                                                 │   │
+│  │  4. 私钥存在设备上 (软件)                                           │   │
+│  │                                                                      │   │
+│  │  问题:                                                               │   │
+│  │  • 助记词丢失 = 资产归零                                            │   │
+│  │  • 99% 普通人直接放弃                                               │   │
+│  │  • 即使是加密老手也经常丢币                                         │   │
+│  │                                                                      │   │
+│  │  安全等级: ★★☆☆☆ (软件存储，易被窃取)                             │   │
+│  │  用户体验: ★☆☆☆☆ (反人性)                                         │   │
+│  │                                                                      │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  Era 2: MPC 钱包时代 (2021-2024)                                           │
+│  ───────────────────────────────                                            │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                      │   │
+│  │  代表: Phantom Social Login, Coinbase Wallet, Fireblocks            │   │
+│  │                                                                      │   │
+│  │  用户流程:                                                           │   │
+│  │  1. Google/Apple 登录                                                │   │
+│  │  2. 服务器存储私钥分片                                               │   │
+│  │  3. 交易时多方计算签名                                               │   │
+│  │                                                                      │   │
+│  │  问题:                                                               │   │
+│  │  • 服务器持有分片 = 半托管                                          │   │
+│  │  • 服务商被黑 = 资产风险                                            │   │
+│  │  • 依赖中心化服务                                                    │   │
+│  │                                                                      │   │
+│  │  安全等级: ★★★☆☆ (分布式但仍有单点风险)                           │   │
+│  │  用户体验: ★★★★☆ (接近 Web2)                                       │   │
+│  │                                                                      │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  Era 3: ZK Login 时代 (2024-2025, Titan 18.14-18.15)                       │
+│  ───────────────────────────────────────────────────                        │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                      │   │
+│  │  用户流程:                                                           │   │
+│  │  1. Email + 密码登录                                                 │   │
+│  │  2. 客户端生成 ZK Proof                                             │   │
+│  │  3. 链上验证，无服务器托管                                          │   │
+│  │                                                                      │   │
+│  │  优势:                                                               │   │
+│  │  • 完全非托管                                                        │   │
+│  │  • 确定性派生，设备无关                                              │   │
+│  │  • 熟悉的 Email 体验                                                 │   │
+│  │                                                                      │   │
+│  │  局限:                                                               │   │
+│  │  • 还是需要输入密码                                                  │   │
+│  │  • 密码强度依赖用户                                                  │   │
+│  │  • 钓鱼攻击风险                                                      │   │
+│  │                                                                      │   │
+│  │  安全等级: ★★★★☆ (非托管，但密码可能弱)                           │   │
+│  │  用户体验: ★★★★☆ (Web2 级别)                                       │   │
+│  │                                                                      │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  Era 4: Passkeys 时代 (2025+, Titan 18.16) ◄── 终极形态                    │
+│  ──────────────────────────────────────────                                 │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                      │   │
+│  │  用户流程:                                                           │   │
+│  │  1. Face ID / 指纹 / Touch ID                                        │   │
+│  │  2. 硬件安全芯片签名                                                 │   │
+│  │  3. 完成                                                             │   │
+│  │                                                                      │   │
+│  │  优势:                                                               │   │
+│  │  • 无密码 (Passwordless)                                            │   │
+│  │  • 硬件级安全 (Secure Enclave / TPM)                                │   │
+│  │  • 防钓鱼 (绑定域名)                                                │   │
+│  │  • 跨设备同步 (iCloud Keychain / Google Password Manager)          │   │
+│  │                                                                      │   │
+│  │  安全等级: ★★★★★ (硬件隔离，无法提取)                             │   │
+│  │  用户体验: ★★★★★ (比 Web2 还简单)                                 │   │
+│  │                                                                      │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.16.2 什么是 Passkeys / WebAuthn
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     Passkeys 技术解析                                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Passkeys 是 FIDO Alliance 和 W3C 联合推出的新一代认证标准。               │
+│  它基于 WebAuthn 协议，被 Apple、Google、Microsoft 联合采用。              │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                     工作原理                                         │   │
+│  ├─────────────────────────────────────────────────────────────────────┤   │
+│  │                                                                      │   │
+│  │  注册 (首次使用):                                                    │   │
+│  │  ────────────────                                                    │   │
+│  │                                                                      │   │
+│  │  ┌─────────────┐     ┌─────────────┐     ┌─────────────┐           │   │
+│  │  │   用户      │     │  Secure     │     │   服务端    │           │   │
+│  │  │             │     │  Enclave    │     │  (Titan)    │           │   │
+│  │  └──────┬──────┘     └──────┬──────┘     └──────┬──────┘           │   │
+│  │         │                   │                   │                   │   │
+│  │         │ 1. 点击注册       │                   │                   │   │
+│  │         │──────────────────►│                   │                   │   │
+│  │         │                   │                   │                   │   │
+│  │         │ 2. Face ID        │                   │                   │   │
+│  │         │──────────────────►│                   │                   │   │
+│  │         │                   │                   │                   │   │
+│  │         │                   │ 3. 生成密钥对     │                   │   │
+│  │         │                   │   (私钥永不导出)  │                   │   │
+│  │         │                   │                   │                   │   │
+│  │         │                   │ 4. 返回公钥       │                   │   │
+│  │         │                   │──────────────────►│                   │   │
+│  │         │                   │                   │                   │   │
+│  │         │                   │                   │ 5. 存储公钥       │   │
+│  │         │                   │                   │    (链上)         │   │
+│  │         │                   │                   │                   │   │
+│  │                                                                      │   │
+│  │  认证 (每次使用):                                                    │   │
+│  │  ────────────────                                                    │   │
+│  │                                                                      │   │
+│  │  ┌─────────────┐     ┌─────────────┐     ┌─────────────┐           │   │
+│  │  │   用户      │     │  Secure     │     │   链上      │           │   │
+│  │  │             │     │  Enclave    │     │  验证器     │           │   │
+│  │  └──────┬──────┘     └──────┬──────┘     └──────┬──────┘           │   │
+│  │         │                   │                   │                   │   │
+│  │         │ 1. 发起交易       │                   │                   │   │
+│  │         │──────────────────►│                   │                   │   │
+│  │         │                   │                   │                   │   │
+│  │         │ 2. Face ID        │                   │                   │   │
+│  │         │──────────────────►│                   │                   │   │
+│  │         │                   │                   │                   │   │
+│  │         │                   │ 3. 私钥签名       │                   │   │
+│  │         │                   │   (challenge)     │                   │   │
+│  │         │                   │                   │                   │   │
+│  │         │                   │ 4. 返回签名       │                   │   │
+│  │         │                   │──────────────────►│                   │   │
+│  │         │                   │                   │                   │   │
+│  │         │                   │                   │ 5. 验证签名       │   │
+│  │         │                   │                   │    (用公钥)       │   │
+│  │         │                   │                   │                   │   │
+│  │         │                   │                   │ 6. 执行交易       │   │
+│  │         │                   │                   │                   │   │
+│  │                                                                      │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  核心安全特性:                                                              │
+│  ─────────────                                                              │
+│                                                                             │
+│  1. 私钥永不导出                                                            │
+│     • 私钥在 Secure Enclave 中生成                                         │
+│     • 即使设备被 Root/越狱也无法提取                                       │
+│     • 即使恶意软件也无法访问                                               │
+│                                                                             │
+│  2. 绑定域名 (防钓鱼)                                                       │
+│     • Passkey 绑定到 titan.app 域名                                        │
+│     • 在 titam-fake.com (钓鱼网站) 上无法使用                              │
+│     • 浏览器自动检测域名                                                    │
+│                                                                             │
+│  3. 跨设备同步                                                              │
+│     • Apple: iCloud Keychain (端到端加密)                                  │
+│     • Google: Google Password Manager (端到端加密)                         │
+│     • 换设备自动同步                                                        │
+│                                                                             │
+│  4. 生物特征本地化                                                          │
+│     • Face ID / 指纹数据永不离开设备                                       │
+│     • 服务端只收到签名结果                                                  │
+│     • 符合 GDPR 等隐私法规                                                 │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.16.3 Passkeys vs ZK Login: 互补而非替代
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     Titan 双轨认证架构                                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Passkeys 和 ZK Login 不是替代关系，而是互补关系。                          │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                     对比分析                                         │   │
+│  ├─────────────────────────────────────────────────────────────────────┤   │
+│  │                                                                      │   │
+│  │  维度           │ ZK Login          │ Passkeys                      │   │
+│  │  ───────────────┼───────────────────┼────────────────────────────── │   │
+│  │  认证方式       │ Email + 密码      │ Face ID / 指纹                │   │
+│  │  私钥存储       │ 客户端派生        │ 硬件安全芯片                  │   │
+│  │  跨设备         │ ✅ 任意设备       │ ⚠️ 需要同步                   │   │
+│  │  离线使用       │ ⚠️ 需要 JWT       │ ✅ 完全离线                   │   │
+│  │  设备丢失       │ ✅ 重新登录       │ ⚠️ 需要恢复                   │   │
+│  │  防钓鱼         │ ⚠️ 密码可被骗     │ ✅ 域名绑定                   │   │
+│  │  安全等级       │ 软件级            │ 硬件级                        │   │
+│  │                                                                      │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  最佳实践: 组合使用                                                         │
+│  ─────────────────                                                          │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                      │   │
+│  │  场景 1: 首次注册                                                    │   │
+│  │  ─────────────────                                                   │   │
+│  │  • 用户: Google 登录 (ZK Login)                                     │   │
+│  │  • 系统: 创建 Titan ID                                              │   │
+│  │  • 提示: "添加 Face ID 以加速日常使用?"                             │   │
+│  │  • 用户: 确认 → 注册 Passkey                                        │   │
+│  │                                                                      │   │
+│  │  场景 2: 日常使用                                                    │   │
+│  │  ─────────────                                                       │   │
+│  │  • 用户: Face ID 扫一下 (Passkey)                                   │   │
+│  │  • 系统: 0.3 秒完成签名                                             │   │
+│  │  • 无需输入密码                                                      │   │
+│  │                                                                      │   │
+│  │  场景 3: 换新手机                                                    │   │
+│  │  ───────────────                                                     │   │
+│  │  • 如果 iCloud 同步: Passkey 自动恢复                               │   │
+│  │  • 如果未同步: 重新用 ZK Login 登录                                 │   │
+│  │  • 重新注册 Passkey                                                  │   │
+│  │                                                                      │   │
+│  │  场景 4: 大额交易                                                    │   │
+│  │  ───────────────                                                     │   │
+│  │  • 小额 (<$100): 仅 Passkey (Face ID)                               │   │
+│  │  • 大额 (>$100): Passkey + ZK Login (双重认证)                      │   │
+│  │  • 超大额 (>$10,000): + Hardware Key (Yubikey)                      │   │
+│  │                                                                      │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  Titan 认证金字塔:                                                          │
+│  ─────────────────                                                          │
+│                                                                             │
+│                         ┌─────────────┐                                    │
+│                         │  Hardware   │  最高安全级别                      │
+│                         │   Yubikey   │  (超大额交易)                      │
+│                         └──────┬──────┘                                    │
+│                    ┌───────────┴───────────┐                               │
+│                    │       Passkey +       │  高安全级别                   │
+│                    │       ZK Login        │  (大额交易)                   │
+│                    └───────────┬───────────┘                               │
+│              ┌─────────────────┴─────────────────┐                         │
+│              │            Passkey                │  日常使用               │
+│              │      (Face ID / 指纹)            │  (小额交易)              │
+│              └─────────────────┬─────────────────┘                         │
+│        ┌───────────────────────┴───────────────────────┐                   │
+│        │                  ZK Login                      │  账户恢复        │
+│        │            (Email + Password)                  │  新设备登录      │
+│        └────────────────────────────────────────────────┘                   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.16.4 链上 Passkey 验证器
+
+**核心挑战**: WebAuthn 使用的是 **secp256r1** (P-256) 曲线，而大多数区块链使用 **secp256k1**。
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     曲线兼容性问题                                           │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                      │   │
+│  │  WebAuthn (Passkeys):                                                │   │
+│  │  • 使用 secp256r1 (P-256) 曲线                                      │   │
+│  │  • 这是 NIST 标准曲线                                               │   │
+│  │  • Apple/Google 安全芯片原生支持                                    │   │
+│  │                                                                      │   │
+│  │  大多数区块链:                                                       │   │
+│  │  • 使用 secp256k1 曲线                                              │   │
+│  │  • Bitcoin/Ethereum 选择的曲线                                      │   │
+│  │  • 链上验证 secp256r1 签名需要额外实现                              │   │
+│  │                                                                      │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  各链支持情况:                                                              │
+│                                                                             │
+│  链           │ secp256r1 支持     │ 备注                                  │
+│  ─────────────┼────────────────────┼────────────────────────────────────── │
+│  Ethereum     │ ✅ EIP-7212        │ 原生预编译 (已合并)                   │
+│  Solana       │ ✅ Syscall         │ secp256r1_recover                     │
+│  TON          │ ⚠️ 需要实现        │ 合约内计算                            │
+│  Cosmos       │ ✅ 部分 SDK        │ 取决于具体链                          │
+│  Sui          │ ✅ 原生支持        │ zkLogin 使用                          │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Solana Passkey 验证器 (Zig)**:
+
+```zig
+// ============================================================================
+// Titan Passkey Verifier: Solana 实现
+// ============================================================================
+
+const std = @import("std");
+const sdk = @import("solana-program-sdk");
+
+/// Passkey 凭证结构
+pub const PasskeyCredential = packed struct {
+    /// 凭证 ID (来自 WebAuthn)
+    credential_id: [64]u8,
+
+    /// 公钥 (secp256r1, 压缩格式)
+    public_key: [33]u8,
+
+    /// 注册时间戳
+    registered_at: i64,
+
+    /// 最后使用时间戳
+    last_used_at: i64,
+
+    /// 使用次数
+    use_count: u64,
+
+    /// 设备名称哈希
+    device_hash: [32]u8,
+
+    const SIZE = 64 + 33 + 8 + 8 + 8 + 32;  // 153 bytes
+};
+
+/// Titan Passkey 账户
+pub const TitanPasskeyAccount = packed struct {
+    /// 版本号
+    version: u8,
+
+    /// 关联的 Titan ID commitment
+    identity_commitment: [32]u8,
+
+    /// 注册的 Passkey 数量 (最多 5 个)
+    passkey_count: u8,
+
+    /// Passkey 凭证列表
+    passkeys: [5]PasskeyCredential,
+
+    /// 安全设置
+    settings: SecuritySettings,
+
+    pub const SecuritySettings = packed struct {
+        /// 小额交易阈值 (lamports)
+        small_tx_threshold: u64,
+
+        /// 大额交易是否需要双重认证
+        require_2fa_for_large: bool,
+
+        /// 是否允许新设备注册
+        allow_new_device: bool,
+
+        /// 新设备注册冷却期 (秒)
+        new_device_cooldown: u32,
+    };
+
+    const SIZE = 1 + 32 + 1 + (5 * PasskeyCredential.SIZE) + 8 + 1 + 1 + 4;
+};
+
+/// WebAuthn 签名数据结构
+pub const WebAuthnSignature = packed struct {
+    /// Authenticator Data (至少 37 字节)
+    authenticator_data: [64]u8,
+    authenticator_data_len: u8,
+
+    /// Client Data JSON Hash
+    client_data_hash: [32]u8,
+
+    /// ECDSA 签名 (r, s)
+    signature_r: [32]u8,
+    signature_s: [32]u8,
+
+    /// 使用的凭证索引
+    credential_index: u8,
+};
+
+/// 验证 Passkey 签名
+pub fn verifyPasskeySignature(
+    account: *const TitanPasskeyAccount,
+    signature: *const WebAuthnSignature,
+    challenge: *const [32]u8,
+) !bool {
+    // 1. 获取对应的 Passkey
+    if (signature.credential_index >= account.passkey_count) {
+        return error.InvalidCredentialIndex;
+    }
+    const passkey = &account.passkeys[signature.credential_index];
+
+    // 2. 构造待验证的消息
+    // message = sha256(authenticator_data || client_data_hash)
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update(signature.authenticator_data[0..signature.authenticator_data_len]);
+    hasher.update(&signature.client_data_hash);
+    const message_hash = hasher.finalResult();
+
+    // 3. 验证 challenge 在 client_data 中
+    // (实际实现需要解析 client_data_hash 验证 challenge)
+
+    // 4. 调用 Solana secp256r1 syscall 验证签名
+    const is_valid = sdk.syscalls.secp256r1_recover(
+        &message_hash,
+        &signature.signature_r,
+        &signature.signature_s,
+        &passkey.public_key,
+    );
+
+    return is_valid;
+}
+
+/// 处理 Passkey 交易
+pub fn processPasskeyTransaction(
+    account_info: *sdk.AccountInfo,
+    instruction_data: []const u8,
+) !void {
+    // 解析指令
+    const ix = try parseInstruction(instruction_data);
+
+    switch (ix.action) {
+        .register_passkey => {
+            // 注册新的 Passkey
+            // 需要先通过 ZK Login 认证
+            try registerPasskey(account_info, ix.passkey_data);
+        },
+
+        .sign_transaction => {
+            // 使用 Passkey 签名交易
+            const passkey_account = try loadPasskeyAccount(account_info);
+            const is_valid = try verifyPasskeySignature(
+                passkey_account,
+                &ix.signature,
+                &ix.challenge,
+            );
+
+            if (!is_valid) {
+                return error.InvalidSignature;
+            }
+
+            // 检查交易金额是否需要额外认证
+            if (ix.amount > passkey_account.settings.small_tx_threshold) {
+                if (passkey_account.settings.require_2fa_for_large) {
+                    // 需要 ZK Login 双重认证
+                    if (!ix.has_zk_proof) {
+                        return error.Require2FA;
+                    }
+                    try verifyZKProof(&ix.zk_proof, &passkey_account.identity_commitment);
+                }
+            }
+
+            // 执行交易
+            try executeTransaction(ix.transaction_data);
+
+            // 更新使用统计
+            try updatePasskeyStats(account_info, ix.signature.credential_index);
+        },
+
+        .remove_passkey => {
+            // 移除 Passkey (需要 ZK Login 认证)
+            try removePasskey(account_info, ix.credential_index);
+        },
+    }
+}
+
+/// 注册新的 Passkey
+fn registerPasskey(
+    account_info: *sdk.AccountInfo,
+    passkey_data: *const PasskeyRegistrationData,
+) !void {
+    var account = try loadPasskeyAccount(account_info);
+
+    // 检查是否达到上限
+    if (account.passkey_count >= 5) {
+        return error.TooManyPasskeys;
+    }
+
+    // 检查新设备冷却期
+    const clock = sdk.clock.get();
+    // ... 冷却期检查逻辑
+
+    // 添加新 Passkey
+    const new_passkey = PasskeyCredential{
+        .credential_id = passkey_data.credential_id,
+        .public_key = passkey_data.public_key,
+        .registered_at = clock.unix_timestamp,
+        .last_used_at = clock.unix_timestamp,
+        .use_count = 0,
+        .device_hash = passkey_data.device_hash,
+    };
+
+    account.passkeys[account.passkey_count] = new_passkey;
+    account.passkey_count += 1;
+
+    // 保存更新
+    try savePasskeyAccount(account_info, &account);
+
+    sdk.log.sol_log("Passkey registered successfully");
+}
+```
+
+#### 18.16.5 EVM Passkey 验证器 (EIP-7212)
+
+```solidity
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+/// @title TitanPasskeyValidator
+/// @notice 使用 EIP-7212 预编译验证 Passkey (secp256r1) 签名
+contract TitanPasskeyValidator {
+
+    /// @notice secp256r1 验证预编译地址 (EIP-7212)
+    address constant P256_VERIFIER = 0x0000000000000000000000000000000000000100;
+
+    /// @notice Passkey 凭证
+    struct PasskeyCredential {
+        bytes32 credentialIdHash;  // credential ID 的哈希
+        bytes32 publicKeyX;        // 公钥 X 坐标
+        bytes32 publicKeyY;        // 公钥 Y 坐标
+        uint64 registeredAt;
+        uint64 lastUsedAt;
+        uint32 useCount;
+    }
+
+    /// @notice Titan ID commitment => Passkeys
+    mapping(bytes32 => PasskeyCredential[]) public passkeys;
+
+    /// @notice 安全设置
+    struct SecuritySettings {
+        uint256 smallTxThreshold;    // 小额交易阈值
+        bool require2FAForLarge;     // 大额是否需要双重认证
+        uint256 newDeviceCooldown;   // 新设备注册冷却期
+    }
+
+    mapping(bytes32 => SecuritySettings) public securitySettings;
+
+    /// @notice WebAuthn 签名数据
+    struct WebAuthnSignature {
+        bytes authenticatorData;
+        bytes32 clientDataHash;
+        bytes32 r;
+        bytes32 s;
+        uint8 credentialIndex;
+    }
+
+    /// @notice 验证 Passkey 签名
+    /// @param identityCommitment Titan ID commitment
+    /// @param sig WebAuthn 签名
+    /// @param challenge 原始 challenge
+    /// @return valid 签名是否有效
+    function verifySignature(
+        bytes32 identityCommitment,
+        WebAuthnSignature calldata sig,
+        bytes32 challenge
+    ) public view returns (bool valid) {
+        // 获取对应的 Passkey
+        PasskeyCredential[] storage credentials = passkeys[identityCommitment];
+        require(sig.credentialIndex < credentials.length, "Invalid credential index");
+
+        PasskeyCredential storage credential = credentials[sig.credentialIndex];
+
+        // 构造消息哈希
+        // message = sha256(authenticatorData || clientDataHash)
+        bytes32 messageHash = sha256(
+            abi.encodePacked(sig.authenticatorData, sig.clientDataHash)
+        );
+
+        // 调用 EIP-7212 预编译验证 secp256r1 签名
+        (bool success, bytes memory result) = P256_VERIFIER.staticcall(
+            abi.encode(
+                messageHash,
+                sig.r,
+                sig.s,
+                credential.publicKeyX,
+                credential.publicKeyY
+            )
+        );
+
+        require(success, "P256 verification call failed");
+        valid = abi.decode(result, (bool));
+    }
+
+    /// @notice 注册新的 Passkey
+    /// @param identityCommitment Titan ID commitment
+    /// @param publicKeyX 公钥 X 坐标
+    /// @param publicKeyY 公钥 Y 坐标
+    /// @param credentialIdHash credential ID 的哈希
+    /// @param zkProof ZK Login 证明 (用于验证身份)
+    function registerPasskey(
+        bytes32 identityCommitment,
+        bytes32 publicKeyX,
+        bytes32 publicKeyY,
+        bytes32 credentialIdHash,
+        bytes calldata zkProof
+    ) external {
+        // 验证 ZK Login 证明
+        require(
+            _verifyZKProof(identityCommitment, zkProof),
+            "Invalid ZK proof"
+        );
+
+        // 检查 Passkey 数量限制
+        require(
+            passkeys[identityCommitment].length < 5,
+            "Too many passkeys"
+        );
+
+        // 添加新的 Passkey
+        passkeys[identityCommitment].push(PasskeyCredential({
+            credentialIdHash: credentialIdHash,
+            publicKeyX: publicKeyX,
+            publicKeyY: publicKeyY,
+            registeredAt: uint64(block.timestamp),
+            lastUsedAt: uint64(block.timestamp),
+            useCount: 0
+        }));
+
+        emit PasskeyRegistered(identityCommitment, credentialIdHash);
+    }
+
+    /// @notice 使用 Passkey 执行交易
+    function executeWithPasskey(
+        bytes32 identityCommitment,
+        WebAuthnSignature calldata sig,
+        bytes32 challenge,
+        address target,
+        uint256 value,
+        bytes calldata data
+    ) external returns (bytes memory) {
+        // 验证签名
+        require(
+            verifySignature(identityCommitment, sig, challenge),
+            "Invalid passkey signature"
+        );
+
+        // 检查是否需要双重认证
+        SecuritySettings storage settings = securitySettings[identityCommitment];
+        if (value > settings.smallTxThreshold && settings.require2FAForLarge) {
+            revert("Large transaction requires 2FA");
+        }
+
+        // 更新使用统计
+        PasskeyCredential storage credential = passkeys[identityCommitment][sig.credentialIndex];
+        credential.lastUsedAt = uint64(block.timestamp);
+        credential.useCount++;
+
+        // 执行交易
+        (bool success, bytes memory result) = target.call{value: value}(data);
+        require(success, "Transaction failed");
+
+        return result;
+    }
+
+    /// @notice 验证 ZK 证明 (内部函数)
+    function _verifyZKProof(
+        bytes32 identityCommitment,
+        bytes calldata proof
+    ) internal view returns (bool) {
+        // 调用 ZK 验证器
+        // ... 实现细节
+        return true;
+    }
+
+    event PasskeyRegistered(bytes32 indexed identityCommitment, bytes32 credentialIdHash);
+}
+```
+
+#### 18.16.6 客户端 WebAuthn 集成
+
+```zig
+// ============================================================================
+// Titan Client: WebAuthn / Passkey 集成
+// ============================================================================
+
+const std = @import("std");
+
+/// WebAuthn 公钥凭证创建选项
+pub const PublicKeyCredentialCreationOptions = struct {
+    /// Relying Party 信息
+    rp: RelyingParty,
+
+    /// 用户信息
+    user: User,
+
+    /// Challenge (服务器生成的随机数)
+    challenge: []const u8,
+
+    /// 支持的公钥算法
+    pubKeyCredParams: []const PubKeyCredParam,
+
+    /// 超时时间 (毫秒)
+    timeout: u32 = 60000,
+
+    /// 排除的凭证 (防止重复注册)
+    excludeCredentials: []const CredentialDescriptor = &[_]CredentialDescriptor{},
+
+    /// Authenticator 选择标准
+    authenticatorSelection: AuthenticatorSelectionCriteria,
+
+    /// 证明传输偏好
+    attestation: AttestationConveyancePreference = .none,
+
+    pub const RelyingParty = struct {
+        id: []const u8,      // "titan.app"
+        name: []const u8,    // "Titan"
+    };
+
+    pub const User = struct {
+        id: []const u8,      // identity_commitment
+        name: []const u8,    // "alice@gmail.com"
+        displayName: []const u8,
+    };
+
+    pub const PubKeyCredParam = struct {
+        type: []const u8,    // "public-key"
+        alg: i32,            // -7 = ES256 (P-256)
+    };
+
+    pub const CredentialDescriptor = struct {
+        type: []const u8,
+        id: []const u8,
+    };
+
+    pub const AuthenticatorSelectionCriteria = struct {
+        /// 平台认证器 (内置) vs 漫游认证器 (Yubikey)
+        authenticatorAttachment: ?AuthenticatorAttachment = null,
+        /// 是否需要驻留密钥
+        residentKey: ResidentKeyRequirement = .preferred,
+        /// 用户验证要求
+        userVerification: UserVerificationRequirement = .required,
+
+        pub const AuthenticatorAttachment = enum {
+            platform,      // Face ID, Touch ID
+            cross_platform, // Yubikey
+        };
+
+        pub const ResidentKeyRequirement = enum {
+            discouraged,
+            preferred,
+            required,
+        };
+
+        pub const UserVerificationRequirement = enum {
+            required,
+            preferred,
+            discouraged,
+        };
+    };
+
+    pub const AttestationConveyancePreference = enum {
+        none,
+        indirect,
+        direct,
+        enterprise,
+    };
+};
+
+/// Passkey 管理器
+pub const PasskeyManager = struct {
+    identity_commitment: [32]u8,
+    domain: []const u8,
+
+    /// 注册新的 Passkey
+    pub fn register(self: *PasskeyManager) !PasskeyCredential {
+        // 1. 生成 challenge
+        var challenge: [32]u8 = undefined;
+        std.crypto.random.bytes(&challenge);
+
+        // 2. 构造 WebAuthn 创建选项
+        const options = PublicKeyCredentialCreationOptions{
+            .rp = .{
+                .id = self.domain,
+                .name = "Titan",
+            },
+            .user = .{
+                .id = &self.identity_commitment,
+                .name = "user@titan.app",  // 可以从 Titan ID 获取
+                .displayName = "Titan User",
+            },
+            .challenge = &challenge,
+            .pubKeyCredParams = &[_]PublicKeyCredentialCreationOptions.PubKeyCredParam{
+                .{ .type = "public-key", .alg = -7 },  // ES256 (P-256)
+            },
+            .authenticatorSelection = .{
+                .authenticatorAttachment = .platform,  // 使用设备内置认证器
+                .residentKey = .required,
+                .userVerification = .required,
+            },
+        };
+
+        // 3. 调用 WebAuthn API (通过 WASM 与浏览器交互)
+        const credential = try webauthn_create(options);
+
+        // 4. 返回凭证信息
+        return PasskeyCredential{
+            .credential_id = credential.id,
+            .public_key = credential.publicKey,
+            .registered_at = std.time.timestamp(),
+        };
+    }
+
+    /// 使用 Passkey 签名
+    pub fn sign(
+        self: *PasskeyManager,
+        challenge: *const [32]u8,
+        credential_id: ?[]const u8,
+    ) !WebAuthnAssertion {
+        // 1. 构造 WebAuthn 获取选项
+        const options = PublicKeyCredentialRequestOptions{
+            .challenge = challenge,
+            .rpId = self.domain,
+            .allowCredentials = if (credential_id) |id|
+                &[_]CredentialDescriptor{.{ .type = "public-key", .id = id }}
+            else
+                &[_]CredentialDescriptor{},
+            .userVerification = .required,
+        };
+
+        // 2. 调用 WebAuthn API
+        const assertion = try webauthn_get(options);
+
+        // 3. 返回签名结果
+        return assertion;
+    }
+};
+
+/// WebAuthn 签名结果
+pub const WebAuthnAssertion = struct {
+    /// 凭证 ID
+    credential_id: []const u8,
+
+    /// Authenticator Data
+    authenticator_data: []const u8,
+
+    /// Client Data JSON
+    client_data_json: []const u8,
+
+    /// 签名 (ECDSA on P-256)
+    signature: []const u8,
+
+    /// 用户句柄
+    user_handle: ?[]const u8,
+
+    /// 解析签名为 r, s 分量
+    pub fn parseSignature(self: *const WebAuthnAssertion) !struct { r: [32]u8, s: [32]u8 } {
+        // ECDSA 签名是 DER 编码的
+        // 需要解析出 r 和 s 值
+        return try parseEcdsaDerSignature(self.signature);
+    }
+
+    /// 获取 client data hash
+    pub fn getClientDataHash(self: *const WebAuthnAssertion) [32]u8 {
+        return std.crypto.hash.sha2.Sha256.hash(self.client_data_json, .{});
+    }
+};
+
+/// 完整的交易签名流程
+pub fn signTransaction(
+    passkey_manager: *PasskeyManager,
+    transaction: *const Transaction,
+) !SignedTransaction {
+    // 1. 计算交易哈希作为 challenge
+    const tx_hash = transaction.hash();
+
+    // 2. 使用 Passkey 签名
+    const assertion = try passkey_manager.sign(&tx_hash, null);
+
+    // 3. 解析签名
+    const sig_components = try assertion.parseSignature();
+
+    // 4. 构造链上签名格式
+    const signature = WebAuthnSignature{
+        .authenticator_data = assertion.authenticator_data,
+        .authenticator_data_len = @intCast(assertion.authenticator_data.len),
+        .client_data_hash = assertion.getClientDataHash(),
+        .signature_r = sig_components.r,
+        .signature_s = sig_components.s,
+        .credential_index = 0,  // 使用第一个 Passkey
+    };
+
+    return SignedTransaction{
+        .transaction = transaction.*,
+        .signature = signature,
+    };
+}
+```
+
+#### 18.16.7 用户体验流程
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     Passkey 用户体验流程                                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  场景 1: 首次注册 (新用户)                                                  │
+│  ───────────────────────────                                                │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                      │   │
+│  │  Step 1: 打开 Titan App                                              │   │
+│  │  ────────────────────────                                            │   │
+│  │                                                                      │   │
+│  │  ┌────────────────────────────────────────────────────────────┐     │   │
+│  │  │                                                             │     │   │
+│  │  │                   Welcome to Titan                          │     │   │
+│  │  │                                                             │     │   │
+│  │  │              ┌───────────────────────────┐                 │     │   │
+│  │  │              │  🔵 Continue with Google  │ ◄── 点击        │     │   │
+│  │  │              └───────────────────────────┘                 │     │   │
+│  │  │                                                             │     │   │
+│  │  └────────────────────────────────────────────────────────────┘     │   │
+│  │                                                                      │   │
+│  │  Step 2: Google 登录 (ZK Login)                                      │   │
+│  │  ────────────────────────────                                        │   │
+│  │  • Google OAuth 弹窗                                                 │   │
+│  │  • 用户授权                                                          │   │
+│  │  • ZK Proof 生成 (后台)                                             │   │
+│  │  • 账户创建完成                                                      │   │
+│  │                                                                      │   │
+│  │  Step 3: 提示添加 Passkey                                            │   │
+│  │  ──────────────────────────                                          │   │
+│  │                                                                      │   │
+│  │  ┌────────────────────────────────────────────────────────────┐     │   │
+│  │  │                                                             │     │   │
+│  │  │        🔐 Add Face ID for faster access?                   │     │   │
+│  │  │                                                             │     │   │
+│  │  │   Next time, just look at your phone to sign in.           │     │   │
+│  │  │   No password needed.                                       │     │   │
+│  │  │                                                             │     │   │
+│  │  │        ┌─────────────────────────────────┐                 │     │   │
+│  │  │        │      ✅ Enable Face ID          │ ◄── 推荐       │     │   │
+│  │  │        └─────────────────────────────────┘                 │     │   │
+│  │  │                                                             │     │   │
+│  │  │               [ Maybe Later ]                               │     │   │
+│  │  │                                                             │     │   │
+│  │  └────────────────────────────────────────────────────────────┘     │   │
+│  │                                                                      │   │
+│  │  Step 4: Face ID 注册                                                │   │
+│  │  ────────────────────                                                │   │
+│  │  • 系统弹出 Face ID 提示                                            │   │
+│  │  • 用户扫脸                                                          │   │
+│  │  • Secure Enclave 生成密钥对                                        │   │
+│  │  • 公钥上链                                                          │   │
+│  │  • 完成!                                                             │   │
+│  │                                                                      │   │
+│  │  总耗时: ~30 秒                                                      │   │
+│  │                                                                      │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  场景 2: 日常使用 (发送交易)                                               │
+│  ───────────────────────────                                                │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                      │   │
+│  │  Step 1: 打开 App，直接进入主界面 (无需登录)                        │   │
+│  │                                                                      │   │
+│  │  ┌────────────────────────────────────────────────────────────┐     │   │
+│  │  │                                                             │     │   │
+│  │  │   Balance: $1,234.56                                        │     │   │
+│  │  │                                                             │     │   │
+│  │  │   [Send]  [Receive]  [Swap]                                │     │   │
+│  │  │                                                             │     │   │
+│  │  └────────────────────────────────────────────────────────────┘     │   │
+│  │                                                                      │   │
+│  │  Step 2: 点击 Send，输入金额                                         │   │
+│  │                                                                      │   │
+│  │  ┌────────────────────────────────────────────────────────────┐     │   │
+│  │  │                                                             │     │   │
+│  │  │   Send USDC                                                 │     │   │
+│  │  │                                                             │     │   │
+│  │  │   To: bob@gmail.com                                        │     │   │
+│  │  │   Amount: 50 USDC                                          │     │   │
+│  │  │                                                             │     │   │
+│  │  │        ┌─────────────────────────────────┐                 │     │   │
+│  │  │        │        Confirm Send             │ ◄── 点击       │     │   │
+│  │  │        └─────────────────────────────────┘                 │     │   │
+│  │  │                                                             │     │   │
+│  │  └────────────────────────────────────────────────────────────┘     │   │
+│  │                                                                      │   │
+│  │  Step 3: Face ID 签名 (0.3 秒)                                       │   │
+│  │                                                                      │   │
+│  │  ┌────────────────────────────────────────────────────────────┐     │   │
+│  │  │                                                             │     │   │
+│  │  │              ╭─────────────────────────╮                   │     │   │
+│  │  │              │                         │                   │     │   │
+│  │  │              │      👤 Face ID         │                   │     │   │
+│  │  │              │                         │                   │     │   │
+│  │  │              │   Confirm sending       │                   │     │   │
+│  │  │              │   50 USDC to Bob        │                   │     │   │
+│  │  │              │                         │                   │     │   │
+│  │  │              ╰─────────────────────────╯                   │     │   │
+│  │  │                                                             │     │   │
+│  │  └────────────────────────────────────────────────────────────┘     │   │
+│  │                                                                      │   │
+│  │  Step 4: 完成!                                                       │   │
+│  │                                                                      │   │
+│  │  ┌────────────────────────────────────────────────────────────┐     │   │
+│  │  │                                                             │     │   │
+│  │  │              ✅ Sent successfully!                          │     │   │
+│  │  │                                                             │     │   │
+│  │  │              50 USDC → Bob                                  │     │   │
+│  │  │                                                             │     │   │
+│  │  └────────────────────────────────────────────────────────────┘     │   │
+│  │                                                                      │   │
+│  │  总耗时: ~3 秒 (点击发送 → Face ID → 完成)                          │   │
+│  │  用户感知: 和用支付宝一样简单                                       │   │
+│  │                                                                      │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  场景 3: 换新手机                                                          │
+│  ───────────────                                                            │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                      │   │
+│  │  方式 A: iCloud 同步 (最简单)                                        │   │
+│  │  ────────────────────────────                                        │   │
+│  │  • 新手机登录同一个 Apple ID                                        │   │
+│  │  • Passkey 自动从 iCloud Keychain 恢复                              │   │
+│  │  • 打开 Titan App，Face ID 直接可用                                 │   │
+│  │  • 无需任何操作                                                      │   │
+│  │                                                                      │   │
+│  │  方式 B: 重新登录                                                    │   │
+│  │  ──────────────────                                                  │   │
+│  │  • 新手机打开 Titan App                                             │   │
+│  │  • 点击 "Continue with Google" (ZK Login)                           │   │
+│  │  • 账户自动恢复 (确定性派生)                                        │   │
+│  │  • 提示添加新的 Face ID                                             │   │
+│  │  • 完成!                                                             │   │
+│  │                                                                      │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.16.8 多设备管理
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     Titan 多设备管理                                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  用户可能在多个设备上使用 Titan:                                            │
+│  • iPhone (Face ID)                                                        │
+│  • iPad (Touch ID)                                                         │
+│  • MacBook (Touch ID)                                                      │
+│  • Android 手机 (指纹)                                                     │
+│  • Yubikey (物理密钥)                                                      │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                     设备管理界面                                     │   │
+│  ├─────────────────────────────────────────────────────────────────────┤   │
+│  │                                                                      │   │
+│  │   Your Devices                                              [+ Add]  │   │
+│  │   ─────────────────────────────────────────────────────────────────  │   │
+│  │                                                                      │   │
+│  │   ┌───────────────────────────────────────────────────────────────┐ │   │
+│  │   │  📱 iPhone 15 Pro                               [This Device] │ │   │
+│  │   │     Face ID • Added Jan 10, 2026                              │ │   │
+│  │   │     Last used: Just now                                        │ │   │
+│  │   └───────────────────────────────────────────────────────────────┘ │   │
+│  │                                                                      │   │
+│  │   ┌───────────────────────────────────────────────────────────────┐ │   │
+│  │   │  💻 MacBook Pro                                      [Remove] │ │   │
+│  │   │     Touch ID • Added Jan 8, 2026                              │ │   │
+│  │   │     Last used: 2 hours ago                                     │ │   │
+│  │   └───────────────────────────────────────────────────────────────┘ │   │
+│  │                                                                      │   │
+│  │   ┌───────────────────────────────────────────────────────────────┐ │   │
+│  │   │  🔑 YubiKey 5                                        [Remove] │ │   │
+│  │   │     Hardware Key • Added Jan 5, 2026                          │ │   │
+│  │   │     Last used: 3 days ago                                      │ │   │
+│  │   └───────────────────────────────────────────────────────────────┘ │   │
+│  │                                                                      │   │
+│  │   ─────────────────────────────────────────────────────────────────  │   │
+│  │                                                                      │   │
+│  │   Security Settings                                                  │   │
+│  │   ─────────────────────────────────────────────────────────────────  │   │
+│  │                                                                      │   │
+│  │   Small transaction limit (Face ID only):     $100          [Edit]  │   │
+│  │   Require 2FA for large transactions:         ✅ Enabled           │   │
+│  │   Allow new device registration:              ✅ Enabled           │   │
+│  │   New device cooldown:                        24 hours      [Edit]  │   │
+│  │                                                                      │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  安全策略:                                                                  │
+│  ─────────                                                                  │
+│                                                                             │
+│  1. 设备数量限制                                                            │
+│     • 最多 5 个 Passkey                                                    │
+│     • 防止无限注册攻击                                                      │
+│                                                                             │
+│  2. 新设备注册验证                                                          │
+│     • 必须通过 ZK Login 验证                                               │
+│     • 可选: 现有设备确认                                                   │
+│     • 可选: 24-72 小时冷却期                                               │
+│                                                                             │
+│  3. 设备移除验证                                                            │
+│     • 非当前设备移除: 需要 ZK Login                                        │
+│     • 最后一个设备: 必须保留至少一种恢复方式                               │
+│                                                                             │
+│  4. 异常检测                                                                │
+│     • 新地区登录提醒                                                        │
+│     • 大额交易通知                                                          │
+│     • 可疑活动锁定                                                          │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.16.9 安全分析
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     Passkey 安全性分析                                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  攻击场景 vs 防御:                                                          │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                      │   │
+│  │  场景 1: 钓鱼攻击                                                    │   │
+│  │  ─────────────────                                                   │   │
+│  │  攻击: 假冒 titan.app 的钓鱼网站                                    │   │
+│  │  防御: ✅ Passkey 绑定域名                                          │   │
+│  │        钓鱼网站 (titam.app) 无法触发真正的 Passkey                  │   │
+│  │        浏览器自动检测域名不匹配                                      │   │
+│  │  结果: 攻击失败                                                      │   │
+│  │                                                                      │   │
+│  │  场景 2: 手机被盗                                                    │   │
+│  │  ─────────────────                                                   │   │
+│  │  攻击: 攻击者拿到用户手机                                           │   │
+│  │  防御: ✅ 需要 Face ID / 指纹                                       │   │
+│  │        攻击者无法通过生物识别                                        │   │
+│  │        多次失败后设备锁定                                            │   │
+│  │  结果: 攻击失败                                                      │   │
+│  │                                                                      │   │
+│  │  场景 3: 恶意软件                                                    │   │
+│  │  ─────────────────                                                   │   │
+│  │  攻击: 手机被植入恶意软件                                           │   │
+│  │  防御: ✅ 私钥在 Secure Enclave                                     │   │
+│  │        软件层无法访问硬件安全区                                      │   │
+│  │        即使 Root/越狱也无法提取                                      │   │
+│  │  结果: 攻击失败                                                      │   │
+│  │                                                                      │   │
+│  │  场景 4: 中间人攻击                                                  │   │
+│  │  ─────────────────                                                   │   │
+│  │  攻击: 拦截通信，重放签名                                           │   │
+│  │  防御: ✅ Challenge 一次性                                          │   │
+│  │        每次签名包含唯一 challenge                                   │   │
+│  │        签名绑定 origin (域名)                                       │   │
+│  │  结果: 攻击失败                                                      │   │
+│  │                                                                      │   │
+│  │  场景 5: 强制生物识别                                                │   │
+│  │  ─────────────────────                                               │   │
+│  │  攻击: 攻击者强迫用户刷脸                                           │   │
+│  │  防御: ⚠️ 这是物理胁迫，技术无法完全防御                           │   │
+│  │        缓解: 设置交易限额                                            │   │
+│  │             启用延迟提款 (大额)                                      │   │
+│  │             紧急锁定机制                                             │   │
+│  │  结果: 部分缓解                                                      │   │
+│  │                                                                      │   │
+│  │  场景 6: iCloud 账号被盗                                             │   │
+│  │  ───────────────────────                                             │   │
+│  │  攻击: 攻击者获取用户 iCloud 账号                                   │   │
+│  │  防御: ⚠️ Passkey 可能同步到攻击者设备                              │   │
+│  │        但: 还需要设备本地的生物识别                                  │   │
+│  │            攻击者设备上的 Face ID 是他自己的                         │   │
+│  │  结果: 攻击失败 (无法通过生物识别)                                  │   │
+│  │                                                                      │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  安全等级对比:                                                              │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                      │   │
+│  │  方案                 │ 钓鱼 │ 设备盗 │ 恶意软件 │ 密钥泄露 │ 总分 │   │
+│  │  ─────────────────────┼──────┼────────┼──────────┼──────────┼────── │   │
+│  │  助记词 (软件钱包)    │  ❌  │   ❌   │    ❌    │    ❌    │ ★☆☆ │   │
+│  │  MPC 钱包             │  ⚠️  │   ✅   │    ⚠️    │    ⚠️    │ ★★☆ │   │
+│  │  ZK Login (密码)      │  ⚠️  │   ✅   │    ✅    │    ✅    │ ★★★ │   │
+│  │  Passkeys (生物)      │  ✅  │   ✅   │    ✅    │    ✅    │ ★★★★│   │
+│  │  Passkeys + Hardware  │  ✅  │   ✅   │    ✅    │    ✅    │ ★★★★★│  │
+│  │                                                                      │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.16.10 与 Titan 架构整合
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     Titan 完整认证架构                                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│                              用户                                           │
+│                               │                                             │
+│             ┌─────────────────┼─────────────────┐                          │
+│             │                 │                 │                          │
+│             ▼                 ▼                 ▼                          │
+│      ┌─────────────┐  ┌─────────────┐  ┌─────────────┐                    │
+│      │   Google    │  │  Face ID    │  │  YubiKey    │                    │
+│      │   OAuth     │  │  Passkey    │  │  Hardware   │                    │
+│      └──────┬──────┘  └──────┬──────┘  └──────┬──────┘                    │
+│             │                │                 │                          │
+│             ▼                ▼                 ▼                          │
+│      ┌─────────────┐  ┌─────────────┐  ┌─────────────┐                    │
+│      │  ZK Login   │  │  WebAuthn   │  │   FIDO2     │                    │
+│      │  (Groth16)  │  │ (secp256r1) │  │  Protocol   │                    │
+│      └──────┬──────┘  └──────┬──────┘  └──────┬──────┘                    │
+│             │                │                 │                          │
+│             └────────────────┼─────────────────┘                          │
+│                              │                                             │
+│                              ▼                                             │
+│  ┌──────────────────────────────────────────────────────────────────────┐  │
+│  │                   Titan Auth Manager                                  │  │
+│  │  ┌────────────────────────────────────────────────────────────────┐  │  │
+│  │  │                                                                 │  │  │
+│  │  │  认证策略引擎:                                                  │  │  │
+│  │  │                                                                 │  │  │
+│  │  │  if (tx_amount < small_threshold) {                            │  │  │
+│  │  │      require: Passkey OR ZK_Login                              │  │  │
+│  │  │  } else if (tx_amount < large_threshold) {                     │  │  │
+│  │  │      require: Passkey AND ZK_Login                             │  │  │
+│  │  │  } else {                                                       │  │  │
+│  │  │      require: Passkey AND ZK_Login AND Hardware                │  │  │
+│  │  │  }                                                              │  │  │
+│  │  │                                                                 │  │  │
+│  │  └────────────────────────────────────────────────────────────────┘  │  │
+│  │                              │                                        │  │
+│  │                              ▼                                        │  │
+│  │  ┌────────────────────────────────────────────────────────────────┐  │  │
+│  │  │                   Titan ID Core                                 │  │  │
+│  │  │                                                                 │  │  │
+│  │  │  identity_commitment + passkey_credentials + security_settings │  │  │
+│  │  │                                                                 │  │  │
+│  │  └────────────────────────────────────────────────────────────────┘  │  │
+│  │                              │                                        │  │
+│  └──────────────────────────────┼────────────────────────────────────────┘  │
+│                                 │                                           │
+│                                 ▼                                           │
+│  ┌──────────────────────────────────────────────────────────────────────┐  │
+│  │                     Titan OS Kernel                                   │  │
+│  │                                                                       │  │
+│  │  ┌─────────────┐   ┌─────────────┐   ┌─────────────┐                │  │
+│  │  │  Dark Pool  │   │  Paymaster  │   │   Driver    │                │  │
+│  │  │  (隐私层)   │   │  (Gas 层)   │   │   Manager   │                │  │
+│  │  └──────┬──────┘   └──────┬──────┘   └──────┬──────┘                │  │
+│  │         └─────────────────┼─────────────────┘                        │  │
+│  │                           │                                          │  │
+│  └───────────────────────────┼──────────────────────────────────────────┘  │
+│                              │                                              │
+│         ┌────────────────────┼────────────────────┬───────────────┐        │
+│         ▼                    ▼                    ▼               ▼        │
+│    Ethereum             Solana                  TON            Cosmos      │
+│                                                                             │
+│  ─────────────────────────────────────────────────────────────────────────  │
+│                                                                             │
+│  最终用户体验:                                                              │
+│                                                                             │
+│  • 首次: Google 登录 → 创建账户 → 添加 Face ID                             │
+│  • 日常: Face ID → 完成交易 (0.3 秒)                                       │
+│  • 大额: Face ID + 输入密码 (双重验证)                                     │
+│  • 超大额: Face ID + 密码 + YubiKey (三重验证)                             │
+│                                                                             │
+│  "比 Web2 更简单，比 Web3 更安全。"                                        │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.16.11 实施路线
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     Passkeys 实施路线                                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Phase 1: Hackathon MVP (当前)                                              │
+│  ────────────────────────────                                               │
+│  • 重点: Dark Pool + 传统钱包签名                                          │
+│  • Passkeys: 不实现 (作为未来规划展示)                                     │
+│                                                                             │
+│  Phase 2: ZK Login (Hackathon 后)                                          │
+│  ─────────────────────────────────                                          │
+│  • 实现 Email + Password 认证                                              │
+│  • 完成 Titan ID 基础架构                                                  │
+│                                                                             │
+│  Phase 3: Passkeys MVP                                                      │
+│  ──────────────────────                                                     │
+│  • 实现 Solana Passkey 验证器 (secp256r1)                                  │
+│  • 客户端 WebAuthn 集成                                                    │
+│  • 单设备测试                                                               │
+│                                                                             │
+│  Phase 4: 多链 Passkeys                                                     │
+│  ─────────────────────                                                      │
+│  • EVM (EIP-7212) 支持                                                     │
+│  • TON 支持                                                                │
+│  • 多设备管理                                                               │
+│                                                                             │
+│  Phase 5: 生产就绪                                                          │
+│  ─────────────────                                                          │
+│  • 安全审计                                                                 │
+│  • 性能优化                                                                 │
+│  • 用户测试                                                                 │
+│  • 正式发布                                                                 │
+│                                                                             │
+│  ─────────────────────────────────────────────────────────────────────────  │
+│                                                                             │
+│  Passkeys 是 Titan 认证体系的 "锦上添花"，而非 "雪中送炭"。                │
+│  优先级: Dark Pool > ZK Login > Passkeys                                   │
+│                                                                             │
+│  但一旦实现，将彻底改变用户体验:                                           │
+│  "Web3 终于像 Apple Pay 一样简单了。"                                      │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.16.12 Pitch 话术
+
+**功能名**: Titan Passkeys
+**Tagline**: "Blockchain, as easy as Face ID"
+
+**一句话定义**:
+> "Face ID 扫一下，交易完成。区块链终于和 Apple Pay 一样简单了。"
+
+**30 秒演讲**:
+> "你用 Apple Pay 的时候，需要懂信用卡协议吗？不需要。
+>
+> 你用 Apple Pay 的时候，需要输入密码吗？不需要，Face ID 扫一下就行。
+>
+> **Titan Passkeys** 就是区块链的 Apple Pay。
+>
+> 用户不需要懂公钥私钥，不需要记助记词，甚至不需要输入密码。
+>
+> Face ID 扫一下，交易完成。
+>
+> 而且比传统钱包更安全 —— 私钥在手机的安全芯片里，任何软件都无法窃取。
+>
+> **这是无感区块链的终极形态。**"
+
+---
+
 ## 相关文档
 
 | 文档 | 说明 |
