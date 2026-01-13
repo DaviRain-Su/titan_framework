@@ -1,0 +1,19 @@
+{
+  "name": "privacy-amm",
+  "version": "1.0.0",
+  "description": "> Solana 首个隐私 AMM，基于 ZK-SNARK 实现完全隐私的代币交换",
+  "main": "index.js",
+  "directories": {
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@solana/web3.js": "^1.98.4"
+  }
+}

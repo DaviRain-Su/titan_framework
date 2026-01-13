@@ -42,8 +42,10 @@ pub const NullifierSetHeader = struct {
 };
 
 /// 默认 Bloom filter 参数
-const DEFAULT_BLOOM_SIZE: u32 = 1024 * 1024 * 8; // 1MB = 8M bits
-const DEFAULT_NUM_HASHES: u8 = 7;
+/// 测试版本使用较小的 Bloom filter (8KB = 64K bits)
+/// 生产版本应该使用更大的值
+const DEFAULT_BLOOM_SIZE: u32 = 8 * 1024 * 8; // 8KB = 64K bits (for testing)
+const DEFAULT_NUM_HASHES: u8 = 5;
 
 /// 初始化 Nullifier 集合
 pub fn initialize(account: sol.account.Account) !void {
