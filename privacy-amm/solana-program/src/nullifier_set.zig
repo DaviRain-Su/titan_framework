@@ -42,9 +42,10 @@ pub const NullifierSetHeader = struct {
 };
 
 /// 默认 Bloom filter 参数
-/// 测试版本使用较小的 Bloom filter (8KB = 64K bits)
-/// 生产版本应该使用更大的值
-const DEFAULT_BLOOM_SIZE: u32 = 8 * 1024 * 8; // 8KB = 64K bits (for testing)
+/// 测试版本使用较小的 Bloom filter (1KB = 8K bits)
+/// 账户大小为 4KB，需要为 header (10 bytes) 和 overflow list 留空间
+/// 布局: Header(10) + Bloom(1024) + Overflow(~3K for ~95 nullifiers)
+const DEFAULT_BLOOM_SIZE: u32 = 1024 * 8; // 1KB = 8K bits (for testing)
 const DEFAULT_NUM_HASHES: u8 = 5;
 
 /// 初始化 Nullifier 集合

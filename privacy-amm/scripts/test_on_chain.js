@@ -17,7 +17,7 @@ const path = require('path');
 
 // Configuration
 const PROGRAM_ID = new PublicKey('5XNfzGiTt7WNveJrLRKcz2w9wyCDqLNMYHaQWZJjo8ef');
-const RPC_URL = 'https://api.devnet.solana.com';
+const RPC_URL = 'https://api.testnet.solana.com';
 
 // Token mints
 const SOL_MINT = new PublicKey('So11111111111111111111111111111111111111112'); // Native SOL (wrapped)
@@ -58,7 +58,7 @@ async function main() {
     console.log('Program:', PROGRAM_ID.toBase58());
     console.log('');
 
-    // Connect to devnet
+    // Connect to testnet
     const connection = new Connection(RPC_URL, 'confirmed');
     const balance = await connection.getBalance(payer.publicKey);
     console.log('Balance:', balance / 1e9, 'SOL');

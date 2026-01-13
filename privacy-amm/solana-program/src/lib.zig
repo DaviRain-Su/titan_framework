@@ -210,21 +210,30 @@ fn handleSwap(context: sol.context.Context, data: []const u8) u64 {
         return @intFromEnum(ErrorCode.InvalidProof);
     }
 
+    sol.log.log("Proof valid, checking nullifiers");
+
     // 检查 nullifiers
     for (params.public_inputs.input_nullifier) |nullifier| {
         if (nullifier_set.contains(nullifier_account, nullifier)) {
+            sol.log.log("Nullifier already used");
             return @intFromEnum(ErrorCode.NullifierAlreadyUsed);
         }
     }
 
+    sol.log.log("Marking nullifiers");
+
     // 标记 nullifiers
     for (params.public_inputs.input_nullifier) |nullifier| {
         nullifier_set.insert(nullifier_account, nullifier) catch {
+            sol.log.log("Nullifier insert failed");
             return @intFromEnum(ErrorCode.InvalidAccountData);
         };
     }
 
+    sol.log.log("Updating pool");
+
     pool.updateAfterSwap(pool_account, params) catch {
+        sol.log.log("Pool update failed");
         return @intFromEnum(ErrorCode.InvalidAccountData);
     };
 
