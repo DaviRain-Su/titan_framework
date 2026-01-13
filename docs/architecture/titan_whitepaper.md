@@ -27102,6 +27102,827 @@ fn computeSlotForField(comptime field_name: []const u8) u256 {
 
 ---
 
+### 18.23 实战案例：Titan OS on Kaspa (UTXO + BlockDAG)
+
+> **核心洞察**: Kaspa 是检验 Titan OS "通用性"的绝佳试金石——它既不是 EVM，也不是 WASM，而是 UTXO 模型 + BlockDAG 架构。
+
+#### 18.23.1 为什么选择 Kaspa？
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                                                             │
+│                    Kaspa：异构环境的完美测试场                              │
+│                                                                             │
+│  ═══════════════════════════════════════════════════════════════════════   │
+│                                                                             │
+│                                                                             │
+│  Kaspa 的独特性:                                                            │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │   • 共识: BlockDAG (不是单链)                                       │   │
+│  │   • 账户模型: UTXO (不是 Account)                                   │   │
+│  │   • 执行环境: Script (类 Bitcoin，不是 EVM/WASM)                    │   │
+│  │   • Hash 算法: Blake2b (不是 Keccak/SHA256)                         │   │
+│  │   • 签名: Schnorr + ECDSA                                           │   │
+│  │   • 性能: 10 BPS (每秒 10 个区块)                                   │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│                                                                             │
+│  ───────────────────────────────────────────────────────────────────────   │
+│                                                                             │
+│                                                                             │
+│  如果 Titan OS 能在 Kaspa 上跑通:                                          │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │   证明: Titan OS 不仅是"跨 EVM 链"工具，                            │   │
+│  │         而是真正的"Web3 通用编译器"。                               │   │
+│  │                                                                     │   │
+│  │   演示: "同一份 Zig 代码，部署在以太坊（合约）                      │   │
+│  │          和 Kaspa（脚本/KRC-20）上。"                               │   │
+│  │                                                                     │   │
+│  │   价值: Hackathon 绝杀 + 投资人信服                                 │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.23.2 架构总览：一鱼三吃 (One Logic, Three Targets)
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                                                             │
+│                    Titan on Kaspa: 三目标编译架构                           │
+│                                                                             │
+│  ═══════════════════════════════════════════════════════════════════════   │
+│                                                                             │
+│                                                                             │
+│                         ┌─────────────────┐                                 │
+│                         │                 │                                 │
+│                         │   Zig 源码      │                                 │
+│                         │   (Titan SDK)   │                                 │
+│                         │                 │                                 │
+│                         └────────┬────────┘                                 │
+│                                  │                                          │
+│                                  │  Titan Compiler                          │
+│                                  │                                          │
+│                    ┌─────────────┼─────────────┐                            │
+│                    │             │             │                            │
+│                    ▼             ▼             ▼                            │
+│           ┌───────────────┐ ┌───────────────┐ ┌───────────────┐            │
+│           │               │ │               │ │               │            │
+│           │  Target A     │ │  Target B     │ │  Target C     │            │
+│           │  ───────────  │ │  ───────────  │ │  ───────────  │            │
+│           │               │ │               │ │               │            │
+│           │  Native       │ │  KRC-20       │ │  Kasplex L2   │            │
+│           │  Script       │ │  Inscription  │ │  (EVM)        │            │
+│           │               │ │               │ │               │            │
+│           │  生成 P2SH    │ │  生成 JSON    │ │  生成 EVM     │            │
+│           │  脚本         │ │  铭文         │ │  Bytecode     │            │
+│           │               │ │               │ │               │            │
+│           └───────────────┘ └───────────────┘ └───────────────┘            │
+│                    │             │             │                            │
+│                    ▼             ▼             ▼                            │
+│           ┌───────────────┐ ┌───────────────┐ ┌───────────────┐            │
+│           │               │ │               │ │               │            │
+│           │  用于:        │ │  用于:        │ │  用于:        │            │
+│           │  • 多签       │ │  • 发币       │ │  • DeFi       │            │
+│           │  • 时间锁     │ │  • NFT        │ │  • DEX        │            │
+│           │  • 金库       │ │  • 空投       │ │  • 借贷       │            │
+│           │               │ │               │ │               │            │
+│           └───────────────┘ └───────────────┘ └───────────────┘            │
+│                                                                             │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.23.3 Target A：原生脚本 (Native Script)
+
+**Kaspa OpCode 映射表**：
+
+| Titan IR | Kaspa OpCode | Hex | 用途 |
+| :--- | :--- | :--- | :--- |
+| `Add` | `OpAdd` | 0x93 | 算术加法 |
+| `Sub` | `OpSub` | 0x94 | 算术减法 |
+| `Hash256` | `OpBlake2b` | 0xaa | Kaspa 专用哈希 |
+| `CheckSig` | `OpCheckSig` | 0xac | Schnorr 签名验证 |
+| `CheckSigECDSA` | `OpCheckSigECDSA` | 0xab | ECDSA 签名验证 |
+| `CheckMultiSig` | `OpCheckMultiSig` | 0xae | 多签验证 |
+| `TimeLock` | `OpCheckLockTimeVerify` | 0xb0 | 时间锁 |
+| `SequenceLock` | `OpCheckSequenceVerify` | 0xb1 | 相对时间锁 |
+
+**Kaspa 特有的交易内省 (KIP-10)**：
+
+| Titan IR | Kaspa OpCode | Hex | 用途 |
+| :--- | :--- | :--- | :--- |
+| `TxInputCount` | `OpTxInputCount` | 0xb3 | 获取输入数量 |
+| `TxOutputCount` | `OpTxOutputCount` | 0xb4 | 获取输出数量 |
+| `TxInputIndex` | `OpTxInputIndex` | 0xb9 | 当前输入索引 |
+| `TxInputAmount` | `OpTxInputAmount` | 0xbe | 输入金额 |
+| `TxOutputAmount` | `OpTxOutputAmount` | 0xc2 | 输出金额 |
+
+```zig
+// titan_sdk/driver/kaspa_script.zig
+
+const std = @import("std");
+
+/// Kaspa OpCode 定义
+pub const OpCode = enum(u8) {
+    // 数据推送
+    op_false = 0x00,
+    op_true = 0x51,
+    op_1 = 0x51,
+    op_16 = 0x60,
+
+    // 控制流
+    op_if = 0x63,
+    op_notif = 0x64,
+    op_else = 0x67,
+    op_endif = 0x68,
+    op_verify = 0x69,
+    op_return = 0x6a,
+
+    // 栈操作
+    op_dup = 0x76,
+    op_drop = 0x75,
+    op_swap = 0x7c,
+
+    // 算术
+    op_add = 0x93,
+    op_sub = 0x94,
+    op_equal = 0x87,
+    op_equalverify = 0x88,
+
+    // 密码学 (Kaspa 特有)
+    op_sha256 = 0xa8,
+    op_blake2b = 0xaa,           // Kaspa 专用哈希
+    op_checksig_ecdsa = 0xab,    // ECDSA 签名
+    op_checksig = 0xac,          // Schnorr 签名
+    op_checkmultisig = 0xae,     // 多签
+
+    // 时间锁
+    op_checklocktimeverify = 0xb0,
+    op_checksequenceverify = 0xb1,
+
+    // 交易内省 (KIP-10)
+    op_txinputcount = 0xb3,
+    op_txoutputcount = 0xb4,
+    op_txinputindex = 0xb9,
+    op_txinputamount = 0xbe,
+    op_txoutputamount = 0xc2,
+};
+
+/// 编译 Titan IR 到 Kaspa Script
+pub fn compileOp(op: IR.Op) ![]u8 {
+    return switch (op.type) {
+        .Add => &[_]u8{@intFromEnum(OpCode.op_add)},
+        .Sub => &[_]u8{@intFromEnum(OpCode.op_sub)},
+        .Hash256 => &[_]u8{@intFromEnum(OpCode.op_blake2b)},  // Kaspa 用 Blake2b
+        .CheckSig => &[_]u8{@intFromEnum(OpCode.op_checksig)}, // Schnorr
+        .CheckSigECDSA => &[_]u8{@intFromEnum(OpCode.op_checksig_ecdsa)},
+        .TimeLock => &[_]u8{@intFromEnum(OpCode.op_checklocktimeverify)},
+        .TxInputCount => &[_]u8{@intFromEnum(OpCode.op_txinputcount)},
+        .TxOutputAmount => &[_]u8{@intFromEnum(OpCode.op_txoutputamount)},
+        else => error.UnsupportedOp,
+    };
+}
+
+/// 生成 P2SH 多签脚本
+pub fn generateMultisig(
+    comptime m: u8,
+    comptime n: u8,
+    pubkeys: [n][33]u8,
+) ![23 + n * 34]u8 {
+    var script: [23 + n * 34]u8 = undefined;
+    var pos: usize = 0;
+
+    // OP_m
+    script[pos] = 0x50 + m;
+    pos += 1;
+
+    // Push each pubkey
+    inline for (pubkeys) |pubkey| {
+        script[pos] = 33; // Push 33 bytes
+        pos += 1;
+        @memcpy(script[pos..][0..33], &pubkey);
+        pos += 33;
+    }
+
+    // OP_n OP_CHECKMULTISIG
+    script[pos] = 0x50 + n;
+    pos += 1;
+    script[pos] = @intFromEnum(OpCode.op_checkmultisig);
+
+    return script;
+}
+
+/// 生成时间锁脚本
+pub fn generateTimeLock(locktime: u64, pubkey: [33]u8) ![43]u8 {
+    var script: [43]u8 = undefined;
+
+    // Push locktime (8 bytes)
+    script[0] = 8;
+    std.mem.writeInt(u64, script[1..9], locktime, .little);
+
+    // OP_CHECKLOCKTIMEVERIFY OP_DROP
+    script[9] = @intFromEnum(OpCode.op_checklocktimeverify);
+    script[10] = @intFromEnum(OpCode.op_drop);
+
+    // Push pubkey
+    script[11] = 33;
+    @memcpy(script[12..45], &pubkey);
+
+    // OP_CHECKSIG
+    script[45] = @intFromEnum(OpCode.op_checksig);
+
+    return script;
+}
+```
+
+**用户体验示例**：
+
+```zig
+// 用户代码: 2-of-3 多签金库
+const vault = titan.kaspa.Multisig(2, 3){
+    .pubkeys = .{
+        alice_pubkey,
+        bob_pubkey,
+        carol_pubkey,
+    },
+};
+
+// Titan 编译后生成 P2SH 脚本:
+// OP_2 <pubkey1> <pubkey2> <pubkey3> OP_3 OP_CHECKMULTISIG
+const script = vault.compile();
+```
+
+#### 18.23.4 Target B：KRC-20 资产铭文 (JSON Inscription)
+
+**KRC-20 协议规范**：
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                                                             │
+│                    KRC-20 JSON 格式规范                                     │
+│                                                                             │
+│  ═══════════════════════════════════════════════════════════════════════   │
+│                                                                             │
+│                                                                             │
+│  必填字段:                                                                  │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │   "p"    : "krc-20"              // 协议标识 (必须)                 │   │
+│  │   "op"   : "deploy|mint|transfer" // 操作类型 (必须)                │   │
+│  │   "tick" : "TITAN"               // 代币符号 (4-6字符)              │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│                                                                             │
+│  ───────────────────────────────────────────────────────────────────────   │
+│                                                                             │
+│                                                                             │
+│  操作类型:                                                                  │
+│                                                                             │
+│                                                                             │
+│  Deploy (部署):                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  {                                                                  │   │
+│  │    "p": "krc-20",                                                   │   │
+│  │    "op": "deploy",                                                  │   │
+│  │    "tick": "TITAN",                                                 │   │
+│  │    "max": "21000000",           // 最大供应量                       │   │
+│  │    "lim": "1000",               // 每次 mint 限额                   │   │
+│  │    "dec": "8",                  // 小数位数 (默认 8)                │   │
+│  │    "pre": "1000000",            // 预分配数量 (可选)                │   │
+│  │    "to": "kaspa:qz..."          // 预分配地址 (可选)                │   │
+│  │  }                                                                  │   │
+│  │                                                                     │   │
+│  │  Gas: 最低 1000 KAS                                                 │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│                                                                             │
+│  Mint (铸造):                                                               │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  {                                                                  │   │
+│  │    "p": "krc-20",                                                   │   │
+│  │    "op": "mint",                                                    │   │
+│  │    "tick": "TITAN",                                                 │   │
+│  │    "amt": "1000"                // 铸造数量 (≤ lim)                 │   │
+│  │  }                                                                  │   │
+│  │                                                                     │   │
+│  │  Gas: 最低 1 KAS                                                    │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│                                                                             │
+│  Transfer (转账):                                                           │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │  {                                                                  │   │
+│  │    "p": "krc-20",                                                   │   │
+│  │    "op": "transfer",                                                │   │
+│  │    "tick": "TITAN",                                                 │   │
+│  │    "amt": "100",                // 转账数量                         │   │
+│  │    "to": "kaspa:qz..."          // 接收地址                         │   │
+│  │  }                                                                  │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Zig Backend 实现**：
+
+```zig
+// titan_sdk/driver/kaspa_krc20.zig
+
+const std = @import("std");
+
+/// KRC-20 操作类型
+pub const KRC20Op = enum {
+    deploy,
+    mint,
+    transfer,
+};
+
+/// KRC-20 部署配置
+pub const DeployConfig = struct {
+    tick: []const u8,      // 代币符号 (4-6 字符)
+    max: u64,              // 最大供应量
+    lim: u64,              // 每次 mint 限额
+    dec: u8 = 8,           // 小数位数
+    pre: ?u64 = null,      // 预分配数量
+    to: ?[]const u8 = null, // 预分配地址
+};
+
+/// 生成 KRC-20 Deploy JSON
+pub fn compileDeploy(config: DeployConfig, allocator: std.mem.Allocator) ![]u8 {
+    var json = std.ArrayList(u8).init(allocator);
+    const writer = json.writer();
+
+    try writer.print(
+        \\{{"p":"krc-20","op":"deploy","tick":"{s}","max":"{d}","lim":"{d}","dec":"{d}"
+    , .{ config.tick, config.max, config.lim, config.dec });
+
+    if (config.pre) |pre| {
+        try writer.print(
+            \\,"pre":"{d}"
+        , .{pre});
+    }
+
+    if (config.to) |to| {
+        try writer.print(
+            \\,"to":"{s}"
+        , .{to});
+    }
+
+    try writer.writeAll("}}");
+
+    return json.toOwnedSlice();
+}
+
+/// 生成 KRC-20 Mint JSON
+pub fn compileMint(
+    tick: []const u8,
+    amt: u64,
+    allocator: std.mem.Allocator,
+) ![]u8 {
+    return std.fmt.allocPrint(allocator,
+        \\{{"p":"krc-20","op":"mint","tick":"{s}","amt":"{d}"}}
+    , .{ tick, amt });
+}
+
+/// 生成 KRC-20 Transfer JSON
+pub fn compileTransfer(
+    tick: []const u8,
+    amt: u64,
+    to: []const u8,
+    allocator: std.mem.Allocator,
+) ![]u8 {
+    return std.fmt.allocPrint(allocator,
+        \\{{"p":"krc-20","op":"transfer","tick":"{s}","amt":"{d}","to":"{s}"}}
+    , .{ tick, amt, to });
+}
+
+/// 将 JSON 编码为 Kaspa 交易 Payload (ASCII)
+pub fn encodeToPayload(json: []const u8) []const u8 {
+    // KRC-20 数据以 ASCII 形式嵌入交易
+    // 放在交易的第一个输入中
+    return json;
+}
+```
+
+**用户体验示例**：
+
+```zig
+// 用户代码: 发行 KRC-20 代币
+const token = titan.kaspa.KRC20{
+    .tick = "TITAN",
+    .max = 21_000_000,
+    .lim = 1000,
+    .dec = 8,
+};
+
+// 部署
+const deploy_json = token.deploy();
+// {"p":"krc-20","op":"deploy","tick":"TITAN","max":"21000000","lim":"1000","dec":"8"}
+
+// 铸造
+const mint_json = token.mint(1000);
+// {"p":"krc-20","op":"mint","tick":"TITAN","amt":"1000"}
+
+// 转账
+const transfer_json = token.transfer(100, "kaspa:qz...");
+// {"p":"krc-20","op":"transfer","tick":"TITAN","amt":"100","to":"kaspa:qz..."}
+```
+
+#### 18.23.5 Target C：Kasplex L2 (复用 EVM Driver)
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                                                             │
+│                    Kasplex: Kaspa 上的 EVM L2                               │
+│                                                                             │
+│  ═══════════════════════════════════════════════════════════════════════   │
+│                                                                             │
+│                                                                             │
+│  Kasplex 架构:                                                              │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │   Kasplex 本质上是把 EVM 字节码塞到 Kaspa 的 Blob 里，              │   │
+│  │   然后由 L2 节点去执行。                                            │   │
+│  │                                                                     │   │
+│  │   这是 Based Rollup 模式:                                           │   │
+│  │   • DA (数据可用性): Kaspa 主网                                     │   │
+│  │   • Execution (执行): Kasplex L2 节点                               │   │
+│  │   • Settlement (结算): Kaspa 主网                                   │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│                                                                             │
+│  ───────────────────────────────────────────────────────────────────────   │
+│                                                                             │
+│                                                                             │
+│  Titan OS 的优势:                                                           │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │   直接复用 Zig → Yul → EVM Driver！                                 │   │
+│  │                                                                     │   │
+│  │   唯一的区别:                                                       │   │
+│  │   • 以太坊: 发送到 ETH RPC                                          │   │
+│  │   • Kasplex: 封装进 Kaspa Transaction Payload                       │   │
+│  │                                                                     │   │
+│  │   ┌───────────────────────────────────────────────────────────┐    │   │
+│  │   │                                                           │    │   │
+│  │   │   Zig 源码                                                │    │   │
+│  │   │      │                                                    │    │   │
+│  │   │      ▼                                                    │    │   │
+│  │   │   Yul 代码 (相同)                                         │    │   │
+│  │   │      │                                                    │    │   │
+│  │   │      ▼                                                    │    │   │
+│  │   │   EVM Bytecode (相同)                                     │    │   │
+│  │   │      │                                                    │    │   │
+│  │   │      ├─────────────┬─────────────┐                        │    │   │
+│  │   │      ▼             ▼             ▼                        │    │   │
+│  │   │   ETH RPC     Arbitrum      Kasplex Envelope              │    │   │
+│  │   │   (以太坊)    (L2)          (Kaspa Blob)                   │    │   │
+│  │   │                                                           │    │   │
+│  │   └───────────────────────────────────────────────────────────┘    │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Kasplex 封装实现**：
+
+```zig
+// titan_sdk/driver/kaspa_kasplex.zig
+
+const std = @import("std");
+const evm_driver = @import("../evm/driver.zig");
+
+/// Kasplex 交易封装
+pub const KasplexEnvelope = struct {
+    version: u8 = 1,
+    bytecode: []const u8,
+    calldata: []const u8,
+
+    /// 序列化为 Kaspa Blob 格式
+    pub fn serialize(self: *const KasplexEnvelope, allocator: std.mem.Allocator) ![]u8 {
+        var buffer = std.ArrayList(u8).init(allocator);
+        const writer = buffer.writer();
+
+        // Magic bytes: "KPLEX"
+        try writer.writeAll("KPLEX");
+
+        // Version
+        try writer.writeByte(self.version);
+
+        // Bytecode length + data
+        try writer.writeInt(u32, @intCast(self.bytecode.len), .little);
+        try writer.writeAll(self.bytecode);
+
+        // Calldata length + data
+        try writer.writeInt(u32, @intCast(self.calldata.len), .little);
+        try writer.writeAll(self.calldata);
+
+        return buffer.toOwnedSlice();
+    }
+};
+
+/// 部署 EVM 合约到 Kasplex
+pub fn deployToKasplex(
+    zig_source: []const u8,
+    allocator: std.mem.Allocator,
+) ![]u8 {
+    // Step 1: 复用 EVM Driver 生成字节码
+    const yul_code = try evm_driver.compileToYul(zig_source);
+    const bytecode = try evm_driver.yulToEvmBytecode(yul_code);
+
+    // Step 2: 封装为 Kasplex 格式
+    const envelope = KasplexEnvelope{
+        .bytecode = bytecode,
+        .calldata = &[_]u8{},
+    };
+
+    // Step 3: 序列化
+    return envelope.serialize(allocator);
+}
+```
+
+#### 18.23.6 Zig std.crypto 的天然优势
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                                                             │
+│                    Zig 标准库完美支持 Kaspa 密码学                          │
+│                                                                             │
+│  ═══════════════════════════════════════════════════════════════════════   │
+│                                                                             │
+│                                                                             │
+│  Kaspa 使用的密码学原语:                                                    │
+│                                                                             │
+│  ┌───────────────────────┬───────────────────────┬──────────────────────┐  │
+│  │ Kaspa 需要            │ Zig std.crypto 支持   │ 状态                 │  │
+│  ├───────────────────────┼───────────────────────┼──────────────────────┤  │
+│  │ Blake2b               │ std.crypto.hash.blake2│ ✅ 原生支持          │  │
+│  │ Schnorr 签名          │ std.crypto.sign       │ ✅ 原生支持          │  │
+│  │ ECDSA (secp256k1)     │ std.crypto.ecc        │ ✅ 原生支持          │  │
+│  │ SHA256                │ std.crypto.hash.sha2  │ ✅ 原生支持          │  │
+│  └───────────────────────┴───────────────────────┴──────────────────────┘  │
+│                                                                             │
+│                                                                             │
+│  ───────────────────────────────────────────────────────────────────────   │
+│                                                                             │
+│                                                                             │
+│  优势:                                                                      │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │   • 无需外部 C 库依赖                                               │   │
+│  │   • 编译时类型安全                                                  │   │
+│  │   • 零运行时开销                                                    │   │
+│  │   • 可在本地完美模拟 Kaspa 的哈希计算                               │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+```zig
+// Kaspa 密码学示例
+
+const std = @import("std");
+const crypto = std.crypto;
+
+/// 计算 Kaspa 地址 (Blake2b)
+pub fn computeKaspaAddress(pubkey: [33]u8) [32]u8 {
+    var hasher = crypto.hash.blake2.Blake2b256.init(.{});
+    hasher.update(&pubkey);
+    return hasher.finalResult();
+}
+
+/// Schnorr 签名 (Kaspa 默认)
+pub fn signSchnorr(
+    message: []const u8,
+    secret_key: [32]u8,
+) ![64]u8 {
+    const Schnorr = crypto.sign.schnorr.Schnorr;
+    return Schnorr.sign(message, secret_key, null);
+}
+
+/// 验证 Schnorr 签名
+pub fn verifySchnorr(
+    signature: [64]u8,
+    message: []const u8,
+    public_key: [32]u8,
+) bool {
+    const Schnorr = crypto.sign.schnorr.Schnorr;
+    Schnorr.verify(signature, message, public_key) catch return false;
+    return true;
+}
+```
+
+#### 18.23.7 实施路线图
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                                                             │
+│                    Titan on Kaspa 实施路线图                                │
+│                                                                             │
+│  ═══════════════════════════════════════════════════════════════════════   │
+│                                                                             │
+│                                                                             │
+│  Phase 1: Native Script Driver (1-2 周)                                     │
+│  ─────────────────────────────────────────                                  │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │   1. 实现 OpCode 映射 (Titan IR → Kaspa Script)                     │   │
+│  │   2. 支持基础脚本: P2PK, P2PKH, P2SH                                │   │
+│  │   3. 实现多签脚本生成                                               │   │
+│  │   4. 实现时间锁脚本生成                                             │   │
+│  │                                                                     │   │
+│  │   Demo: 用 Zig 写一个 2-of-3 多签金库                               │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│                                                                             │
+│  Phase 2: KRC-20 Driver (1 周)                                              │
+│  ─────────────────────────────────                                          │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │   1. 实现 JSON 生成器 (deploy/mint/transfer)                        │   │
+│  │   2. 集成 Kaspa 交易构建器                                          │   │
+│  │   3. 支持 PSKT (部分签名交易)                                       │   │
+│  │                                                                     │   │
+│  │   Demo: 用 Zig 发行一个 KRC-20 代币                                 │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│                                                                             │
+│  Phase 3: Kasplex L2 集成 (2 周)                                            │
+│  ─────────────────────────────────                                          │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │   1. 复用 EVM Driver (Zig → Yul → EVM)                              │   │
+│  │   2. 实现 Kasplex Envelope 封装                                     │   │
+│  │   3. 集成 Kasplex RPC                                               │   │
+│  │                                                                     │   │
+│  │   Demo: 同一份 Zig 代码部署到 ETH 和 Kasplex                        │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.23.8 Hackathon 演示效果
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                                                             │
+│                    Hackathon 绝杀演示                                       │
+│                                                                             │
+│  ═══════════════════════════════════════════════════════════════════════   │
+│                                                                             │
+│                                                                             │
+│  演示场景: 同一份代码，三链部署                                             │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │   // 用户代码: token.zig                                            │   │
+│  │   const titan = @import("titan");                                   │   │
+│  │                                                                     │   │
+│  │   pub const Token = struct {                                        │   │
+│  │       name: []const u8 = "TitanCoin",                               │   │
+│  │       symbol: []const u8 = "TITAN",                                 │   │
+│  │       total_supply: u256 = 21_000_000,                              │   │
+│  │       balances: titan.Mapping(Address, u256),                       │   │
+│  │                                                                     │   │
+│  │       pub fn transfer(self: *Token, to: Address, amount: u256) !void│   │
+│  │       {                                                             │   │
+│  │           // 相同的业务逻辑                                         │   │
+│  │       }                                                             │   │
+│  │   };                                                                │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│           │                    │                    │                       │
+│           ▼                    ▼                    ▼                       │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐             │
+│  │                 │  │                 │  │                 │             │
+│  │  titan build    │  │  titan build    │  │  titan build    │             │
+│  │  --target evm   │  │  --target kaspa │  │  --target kasplex│            │
+│  │                 │  │                 │  │                 │             │
+│  └────────┬────────┘  └────────┬────────┘  └────────┬────────┘             │
+│           │                    │                    │                       │
+│           ▼                    ▼                    ▼                       │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐             │
+│  │                 │  │                 │  │                 │             │
+│  │  EVM Bytecode   │  │  KRC-20 JSON    │  │  EVM in Blob    │             │
+│  │  (Solidity ABI) │  │  (Inscription)  │  │  (Kasplex)      │             │
+│  │                 │  │                 │  │                 │             │
+│  └────────┬────────┘  └────────┬────────┘  └────────┬────────┘             │
+│           │                    │                    │                       │
+│           ▼                    ▼                    ▼                       │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐             │
+│  │                 │  │                 │  │                 │             │
+│  │  Ethereum       │  │  Kaspa L1       │  │  Kasplex L2     │             │
+│  │  (Account)      │  │  (UTXO)         │  │  (EVM on DAG)   │             │
+│  │                 │  │                 │  │                 │             │
+│  └─────────────────┘  └─────────────────┘  └─────────────────┘             │
+│                                                                             │
+│                                                                             │
+│  ═══════════════════════════════════════════════════════════════════════   │
+│                                                                             │
+│                                                                             │
+│  评委和投资人看到这个会立刻明白:                                            │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                     │   │
+│  │   "Titan OS 不仅是一个跨链工具，                                    │   │
+│  │    它是 Web3 的逻辑分发中枢。"                                      │   │
+│  │                                                                     │   │
+│  │   • 支持 Account 模型 (EVM)                                         │   │
+│  │   • 支持 UTXO 模型 (Kaspa/Bitcoin)                                  │   │
+│  │   • 支持 L1 原生脚本                                                │   │
+│  │   • 支持 L2 Rollup                                                  │   │
+│  │   • 支持铭文协议 (Ordinals/KRC-20)                                  │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.23.9 总结：Kaspa 作为试金石
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                                                             │
+│                                                                             │
+│      ═══════════════════════════════════════════════════════════════       │
+│                                                                             │
+│                    Kaspa 是 Titan OS 通用性的证明                           │
+│                                                                             │
+│      ═══════════════════════════════════════════════════════════════       │
+│                                                                             │
+│                                                                             │
+│      ┌──────────────────────────────────────────────────────────────┐      │
+│      │                                                              │      │
+│      │                                                              │      │
+│      │   Kaspa 的特殊性:                                            │      │
+│      │   ─────────────────                                          │      │
+│      │                                                              │      │
+│      │   • 不是 EVM (不能直接跑 Solidity)                           │      │
+│      │   • 不是 WASM (不能用 Rust 编译)                             │      │
+│      │   • 不是 Account 模型 (UTXO)                                 │      │
+│      │   • 不是传统 PoS/PoW (BlockDAG)                              │      │
+│      │                                                              │      │
+│      │   ─────────────────────────────────────────────────────────  │      │
+│      │                                                              │      │
+│      │   Titan OS 的回答:                                           │      │
+│      │   ─────────────────                                          │      │
+│      │                                                              │      │
+│      │   "没关系。只要你有执行环境，                                │      │
+│      │    我就能给你生成对应的代码。"                               │      │
+│      │                                                              │      │
+│      │   • 有 Script? 我生成 OpCode 序列                            │      │
+│      │   • 有 Inscription? 我生成 JSON                              │      │
+│      │   • 有 L2 Rollup? 我复用 EVM Driver                          │      │
+│      │                                                              │      │
+│      │   ─────────────────────────────────────────────────────────  │      │
+│      │                                                              │      │
+│      │   这就是"编译器即内核"的真正含义:                            │      │
+│      │                                                              │      │
+│      │   你写 Zig，我帮你翻译成任何区块链能懂的语言。               │      │
+│      │                                                              │      │
+│      │                                                              │      │
+│      └──────────────────────────────────────────────────────────────┘      │
+│                                                                             │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
 ## 相关文档
 
 | 文档 | 说明 |
