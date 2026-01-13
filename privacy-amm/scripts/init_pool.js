@@ -147,7 +147,13 @@ async function main() {
     const initialBlinding = Buffer.alloc(32);  // Random blinding
     crypto.randomFillSync(initialBlinding);
 
-    const bump = 255;  // Dummy bump
+    // Compute actual PDA bump for pool_authority
+    const [poolAuthority, bump] = PublicKey.findProgramAddressSync(
+        [Buffer.from('pool_authority'), poolPubkey],
+        PROGRAM_ID
+    );
+    console.log('Pool Authority PDA:', poolAuthority.toBase58());
+    console.log('PDA Bump:', bump);
 
     const initData = Buffer.concat([
         Buffer.from([INIT_INSTRUCTION]),
@@ -198,6 +204,8 @@ async function main() {
     const accountInfo = {
         programId: PROGRAM_ID.toBase58(),
         poolAccount: poolAccount.publicKey.toBase58(),
+        poolAuthority: poolAuthority.toBase58(),
+        poolAuthorityBump: bump,
         merkleAccount: merkleAccount.publicKey.toBase58(),
         nullifierAccount: nullifierAccount.publicKey.toBase58(),
         poolSecretKey: Array.from(poolAccount.secretKey),

@@ -1,6 +1,5 @@
 /**
- * Public Swap on Privacy AMM Pool
- * 公开交换测试 (不需要 ZK 证明)
+ * Public Swap on Privacy AMM Pool (with SPL Tokens)
  */
 
 const {
@@ -10,52 +9,37 @@ const {
     Transaction,
     TransactionInstruction,
     sendAndConfirmTransaction,
+    LAMPORTS_PER_SOL,
 } = require('@solana/web3.js');
+const { TOKEN_PROGRAM_ID } = require('@solana/spl-token');
 const fs = require('fs');
 const path = require('path');
 
-// Program ID
-const PROGRAM_ID = new PublicKey('GZfqgHqekzR4D8TAq165XB8U2boVdK5ehEEH4n7u4Xts');
+// Load token accounts
+const tokenAccounts = JSON.parse(
+    fs.readFileSync(path.join(__dirname, '../circuits/build/token_accounts.json'), 'utf8')
+);
 
-// Pool accounts (new pool with correct PDA bump)
-const POOL_ACCOUNTS = {
-    poolAccount: new PublicKey('4K65JKhxhUtDarHarbKXLnk6Uq8XN6ocnqfPTTmweQ1D'),
-    merkleAccount: new PublicKey('FhmBWQcLxFAFqRUvGPzUeZ6N8gSEk7eqc2LQbJidbBfr'),
-    nullifierAccount: new PublicKey('jeXXRuP24GSd43E6kjTa1yct6P65XwbjvjNxQ99AymY'),
-};
-
-// Instruction ID
+const PROGRAM_ID = new PublicKey(tokenAccounts.programId);
 const PUBLIC_SWAP_INSTRUCTION = 6;
 
 async function main() {
     console.log('='.repeat(60));
-    console.log('Public Swap on Privacy AMM Pool');
+    console.log('Public Swap on Privacy AMM Pool (SPL Tokens)');
     console.log('='.repeat(60));
     console.log('');
 
     // Parse command line args
     const args = process.argv.slice(2);
-    let amountIn = 0.1 * 1e9;  // Default: 0.1 SOL
+    let amountIn = 0.1 * LAMPORTS_PER_SOL;  // Default: 0.1 SOL
     let direction = 0;          // 0 = SOL->USDC, 1 = USDC->SOL
     let minOut = 0;
 
     for (let i = 0; i < args.length; i++) {
-        if (args[i] === '--amount' && args[i + 1]) {
-            amountIn = parseFloat(args[i + 1]);
-            // Auto-detect direction based on size
-            if (amountIn > 100) {
-                // Probably USDC (small decimals)
-                amountIn = amountIn * 1e6;
-                direction = 1;
-            } else {
-                amountIn = amountIn * 1e9;
-                direction = 0;
-            }
-        }
         if (args[i] === '--sol') {
             direction = 0;
             if (args[i + 1] && !args[i + 1].startsWith('--')) {
-                amountIn = parseFloat(args[i + 1]) * 1e9;
+                amountIn = parseFloat(args[i + 1]) * LAMPORTS_PER_SOL;
             }
         }
         if (args[i] === '--usdc') {
@@ -69,9 +53,9 @@ async function main() {
         }
     }
 
-    const dirStr = direction === 0 ? 'SOL → USDC' : 'USDC → SOL';
+    const dirStr = direction === 0 ? 'wSOL → tUSDC' : 'tUSDC → wSOL';
     console.log('Swap direction:', dirStr);
-    console.log('Amount in:', direction === 0 ? amountIn / 1e9 + ' SOL' : amountIn / 1e6 + ' USDC');
+    console.log('Amount in:', direction === 0 ? amountIn / LAMPORTS_PER_SOL + ' wSOL' : amountIn / 1e6 + ' tUSDC');
     console.log('Min out:', minOut);
     console.log('');
 
@@ -88,15 +72,15 @@ async function main() {
     // Get current pool state
     console.log('');
     console.log('Current pool state:');
-    const poolAccountInfo = await connection.getAccountInfo(POOL_ACCOUNTS.poolAccount);
+    const poolAccountInfo = await connection.getAccountInfo(new PublicKey(tokenAccounts.poolAccount));
     if (poolAccountInfo) {
         const data = poolAccountInfo.data;
         const reserveA = data.readBigUInt64LE(66);
         const reserveB = data.readBigUInt64LE(74);
         const totalLp = data.readBigUInt64LE(82);
 
-        console.log('  Reserve A (SOL):', Number(reserveA) / 1e9);
-        console.log('  Reserve B (USDC):', Number(reserveB) / 1e6);
+        console.log('  Reserve A (wSOL):', Number(reserveA) / LAMPORTS_PER_SOL);
+        console.log('  Reserve B (tUSDC):', Number(reserveB) / 1e6);
         console.log('  Total LP:', Number(totalLp));
 
         // Calculate expected output
@@ -110,8 +94,8 @@ async function main() {
 
         console.log('');
         console.log('Expected output:', direction === 0
-            ? Number(expectedOut) / 1e6 + ' USDC'
-            : Number(expectedOut) / 1e9 + ' SOL');
+            ? Number(expectedOut) / 1e6 + ' tUSDC'
+            : Number(expectedOut) / LAMPORTS_PER_SOL + ' wSOL');
     }
 
     // Build PublicSwap instruction data
@@ -119,35 +103,69 @@ async function main() {
     const instructionData = Buffer.alloc(18);
     let offset = 0;
 
-    // Instruction ID
     instructionData.writeUInt8(PUBLIC_SWAP_INSTRUCTION, offset);
     offset += 1;
 
-    // Amount in (little-endian)
     instructionData.writeBigUInt64LE(BigInt(Math.floor(amountIn)), offset);
     offset += 8;
 
-    // Min amount out (little-endian)
     instructionData.writeBigUInt64LE(BigInt(Math.floor(minOut)), offset);
     offset += 8;
 
-    // Direction
     instructionData.writeUInt8(direction, offset);
 
     console.log('');
     console.log('Instruction data:', instructionData.toString('hex'));
 
-    // Create instruction
+    // Build accounts list based on direction
+    // [0] swapper: User performing the swap (signer)
+    // [1] pool_account: Pool state
+    // [2] user_token_in: User's input token account
+    // [3] user_token_out: User's output token account
+    // [4] pool_vault_in: Pool's input token vault
+    // [5] pool_vault_out: Pool's output token vault
+    // [6] pool_authority: PDA authority for the pool
+    // [7] token_program: SPL Token program
+
+    let userTokenIn, userTokenOut, poolVaultIn, poolVaultOut;
+
+    if (direction === 0) {
+        // SOL -> USDC
+        userTokenIn = new PublicKey(tokenAccounts.userAccounts.wsol);
+        userTokenOut = new PublicKey(tokenAccounts.userAccounts.usdc);
+        poolVaultIn = new PublicKey(tokenAccounts.poolVaults.wsolVault);
+        poolVaultOut = new PublicKey(tokenAccounts.poolVaults.usdcVault);
+    } else {
+        // USDC -> SOL
+        userTokenIn = new PublicKey(tokenAccounts.userAccounts.usdc);
+        userTokenOut = new PublicKey(tokenAccounts.userAccounts.wsol);
+        poolVaultIn = new PublicKey(tokenAccounts.poolVaults.usdcVault);
+        poolVaultOut = new PublicKey(tokenAccounts.poolVaults.wsolVault);
+    }
+
+    const accounts = [
+        { pubkey: payer.publicKey, isSigner: true, isWritable: true },
+        { pubkey: new PublicKey(tokenAccounts.poolAccount), isSigner: false, isWritable: true },
+        { pubkey: userTokenIn, isSigner: false, isWritable: true },
+        { pubkey: userTokenOut, isSigner: false, isWritable: true },
+        { pubkey: poolVaultIn, isSigner: false, isWritable: true },
+        { pubkey: poolVaultOut, isSigner: false, isWritable: true },
+        { pubkey: new PublicKey(tokenAccounts.poolAuthority), isSigner: false, isWritable: false },
+        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+    ];
+
+    console.log('');
+    console.log('Accounts:');
+    accounts.forEach((acc, i) => {
+        console.log(`  [${i}]`, acc.pubkey.toBase58().slice(0, 10) + '...');
+    });
+
     const swapInstruction = new TransactionInstruction({
         programId: PROGRAM_ID,
-        keys: [
-            { pubkey: payer.publicKey, isSigner: true, isWritable: false },
-            { pubkey: POOL_ACCOUNTS.poolAccount, isSigner: false, isWritable: true },
-        ],
+        keys: accounts,
         data: instructionData,
     });
 
-    // Create and send transaction
     const transaction = new Transaction().add(swapInstruction);
 
     console.log('');
@@ -177,14 +195,14 @@ async function main() {
     // Verify new pool state
     console.log('');
     console.log('New pool state:');
-    const newPoolInfo = await connection.getAccountInfo(POOL_ACCOUNTS.poolAccount);
+    const newPoolInfo = await connection.getAccountInfo(new PublicKey(tokenAccounts.poolAccount));
     if (newPoolInfo) {
         const data = newPoolInfo.data;
         const reserveA = data.readBigUInt64LE(66);
         const reserveB = data.readBigUInt64LE(74);
 
-        console.log('  Reserve A (SOL):', Number(reserveA) / 1e9);
-        console.log('  Reserve B (USDC):', Number(reserveB) / 1e6);
+        console.log('  Reserve A (wSOL):', Number(reserveA) / LAMPORTS_PER_SOL);
+        console.log('  Reserve B (tUSDC):', Number(reserveB) / 1e6);
     }
 
     console.log('');

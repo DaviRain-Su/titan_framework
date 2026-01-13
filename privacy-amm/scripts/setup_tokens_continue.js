@@ -1,6 +1,6 @@
 /**
- * Setup SPL Tokens for Privacy AMM
- * 使用 wSOL (原生 SOL 包装) + tUSDC (测试代币)
+ * Continue Setup SPL Tokens for Privacy AMM
+ * Uses existing mints from previous run that was interrupted
  */
 
 const {
@@ -13,7 +13,6 @@ const {
     LAMPORTS_PER_SOL,
 } = require('@solana/web3.js');
 const {
-    createInitializeMintInstruction,
     createMintToInstruction,
     createAssociatedTokenAccountInstruction,
     getAssociatedTokenAddress,
@@ -21,8 +20,6 @@ const {
     getAccount,
     TOKEN_PROGRAM_ID,
     NATIVE_MINT,
-    MINT_SIZE,
-    getMinimumBalanceForRentExemptMint,
 } = require('@solana/spl-token');
 const fs = require('fs');
 const path = require('path');
@@ -30,17 +27,23 @@ const path = require('path');
 // Program ID
 const PROGRAM_ID = new PublicKey('GZfqgHqekzR4D8TAq165XB8U2boVdK5ehEEH4n7u4Xts');
 
-// Pool account
+// Pool account (new pool with correct bump)
 const POOL_ACCOUNT = new PublicKey('4K65JKhxhUtDarHarbKXLnk6Uq8XN6ocnqfPTTmweQ1D');
 
-// wSOL 是原生 SOL 的 SPL Token 包装
+// From previous run that succeeded:
+const tUSDC_MINT = new PublicKey('3fZgymugtSbiW6eQgnVkGRwPeJxueXrSHPgMhBRWkFN6');
+const LP_MINT = new PublicKey('5jx6pL7uGSfZqiG94Bh6b94M1yNt7YwLS1AWcQQ2i3XB');
+const POOL_WSOL_VAULT = new PublicKey('HNgkrsnGRZRPStxuv8LuDWaxQFQfGA9TpjvLHPavW7k8');
+const POOL_USDC_VAULT = new PublicKey('6wpex9bRe3Gw2yeAYpXSFfjZPLVyVpWYhGoqJnDzuhWJ');
+
 const WSOL_MINT = NATIVE_MINT; // So11111111111111111111111111111111111111112
 const WSOL_DECIMALS = 9;
+const tUSDC_DECIMALS = 6;
+const LP_DECIMALS = 9;
 
 async function main() {
     console.log('='.repeat(60));
-    console.log('Setup SPL Tokens for Privacy AMM');
-    console.log('wSOL (Native SOL) + tUSDC (Test Token)');
+    console.log('Continue Setup SPL Tokens for Privacy AMM');
     console.log('='.repeat(60));
     console.log('');
 
@@ -59,11 +62,6 @@ async function main() {
     console.log('Balance:', balance / LAMPORTS_PER_SOL, 'SOL');
     console.log('');
 
-    if (balance < 1 * LAMPORTS_PER_SOL) {
-        console.log('Need at least 1 SOL. Run: solana airdrop 2 --url testnet');
-        return;
-    }
-
     // Find pool authority PDA
     const [poolAuthority, bump] = PublicKey.findProgramAddressSync(
         [Buffer.from('pool_authority'), POOL_ACCOUNT.toBuffer()],
@@ -73,96 +71,21 @@ async function main() {
     console.log('Bump:', bump);
     console.log('');
 
-    // ========================================
-    // Step 1: Create tUSDC mint (test USDC)
-    // ========================================
-    console.log('Step 1: Creating tUSDC mint...');
-    const tUsdcMint = Keypair.generate();
-    const tUsdcDecimals = 6;
-
-    const createUsdcMintTx = new Transaction().add(
-        SystemProgram.createAccount({
-            fromPubkey: payer.publicKey,
-            newAccountPubkey: tUsdcMint.publicKey,
-            lamports: await getMinimumBalanceForRentExemptMint(connection),
-            space: MINT_SIZE,
-            programId: TOKEN_PROGRAM_ID,
-        }),
-        createInitializeMintInstruction(
-            tUsdcMint.publicKey,
-            tUsdcDecimals,
-            payer.publicKey,  // Mint authority
-            null,             // No freeze authority
-        )
-    );
-
-    await sendAndConfirmTransaction(connection, createUsdcMintTx, [payer, tUsdcMint]);
-    console.log('✅ tUSDC mint created:', tUsdcMint.publicKey.toBase58());
-
-    // ========================================
-    // Step 2: Create LP Token mint
-    // ========================================
+    console.log('Using existing mints from previous run:');
+    console.log('  tUSDC:', tUSDC_MINT.toBase58());
+    console.log('  LP:', LP_MINT.toBase58());
+    console.log('  Pool wSOL vault:', POOL_WSOL_VAULT.toBase58());
+    console.log('  Pool tUSDC vault:', POOL_USDC_VAULT.toBase58());
     console.log('');
-    console.log('Step 2: Creating LP Token mint...');
-    const lpMint = Keypair.generate();
-    const lpDecimals = 9;
-
-    const createLpMintTx = new Transaction().add(
-        SystemProgram.createAccount({
-            fromPubkey: payer.publicKey,
-            newAccountPubkey: lpMint.publicKey,
-            lamports: await getMinimumBalanceForRentExemptMint(connection),
-            space: MINT_SIZE,
-            programId: TOKEN_PROGRAM_ID,
-        }),
-        createInitializeMintInstruction(
-            lpMint.publicKey,
-            lpDecimals,
-            poolAuthority,  // Pool authority can mint LP tokens
-            null,
-        )
-    );
-
-    await sendAndConfirmTransaction(connection, createLpMintTx, [payer, lpMint]);
-    console.log('✅ LP mint created:', lpMint.publicKey.toBase58());
-
-    // ========================================
-    // Step 3: Create Pool Token Vaults (ATAs)
-    // ========================================
-    console.log('');
-    console.log('Step 3: Creating pool token vaults...');
-
-    const poolVaultWsol = await getAssociatedTokenAddress(WSOL_MINT, poolAuthority, true);
-    const poolVaultUsdc = await getAssociatedTokenAddress(tUsdcMint.publicKey, poolAuthority, true);
-
-    const createVaultsTx = new Transaction().add(
-        createAssociatedTokenAccountInstruction(
-            payer.publicKey,
-            poolVaultWsol,
-            poolAuthority,
-            WSOL_MINT,
-        ),
-        createAssociatedTokenAccountInstruction(
-            payer.publicKey,
-            poolVaultUsdc,
-            poolAuthority,
-            tUsdcMint.publicKey,
-        )
-    );
-
-    await sendAndConfirmTransaction(connection, createVaultsTx, [payer]);
-    console.log('✅ Pool wSOL vault:', poolVaultWsol.toBase58());
-    console.log('✅ Pool tUSDC vault:', poolVaultUsdc.toBase58());
 
     // ========================================
     // Step 4: Create User Token Accounts
     // ========================================
-    console.log('');
     console.log('Step 4: Creating user token accounts...');
 
     const userWsolAccount = await getAssociatedTokenAddress(WSOL_MINT, payer.publicKey);
-    const userUsdcAccount = await getAssociatedTokenAddress(tUsdcMint.publicKey, payer.publicKey);
-    const userLpAccount = await getAssociatedTokenAddress(lpMint.publicKey, payer.publicKey);
+    const userUsdcAccount = await getAssociatedTokenAddress(tUSDC_MINT, payer.publicKey);
+    const userLpAccount = await getAssociatedTokenAddress(LP_MINT, payer.publicKey);
 
     // Check which accounts need to be created
     const createUserAccountsTx = new Transaction();
@@ -193,7 +116,7 @@ async function main() {
                 payer.publicKey,
                 userUsdcAccount,
                 payer.publicKey,
-                tUsdcMint.publicKey,
+                tUSDC_MINT,
             )
         );
         console.log('Creating tUSDC account...');
@@ -209,7 +132,7 @@ async function main() {
                 payer.publicKey,
                 userLpAccount,
                 payer.publicKey,
-                lpMint.publicKey,
+                LP_MINT,
             )
         );
         console.log('Creating LP account...');
@@ -228,8 +151,8 @@ async function main() {
     console.log('');
     console.log('Step 5: Wrapping SOL and minting tUSDC...');
 
-    const wsolAmount = 2 * LAMPORTS_PER_SOL; // 2 SOL (for testing)
-    const usdcAmount = 300n * 10n ** BigInt(tUsdcDecimals); // 300 tUSDC (for testing)
+    const wsolAmount = 0.5 * LAMPORTS_PER_SOL; // 0.5 SOL (for testing)
+    const usdcAmount = 100n * 10n ** BigInt(tUSDC_DECIMALS); // 100 tUSDC (for testing)
 
     // Transfer SOL to wSOL account and sync
     const wrapAndMintTx = new Transaction().add(
@@ -243,7 +166,7 @@ async function main() {
         createSyncNativeInstruction(userWsolAccount),
         // Mint tUSDC to user
         createMintToInstruction(
-            tUsdcMint.publicKey,
+            tUSDC_MINT,
             userUsdcAccount,
             payer.publicKey,
             usdcAmount
@@ -252,7 +175,7 @@ async function main() {
 
     await sendAndConfirmTransaction(connection, wrapAndMintTx, [payer]);
     console.log('✅ Wrapped', wsolAmount / LAMPORTS_PER_SOL, 'SOL into wSOL');
-    console.log('✅ Minted', Number(usdcAmount) / 10 ** tUsdcDecimals, 'tUSDC');
+    console.log('✅ Minted', Number(usdcAmount) / 10 ** tUSDC_DECIMALS, 'tUSDC');
 
     // ========================================
     // Save Token Info
@@ -270,28 +193,24 @@ async function main() {
             isNative: true,
         },
         tokenB: {
-            mint: tUsdcMint.publicKey.toBase58(),
-            decimals: tUsdcDecimals,
+            mint: tUSDC_MINT.toBase58(),
+            decimals: tUSDC_DECIMALS,
             symbol: 'tUSDC',
             name: 'Test USDC',
         },
         lpToken: {
-            mint: lpMint.publicKey.toBase58(),
-            decimals: lpDecimals,
+            mint: LP_MINT.toBase58(),
+            decimals: LP_DECIMALS,
             symbol: 'wSOL-tUSDC-LP',
         },
         poolVaults: {
-            wsolVault: poolVaultWsol.toBase58(),
-            usdcVault: poolVaultUsdc.toBase58(),
+            wsolVault: POOL_WSOL_VAULT.toBase58(),
+            usdcVault: POOL_USDC_VAULT.toBase58(),
         },
         userAccounts: {
             wsol: userWsolAccount.toBase58(),
             usdc: userUsdcAccount.toBase58(),
             lp: userLpAccount.toBase58(),
-        },
-        mintSecretKeys: {
-            tUsdc: Array.from(tUsdcMint.secretKey),
-            lp: Array.from(lpMint.secretKey),
         },
     };
 
@@ -307,12 +226,12 @@ async function main() {
     console.log('');
     console.log('Summary:');
     console.log('  Token A: wSOL (Native SOL wrapped)');
-    console.log('  Token B: tUSDC', tUsdcMint.publicKey.toBase58());
-    console.log('  LP Token:', lpMint.publicKey.toBase58());
+    console.log('  Token B: tUSDC', tUSDC_MINT.toBase58());
+    console.log('  LP Token:', LP_MINT.toBase58());
     console.log('');
     console.log('User balances:');
     console.log('  wSOL:', wsolAmount / LAMPORTS_PER_SOL);
-    console.log('  tUSDC:', Number(usdcAmount) / 10 ** tUsdcDecimals);
+    console.log('  tUSDC:', Number(usdcAmount) / 10 ** tUSDC_DECIMALS);
     console.log('');
     console.log('Next steps:');
     console.log('  1. Run: node scripts/add_liquidity_spl.js');
