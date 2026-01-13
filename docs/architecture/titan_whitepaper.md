@@ -41860,6 +41860,1840 @@ pub const BridgeAttestation = struct {
 
 ---
 
+### 18.43 Solana Privacy Hackathon MVP 技术方案
+
+> **目标**: 基于 arXiv:2511.00415 论文理论，实现「链下执行 + 链上验证」的隐私交换 MVP
+>
+> **核心思想**: Off-chain Execution + On-chain ZK Verification + Client-side Validation
+
+#### 18.43.1 MVP 架构总览
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    TITAN PRIVACY MVP - 完整架构                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│                           ┌─────────────────────┐                           │
+│                           │      用户界面        │                           │
+│                           │   (Titan CLI/SDK)   │                           │
+│                           └──────────┬──────────┘                           │
+│                                      │                                      │
+│                                      ▼                                      │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │                        CLIENT LAYER (客户端层)                         │ │
+│  │                                                                       │ │
+│  │   ┌─────────────┐   ┌──────────────┐   ┌──────────────────────────┐  │ │
+│  │   │ State Mgmt  │   │  ZK Prover   │   │    Client Validation     │  │ │
+│  │   │ (本地状态)  │   │  (Noir/C)    │   │    (三重安全验证)        │  │ │
+│  │   └──────┬──────┘   └──────┬───────┘   └────────────┬─────────────┘  │ │
+│  │          │                 │                        │                 │ │
+│  │          │    ┌────────────┴────────────┐          │                 │ │
+│  │          │    │                         │          │                 │ │
+│  │          ▼    ▼                         ▼          ▼                 │ │
+│  │   ┌─────────────────────────────────────────────────────────────┐    │ │
+│  │   │              Proof-Carrying Message (PCM)                   │    │ │
+│  │   │  { command, params_commitment, identifier, proof, outputs } │    │ │
+│  │   └─────────────────────────┬───────────────────────────────────┘    │ │
+│  │                             │                                         │ │
+│  └─────────────────────────────┼─────────────────────────────────────────┘ │
+│                                │                                            │
+│                                ▼                                            │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │                      SOLANA BLOCKCHAIN (链上层)                        │ │
+│  │                                                                       │ │
+│  │   ┌─────────────────────────────────────────────────────────────┐    │ │
+│  │   │                    Verifier Router                          │    │ │
+│  │   │    verify(proof, public_values, vk_id) → {accept, reject}   │    │ │
+│  │   └─────────────────────────┬───────────────────────────────────┘    │ │
+│  │                             │                                         │ │
+│  │              ┌──────────────┼──────────────┐                         │ │
+│  │              ▼              ▼              ▼                         │ │
+│  │   ┌────────────────┐ ┌────────────┐ ┌─────────────────┐             │ │
+│  │   │ State Account  │ │  Nullifier │ │   Merkle Root   │             │ │
+│  │   │ (公开状态)     │ │   Set      │ │   (状态承诺)    │             │ │
+│  │   └────────────────┘ └────────────┘ └─────────────────┘             │ │
+│  │                                                                       │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.43.2 五大补充领域
+
+基于论文理论框架，MVP 实现需要补充以下五个关键领域：
+
+##### 18.43.2.1 状态管理 (State Management)
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    混合状态模型 (Hybrid State)                    │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ┌─────────────────────┐      ┌─────────────────────────────┐  │
+│  │    PUBLIC STATE     │      │      PRIVATE STATE          │  │
+│  │    (链上存储)       │      │      (链下存储)             │  │
+│  ├─────────────────────┤      ├─────────────────────────────┤  │
+│  │                     │      │                             │  │
+│  │  • Merkle Root      │      │  • User Balances            │  │
+│  │  • Nullifier Set    │      │  • Transaction History      │  │
+│  │  • Pool Reserves    │      │  • Note Commitments         │  │
+│  │  • VK Registry      │      │  • Encryption Keys          │  │
+│  │                     │      │                             │  │
+│  └──────────┬──────────┘      └──────────────┬──────────────┘  │
+│             │                                │                  │
+│             │   ┌────────────────────────┐   │                  │
+│             └──►│  Commitment Binding    │◄──┘                  │
+│                 │  H(private) = public   │                      │
+│                 └────────────────────────┘                      │
+│                                                                 │
+│  同步机制:                                                       │
+│  • 链上 Merkle Root 作为 "状态锚点"                             │
+│  • 链下状态必须能够生成与链上一致的承诺                          │
+│  • 客户端本地维护 Merkle 树，定期与链上同步                      │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Zig 实现**:
+
+```zig
+// titan/state.zig - 混合状态管理
+
+const std = @import("std");
+const titan = @import("titan.zig");
+
+/// 状态同步配置
+pub const SyncConfig = struct {
+    /// 自动同步间隔 (秒)
+    auto_sync_interval: u32 = 30,
+    /// 最大未同步交易数
+    max_pending_txs: u32 = 10,
+    /// 启用乐观执行
+    optimistic_execution: bool = true,
+};
+
+/// 混合状态管理器
+pub const HybridStateManager = struct {
+    /// 本地状态存储
+    local_state: LocalState,
+    /// RPC 客户端
+    rpc: titan.RpcClient,
+    /// 同步配置
+    config: SyncConfig,
+    /// 待确认交易队列
+    pending_txs: std.ArrayList(PendingTx),
+    /// 当前已确认的链上状态根
+    confirmed_root: [32]u8,
+    /// 本地计算的状态根
+    local_root: [32]u8,
+    /// 状态是否同步
+    is_synced: bool,
+
+    const Self = @This();
+
+    /// 初始化状态管理器
+    pub fn init(
+        allocator: std.mem.Allocator,
+        rpc_url: []const u8,
+        config: SyncConfig,
+    ) !Self {
+        const rpc = try titan.RpcClient.connect(rpc_url);
+
+        // 从链上获取当前状态根
+        const chain_state = try rpc.getAccountData(titan.POOL_STATE_PUBKEY);
+        const confirmed_root = chain_state.merkle_root;
+
+        return Self{
+            .local_state = try LocalState.init(allocator),
+            .rpc = rpc,
+            .config = config,
+            .pending_txs = std.ArrayList(PendingTx).init(allocator),
+            .confirmed_root = confirmed_root,
+            .local_root = confirmed_root, // 初始时与链上一致
+            .is_synced = true,
+        };
+    }
+
+    /// 执行隐私交易 (链下执行)
+    pub fn executePrivate(
+        self: *Self,
+        operation: Operation,
+    ) !ExecutionResult {
+        // 1. 在本地状态上模拟执行
+        const pre_state = self.local_state.snapshot();
+
+        const result = try self.local_state.apply(operation);
+
+        // 2. 生成状态转换证明
+        const state_transition = StateTransition{
+            .pre_root = pre_state.root,
+            .post_root = self.local_state.root(),
+            .operation = operation,
+            .witness = result.witness,
+        };
+
+        // 3. 更新本地状态根
+        self.local_root = self.local_state.root();
+        self.is_synced = false;
+
+        // 4. 添加到待确认队列
+        try self.pending_txs.append(.{
+            .operation = operation,
+            .state_transition = state_transition,
+            .timestamp = std.time.timestamp(),
+        });
+
+        return result;
+    }
+
+    /// 生成链上提交的证明
+    pub fn generateProof(
+        self: *Self,
+        operation: Operation,
+        private_inputs: PrivateInputs,
+    ) !titan.zk.Proof {
+        // 构建证明输入
+        const circuit_inputs = ProofInputs{
+            // 公开输入
+            .public = .{
+                .merkle_root = self.confirmed_root,
+                .nullifier = operation.computeNullifier(),
+                .output_commitment = operation.computeOutputCommitment(),
+            },
+            // 私有输入
+            .private = .{
+                .amount = private_inputs.amount,
+                .sender_key = private_inputs.sender_key,
+                .recipient_key = private_inputs.recipient_key,
+                .merkle_path = private_inputs.merkle_path,
+                .note_preimage = private_inputs.note_preimage,
+            },
+        };
+
+        // 调用 ZK 证明生成
+        return titan.zk.prove(self.circuit, circuit_inputs);
+    }
+
+    /// 同步链上状态
+    pub fn sync(self: *Self) !SyncResult {
+        // 1. 获取最新链上状态
+        const chain_state = try self.rpc.getAccountData(titan.POOL_STATE_PUBKEY);
+
+        // 2. 检查待确认交易状态
+        var confirmed: u32 = 0;
+        var failed: u32 = 0;
+
+        var i: usize = 0;
+        while (i < self.pending_txs.items.len) {
+            const tx = self.pending_txs.items[i];
+            const status = try self.rpc.getTransactionStatus(tx.signature);
+
+            switch (status) {
+                .confirmed => {
+                    confirmed += 1;
+                    _ = self.pending_txs.orderedRemove(i);
+                },
+                .failed => {
+                    failed += 1;
+                    // 回滚本地状态
+                    try self.local_state.rollback(tx.state_transition);
+                    _ = self.pending_txs.orderedRemove(i);
+                },
+                .pending => {
+                    i += 1;
+                },
+            }
+        }
+
+        // 3. 更新确认的状态根
+        self.confirmed_root = chain_state.merkle_root;
+
+        // 4. 验证本地状态一致性
+        if (self.pending_txs.items.len == 0) {
+            if (!std.mem.eql(u8, &self.local_root, &self.confirmed_root)) {
+                // 状态不一致，需要完全同步
+                try self.fullSync();
+            }
+            self.is_synced = true;
+        }
+
+        return SyncResult{
+            .confirmed = confirmed,
+            .failed = failed,
+            .pending = @intCast(self.pending_txs.items.len),
+            .is_synced = self.is_synced,
+        };
+    }
+
+    /// 完全同步 (重建本地状态)
+    fn fullSync(self: *Self) !void {
+        // 从链上获取所有历史事件
+        const events = try self.rpc.getProgramLogs(
+            titan.PROGRAM_ID,
+            .{ .commitment = .finalized },
+        );
+
+        // 重建本地 Merkle 树
+        self.local_state.reset();
+
+        for (events) |event| {
+            const parsed = try parseEvent(event);
+            try self.local_state.applyEvent(parsed);
+        }
+
+        self.local_root = self.local_state.root();
+    }
+};
+
+/// 本地状态存储
+pub const LocalState = struct {
+    /// Merkle 树
+    tree: MerkleTree,
+    /// 用户笔记 (Notes)
+    notes: std.AutoHashMap([32]u8, Note),
+    /// 已使用的 nullifiers
+    nullifiers: std.AutoHashMap([32]u8, void),
+    /// 分配器
+    allocator: std.mem.Allocator,
+
+    /// 计算当前状态根
+    pub fn root(self: *const LocalState) [32]u8 {
+        return self.tree.root();
+    }
+
+    /// 应用操作
+    pub fn apply(self: *LocalState, op: Operation) !ApplyResult {
+        switch (op.type) {
+            .deposit => return self.applyDeposit(op),
+            .withdraw => return self.applyWithdraw(op),
+            .transfer => return self.applyTransfer(op),
+            .swap => return self.applySwap(op),
+        }
+    }
+
+    /// 应用存款操作
+    fn applyDeposit(self: *LocalState, op: Operation) !ApplyResult {
+        // 创建新笔记
+        const note = Note{
+            .amount = op.amount,
+            .owner = op.recipient,
+            .asset = op.asset,
+            .nonce = std.crypto.random.int(u64),
+        };
+
+        // 计算笔记承诺
+        const commitment = note.commitment();
+
+        // 插入 Merkle 树
+        const leaf_index = try self.tree.insert(commitment);
+
+        // 保存笔记
+        try self.notes.put(commitment, note);
+
+        return ApplyResult{
+            .success = true,
+            .witness = .{
+                .leaf_index = leaf_index,
+                .merkle_path = self.tree.getPath(leaf_index),
+            },
+            .output_commitment = commitment,
+        };
+    }
+
+    /// 应用提款操作
+    fn applyWithdraw(self: *LocalState, op: Operation) !ApplyResult {
+        // 验证笔记存在
+        const note = self.notes.get(op.input_commitment) orelse
+            return error.NoteNotFound;
+
+        // 计算 nullifier
+        const nullifier = note.nullifier(op.sender_key);
+
+        // 检查是否已使用
+        if (self.nullifiers.contains(nullifier)) {
+            return error.NullifierAlreadyUsed;
+        }
+
+        // 标记 nullifier 已使用
+        try self.nullifiers.put(nullifier, {});
+
+        // 移除笔记
+        _ = self.notes.remove(op.input_commitment);
+
+        return ApplyResult{
+            .success = true,
+            .witness = .{
+                .nullifier = nullifier,
+                .merkle_path = self.tree.getPath(note.leaf_index),
+            },
+            .output_commitment = [_]u8{0} ** 32,
+        };
+    }
+
+    /// 创建快照
+    pub fn snapshot(self: *const LocalState) StateSnapshot {
+        return StateSnapshot{
+            .root = self.root(),
+            .tree_size = self.tree.size(),
+            .nullifier_count = self.nullifiers.count(),
+        };
+    }
+};
+
+/// 待确认交易
+pub const PendingTx = struct {
+    operation: Operation,
+    state_transition: StateTransition,
+    signature: ?[64]u8,
+    timestamp: i64,
+};
+
+/// 同步结果
+pub const SyncResult = struct {
+    confirmed: u32,
+    failed: u32,
+    pending: u32,
+    is_synced: bool,
+};
+```
+
+##### 18.43.2.2 证明系统选择 (Proof System Selection)
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    证明系统决策矩阵                               │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  MVP 推荐: Groth16 via Noir                                     │
+│                                                                 │
+│  ┌───────────────┬───────────┬───────────┬───────────────────┐ │
+│  │   证明系统     │  证明大小  │  验证时间  │     适用场景      │ │
+│  ├───────────────┼───────────┼───────────┼───────────────────┤ │
+│  │ Groth16       │   ~192B   │   ~0.5ms  │ ✅ 固定电路      │ │
+│  │ Plonk         │   ~400B   │   ~1ms    │ 通用电路         │ │
+│  │ STARK         │   ~40KB   │   ~2ms    │ 大规模计算        │ │
+│  │ SP1 (zkVM)    │   ~1KB    │   ~1ms    │ 任意程序         │ │
+│  └───────────────┴───────────┴───────────┴───────────────────┘ │
+│                                                                 │
+│  选择 Groth16 的理由:                                            │
+│  ├─ 证明最小 (192 bytes) → 链上存储成本最低                     │
+│  ├─ 验证最快 → CU 消耗最低 (~200K CU)                          │
+│  ├─ Solana 原生支持 → alt_bn128 预编译                         │
+│  └─ Noir 生成 → 开发体验好                                     │
+│                                                                 │
+│  权衡:                                                          │
+│  ├─ 需要 Trusted Setup (可用 Powers of Tau)                    │
+│  └─ 电路修改需重新 setup                                        │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Noir 电路示例**:
+
+```noir
+// circuits/private_swap.nr - 隐私交换电路
+
+use dep::std;
+
+// 主电路：证明隐私交换的有效性
+fn main(
+    // === 公开输入 (链上可见) ===
+    pub merkle_root: Field,           // 状态 Merkle 根
+    pub nullifier_a: Field,           // 输入 A 的 nullifier
+    pub nullifier_b: Field,           // 输入 B 的 nullifier
+    pub output_commitment_a: Field,   // 输出 A 的承诺
+    pub output_commitment_b: Field,   // 输出 B 的承诺
+    pub pool_state_hash: Field,       // 池状态哈希
+
+    // === 私有输入 (链下保密) ===
+    amount_a: Field,                  // 交换数量 A
+    amount_b: Field,                  // 交换数量 B
+    sender_a_key: Field,              // 发送者 A 私钥
+    sender_b_key: Field,              // 发送者 B 私钥
+    note_a_preimage: [Field; 4],      // 笔记 A 原像
+    note_b_preimage: [Field; 4],      // 笔记 B 原像
+    merkle_path_a: [Field; 20],       // Merkle 路径 A
+    merkle_path_b: [Field; 20],       // Merkle 路径 B
+    merkle_indices_a: [u1; 20],       // 路径索引 A
+    merkle_indices_b: [u1; 20],       // 路径索引 B
+    pool_reserves_a: Field,           // 池子储备 A
+    pool_reserves_b: Field,           // 池子储备 B
+) {
+    // === 约束 1: 验证输入笔记存在于 Merkle 树 ===
+    let note_commitment_a = std::hash::pedersen_hash(note_a_preimage);
+    let note_commitment_b = std::hash::pedersen_hash(note_b_preimage);
+
+    // 验证 Merkle 路径
+    let computed_root_a = compute_merkle_root(
+        note_commitment_a,
+        merkle_path_a,
+        merkle_indices_a
+    );
+    let computed_root_b = compute_merkle_root(
+        note_commitment_b,
+        merkle_path_b,
+        merkle_indices_b
+    );
+
+    assert(computed_root_a == merkle_root);
+    assert(computed_root_b == merkle_root);
+
+    // === 约束 2: 验证 Nullifier 计算正确 ===
+    let computed_nullifier_a = compute_nullifier(
+        note_commitment_a,
+        sender_a_key
+    );
+    let computed_nullifier_b = compute_nullifier(
+        note_commitment_b,
+        sender_b_key
+    );
+
+    assert(computed_nullifier_a == nullifier_a);
+    assert(computed_nullifier_b == nullifier_b);
+
+    // === 约束 3: 验证所有权 ===
+    let owner_a = std::hash::pedersen_hash([sender_a_key]);
+    let owner_b = std::hash::pedersen_hash([sender_b_key]);
+
+    assert(note_a_preimage[2] == owner_a);  // note.owner
+    assert(note_b_preimage[2] == owner_b);
+
+    // === 约束 4: 验证数量匹配 ===
+    assert(note_a_preimage[0] == amount_a);  // note.amount
+    assert(note_b_preimage[0] == amount_b);
+
+    // === 约束 5: 验证 AMM 价格公式 (x * y = k) ===
+    let k = pool_reserves_a * pool_reserves_b;
+    let new_reserves_a = pool_reserves_a + amount_a;
+    let new_reserves_b = pool_reserves_b - amount_b;
+
+    // 允许 0.3% 滑点
+    let k_new = new_reserves_a * new_reserves_b;
+    let slippage_tolerance = k / 1000 * 3;  // 0.3%
+
+    assert(k_new >= k - slippage_tolerance);
+
+    // === 约束 6: 验证池状态绑定 ===
+    let computed_pool_hash = std::hash::pedersen_hash([
+        pool_reserves_a,
+        pool_reserves_b
+    ]);
+    assert(computed_pool_hash == pool_state_hash);
+
+    // === 约束 7: 验证输出承诺 ===
+    // 输出笔记 A: 用户 B 收到 amount_a
+    let output_note_a = [
+        amount_a,                                    // amount
+        note_a_preimage[1],                         // asset
+        owner_b,                                     // new owner = B
+        std::hash::pedersen_hash([nullifier_a])     // new nonce
+    ];
+    let computed_output_a = std::hash::pedersen_hash(output_note_a);
+    assert(computed_output_a == output_commitment_a);
+
+    // 输出笔记 B: 用户 A 收到 amount_b
+    let output_note_b = [
+        amount_b,
+        note_b_preimage[1],
+        owner_a,
+        std::hash::pedersen_hash([nullifier_b])
+    ];
+    let computed_output_b = std::hash::pedersen_hash(output_note_b);
+    assert(computed_output_b == output_commitment_b);
+}
+
+// 计算 Merkle 根
+fn compute_merkle_root(
+    leaf: Field,
+    path: [Field; 20],
+    indices: [u1; 20]
+) -> Field {
+    let mut current = leaf;
+
+    for i in 0..20 {
+        if indices[i] == 0 {
+            current = std::hash::pedersen_hash([current, path[i]]);
+        } else {
+            current = std::hash::pedersen_hash([path[i], current]);
+        }
+    }
+
+    current
+}
+
+// 计算 Nullifier
+fn compute_nullifier(commitment: Field, key: Field) -> Field {
+    std::hash::pedersen_hash([commitment, key])
+}
+```
+
+##### 18.43.2.3 具体用例: 隐私 Token 交换
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    隐私交换流程 (Private Swap)                    │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  场景: Alice 用 10 SOL 隐私交换 Bob 的 100 USDC                 │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │ Step 1: 链下准备 (Off-chain Preparation)                    ││
+│  ├─────────────────────────────────────────────────────────────┤│
+│  │                                                             ││
+│  │  Alice CLI:                                                 ││
+│  │  $ titan swap --amount 10 --from SOL --to USDC             ││
+│  │                                                             ││
+│  │  执行过程:                                                   ││
+│  │  ├─ 1. 查找本地 SOL 笔记 (10 SOL)                          ││
+│  │  ├─ 2. 从 RPC 获取当前 Merkle 根                           ││
+│  │  ├─ 3. 构建 Merkle 路径证明                                ││
+│  │  └─ 4. 计算 Nullifier                                      ││
+│  │                                                             ││
+│  └─────────────────────────────────────────────────────────────┘│
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │ Step 2: 证明生成 (Proof Generation)                         ││
+│  ├─────────────────────────────────────────────────────────────┤│
+│  │                                                             ││
+│  │  本地 ZK 证明生成:                                           ││
+│  │                                                             ││
+│  │  ┌─────────────────────────────────────────────────────┐   ││
+│  │  │  Noir Circuit (via C ABI)                           │   ││
+│  │  │                                                     │   ││
+│  │  │  私有输入:                                           │   ││
+│  │  │  ├─ amount: 10 SOL                                  │   ││
+│  │  │  ├─ sender_key: Alice 的私钥                        │   ││
+│  │  │  └─ merkle_path: [h1, h2, ..., h20]                │   ││
+│  │  │                                                     │   ││
+│  │  │  公开输出:                                           │   ││
+│  │  │  ├─ nullifier: 0xabc...                            │   ││
+│  │  │  ├─ output_commitment: 0xdef...                    │   ││
+│  │  │  └─ merkle_root: 0x123...                          │   ││
+│  │  │                                                     │   ││
+│  │  │  生成时间: ~2-5 秒                                   │   ││
+│  │  └─────────────────────────────────────────────────────┘   ││
+│  │                                                             ││
+│  └─────────────────────────────────────────────────────────────┘│
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │ Step 3: 客户端验证 (Client-side Validation)                 ││
+│  ├─────────────────────────────────────────────────────────────┤│
+│  │                                                             ││
+│  │  三重安全验证:                                               ││
+│  │                                                             ││
+│  │  ✓ V1: 证明验证 (Proof Verification)                       ││
+│  │     └─ 本地调用 noir_verify_proof() 确认证明有效            ││
+│  │                                                             ││
+│  │  ✓ V2: 状态一致性 (State Consistency)                       ││
+│  │     └─ 确认本地 Merkle 根与链上一致                         ││
+│  │                                                             ││
+│  │  ✓ V3: 参数绑定 (Parameter Binding)                         ││
+│  │     └─ 确认公开输入与用户意图匹配                           ││
+│  │                                                             ││
+│  └─────────────────────────────────────────────────────────────┘│
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │ Step 4: 链上提交 (On-chain Submission)                      ││
+│  ├─────────────────────────────────────────────────────────────┤│
+│  │                                                             ││
+│  │  构建 PCM (Proof-Carrying Message):                        ││
+│  │                                                             ││
+│  │  {                                                         ││
+│  │    command: "swap",                                        ││
+│  │    params_commitment: H(10, SOL, USDC),                    ││
+│  │    identifier: {                                           ││
+│  │      origin: Alice.pubkey,                                 ││
+│  │      nonce: 12345,                                         ││
+│  │      timestamp: 1704067200                                 ││
+│  │    },                                                      ││
+│  │    proof: <192 bytes Groth16>,                             ││
+│  │    public_outputs: {                                       ││
+│  │      merkle_root: 0x123...,                                ││
+│  │      nullifier: 0xabc...,                                  ││
+│  │      output_commitment: 0xdef...                           ││
+│  │    }                                                       ││
+│  │  }                                                         ││
+│  │                                                             ││
+│  │  发送交易:                                                   ││
+│  │  $ solana send --tx pcm.serialize()                        ││
+│  │                                                             ││
+│  └─────────────────────────────────────────────────────────────┘│
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │ Step 5: 链上验证 (On-chain Verification)                    ││
+│  ├─────────────────────────────────────────────────────────────┤│
+│  │                                                             ││
+│  │  Solana Program 执行:                                       ││
+│  │                                                             ││
+│  │  fn process_swap(ctx: Context, pcm: PCM) -> Result<()> {   ││
+│  │    // 1. 验证 Merkle 根 (当前状态)                          ││
+│  │    require!(ctx.pool.merkle_root == pcm.merkle_root);      ││
+│  │                                                             ││
+│  │    // 2. 检查 Nullifier 未使用                              ││
+│  │    require!(!ctx.nullifier_set.contains(pcm.nullifier));   ││
+│  │                                                             ││
+│  │    // 3. 验证 ZK 证明 (~200K CU)                           ││
+│  │    verify_groth16(pcm.proof, pcm.public_outputs)?;         ││
+│  │                                                             ││
+│  │    // 4. 记录 Nullifier                                     ││
+│  │    ctx.nullifier_set.insert(pcm.nullifier);                ││
+│  │                                                             ││
+│  │    // 5. 插入新承诺到 Merkle 树                             ││
+│  │    ctx.pool.insert_commitment(pcm.output_commitment);      ││
+│  │                                                             ││
+│  │    Ok(())                                                   ││
+│  │  }                                                          ││
+│  │                                                             ││
+│  │  总 CU 消耗: ~250K (低于 1.4M 限制)                         ││
+│  │                                                             ││
+│  └─────────────────────────────────────────────────────────────┘│
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │ Step 6: 状态同步 (State Sync)                               ││
+│  ├─────────────────────────────────────────────────────────────┤│
+│  │                                                             ││
+│  │  Alice 端:                                                   ││
+│  │  ├─ 删除已使用的 SOL 笔记                                   ││
+│  │  ├─ 创建新的 USDC 笔记 (100 USDC)                          ││
+│  │  └─ 更新本地 Merkle 树                                      ││
+│  │                                                             ││
+│  │  Bob 端:                                                     ││
+│  │  ├─ 监听链上事件                                            ││
+│  │  ├─ 发现新的承诺属于自己                                    ││
+│  │  └─ 解密并保存新笔记                                        ││
+│  │                                                             ││
+│  └─────────────────────────────────────────────────────────────┘│
+│                                                                 │
+│  结果: Alice 和 Bob 完成隐私交换，链上只看到:                    │
+│  • 两个 Nullifier (无法关联到具体用户)                          │
+│  • 两个新承诺 (无法得知金额和所有者)                            │
+│  • 一个有效证明 (证明交易合法)                                  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+##### 18.43.2.4 并发处理 (Concurrency Handling)
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    乐观执行 + 自动重试策略                        │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  问题: Merkle 根可能在证明生成期间变化                           │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │                    时序冲突场景                              ││
+│  │                                                             ││
+│  │  时间线:                                                     ││
+│  │  ──────────────────────────────────────────────────────►   ││
+│  │                                                             ││
+│  │  t0: Alice 读取 Merkle 根 R0                               ││
+│  │      │                                                      ││
+│  │  t1: │  Alice 开始生成证明 (2-5秒)                          ││
+│  │      │                                                      ││
+│  │  t2: │  Bob 提交交易，Merkle 根变为 R1                      ││
+│  │      │                                                      ││
+│  │  t3: └──► Alice 完成证明 (基于 R0)                          ││
+│  │                                                             ││
+│  │  t4: Alice 提交 → ❌ 失败 (R0 ≠ R1)                         ││
+│  │                                                             ││
+│  └─────────────────────────────────────────────────────────────┘│
+│                                                                 │
+│  解决方案:                                                       │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │ 方案 1: 乐观执行 + 验证重试                                  ││
+│  ├─────────────────────────────────────────────────────────────┤│
+│  │                                                             ││
+│  │  while (retries < MAX_RETRIES) {                           ││
+│  │    current_root = rpc.getMerkleRoot();                     ││
+│  │    proof = generate_proof(current_root, inputs);           ││
+│  │                                                             ││
+│  │    // 提交前再次检查                                         ││
+│  │    if (rpc.getMerkleRoot() == current_root) {              ││
+│  │      submit(proof);                                         ││
+│  │      break;                                                 ││
+│  │    }                                                        ││
+│  │                                                             ││
+│  │    // 根已变化，需要更新路径重新证明                         ││
+│  │    retries++;                                               ││
+│  │  }                                                          ││
+│  │                                                             ││
+│  └─────────────────────────────────────────────────────────────┘│
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │ 方案 2: 增量路径更新 (优化)                                  ││
+│  ├─────────────────────────────────────────────────────────────┤│
+│  │                                                             ││
+│  │  如果只是 Merkle 树新增了叶子:                              ││
+│  │  • 用户的笔记路径可能不变                                   ││
+│  │  • 只需更新顶部几层的哈希值                                 ││
+│  │  • 可以复用大部分证明计算                                   ││
+│  │                                                             ││
+│  │  fn update_path(old_path, tree_updates) -> new_path {      ││
+│  │    // 增量更新，而非完全重算                                 ││
+│  │  }                                                          ││
+│  │                                                             ││
+│  └─────────────────────────────────────────────────────────────┘│
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │ 方案 3: 批量提交窗口                                         ││
+│  ├─────────────────────────────────────────────────────────────┤│
+│  │                                                             ││
+│  │  • 设置固定的提交窗口 (如每 10 秒)                          ││
+│  │  • 窗口内收集所有证明请求                                   ││
+│  │  • 窗口结束时统一验证并提交                                 ││
+│  │  • 减少根变化导致的冲突                                     ││
+│  │                                                             ││
+│  └─────────────────────────────────────────────────────────────┘│
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Zig 实现**:
+
+```zig
+// titan/concurrency.zig - 并发处理
+
+const std = @import("std");
+const titan = @import("titan.zig");
+
+/// 重试配置
+pub const RetryConfig = struct {
+    max_retries: u8 = 3,
+    base_delay_ms: u32 = 100,
+    max_delay_ms: u32 = 5000,
+    backoff_multiplier: f32 = 2.0,
+};
+
+/// 乐观执行器
+pub const OptimisticExecutor = struct {
+    state_manager: *titan.HybridStateManager,
+    config: RetryConfig,
+
+    const Self = @This();
+
+    /// 执行带重试的隐私交易
+    pub fn executeWithRetry(
+        self: *Self,
+        operation: titan.Operation,
+        private_inputs: titan.PrivateInputs,
+    ) !ExecutionResult {
+        var attempt: u8 = 0;
+        var last_error: ?anyerror = null;
+
+        while (attempt < self.config.max_retries) : (attempt += 1) {
+            // 1. 获取当前链上状态
+            const current_root = try self.state_manager.rpc.getMerkleRoot();
+
+            // 2. 更新本地路径 (如果需要)
+            const updated_inputs = try self.updateMerklePath(
+                private_inputs,
+                current_root,
+            );
+
+            // 3. 生成证明
+            const proof = try self.state_manager.generateProof(
+                operation,
+                updated_inputs,
+            );
+
+            // 4. 再次验证根未变化
+            const verify_root = try self.state_manager.rpc.getMerkleRoot();
+
+            if (!std.mem.eql(u8, &current_root, &verify_root)) {
+                // 根已变化，重试
+                last_error = error.MerkleRootChanged;
+
+                // 指数退避延迟
+                const delay = self.calculateBackoff(attempt);
+                std.time.sleep(delay * std.time.ns_per_ms);
+
+                continue;
+            }
+
+            // 5. 构建并提交 PCM
+            const pcm = try self.buildPCM(operation, proof, current_root);
+            const tx_result = try self.state_manager.rpc.sendTransaction(pcm);
+
+            // 6. 等待确认
+            const confirmation = try self.waitForConfirmation(tx_result.signature);
+
+            return ExecutionResult{
+                .success = true,
+                .signature = tx_result.signature,
+                .slot = confirmation.slot,
+                .attempts = attempt + 1,
+            };
+        }
+
+        return last_error orelse error.MaxRetriesExceeded;
+    }
+
+    /// 更新 Merkle 路径
+    fn updateMerklePath(
+        self: *Self,
+        inputs: titan.PrivateInputs,
+        target_root: [32]u8,
+    ) !titan.PrivateInputs {
+        // 检查路径是否仍然有效
+        const computed_root = self.computeRootFromPath(
+            inputs.note_commitment,
+            inputs.merkle_path,
+            inputs.merkle_indices,
+        );
+
+        if (std.mem.eql(u8, &computed_root, &target_root)) {
+            // 路径仍然有效
+            return inputs;
+        }
+
+        // 需要获取新路径
+        var updated = inputs;
+
+        // 获取笔记在树中的位置
+        const leaf_index = try self.state_manager.local_state.getLeafIndex(
+            inputs.note_commitment,
+        );
+
+        // 获取新路径
+        const new_path = try self.state_manager.rpc.getMerklePath(
+            leaf_index,
+            target_root,
+        );
+
+        updated.merkle_path = new_path.siblings;
+        updated.merkle_indices = new_path.indices;
+
+        return updated;
+    }
+
+    /// 计算退避延迟
+    fn calculateBackoff(self: *Self, attempt: u8) u32 {
+        const base: f32 = @floatFromInt(self.config.base_delay_ms);
+        const multiplier = std.math.pow(f32, self.config.backoff_multiplier, @floatFromInt(attempt));
+        const delay = base * multiplier;
+
+        return @min(
+            @as(u32, @intFromFloat(delay)),
+            self.config.max_delay_ms,
+        );
+    }
+
+    /// 构建 PCM
+    fn buildPCM(
+        self: *Self,
+        operation: titan.Operation,
+        proof: titan.zk.Proof,
+        merkle_root: [32]u8,
+    ) !titan.ProofCarryingMessage {
+        return titan.ProofCarryingMessage{
+            .command = operation.toCommand(),
+            .params_commitment = operation.paramsHash(),
+            .identifier = .{
+                .origin = self.state_manager.local_state.owner,
+                .nonce = self.state_manager.nextNonce(),
+                .timestamp = std.time.timestamp(),
+            },
+            .proof = proof,
+            .public_outputs = .{
+                .merkle_root = merkle_root,
+                .nullifier = operation.computeNullifier(),
+                .output_commitment = operation.computeOutputCommitment(),
+            },
+        };
+    }
+
+    /// 等待交易确认
+    fn waitForConfirmation(
+        self: *Self,
+        signature: [64]u8,
+    ) !ConfirmationResult {
+        const timeout = 30 * std.time.ns_per_s;
+        const start = std.time.nanoTimestamp();
+
+        while (std.time.nanoTimestamp() - start < timeout) {
+            const status = try self.state_manager.rpc.getSignatureStatus(signature);
+
+            switch (status) {
+                .confirmed => |slot| return .{ .slot = slot },
+                .finalized => |slot| return .{ .slot = slot },
+                .failed => |err| return error.TransactionFailed,
+                .pending => {
+                    std.time.sleep(500 * std.time.ns_per_ms);
+                },
+            }
+        }
+
+        return error.ConfirmationTimeout;
+    }
+};
+
+/// 执行结果
+pub const ExecutionResult = struct {
+    success: bool,
+    signature: [64]u8,
+    slot: u64,
+    attempts: u8,
+};
+
+/// 确认结果
+pub const ConfirmationResult = struct {
+    slot: u64,
+};
+```
+
+##### 18.43.2.5 链上验证器 (On-chain Verifier)
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Solana 链上验证器实现                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  验证器架构:                                                     │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │                   Verifier Router                           ││
+│  │                                                             ││
+│  │   ┌─────────────────────────────────────────────────────┐  ││
+│  │   │  verify(proof, public_values, vk_id) → {0, 1}      │  ││
+│  │   └───────────────────────┬─────────────────────────────┘  ││
+│  │                           │                                 ││
+│  │            ┌──────────────┼──────────────┐                 ││
+│  │            ▼              ▼              ▼                 ││
+│  │   ┌────────────┐  ┌────────────┐  ┌────────────────┐      ││
+│  │   │  VK: swap  │  │ VK: deposit│  │  VK: withdraw  │      ││
+│  │   │  (0x01)    │  │  (0x02)    │  │    (0x03)      │      ││
+│  │   └────────────┘  └────────────┘  └────────────────┘      ││
+│  │                                                             ││
+│  │   验证密钥注册表 (VK Registry):                             ││
+│  │   • 每种操作类型对应一个 VK                                 ││
+│  │   • VK 在程序部署时初始化                                   ││
+│  │   • 可通过治理更新                                          ││
+│  │                                                             ││
+│  └─────────────────────────────────────────────────────────────┘│
+│                                                                 │
+│  CU 消耗分析:                                                    │
+│                                                                 │
+│  ┌──────────────────────────────────────────────┐              │
+│  │  操作                         │  CU 消耗      │              │
+│  ├──────────────────────────────────────────────┤              │
+│  │  Groth16 验证 (alt_bn128)    │  ~200,000 CU │              │
+│  │  Merkle 根验证               │    ~5,000 CU │              │
+│  │  Nullifier 检查              │    ~3,000 CU │              │
+│  │  承诺插入                     │   ~10,000 CU │              │
+│  │  账户读写                     │   ~20,000 CU │              │
+│  ├──────────────────────────────────────────────┤              │
+│  │  总计                         │  ~238,000 CU │              │
+│  │  Solana 限制                  │ 1,400,000 CU │              │
+│  │  剩余空间                     │ 1,162,000 CU │  ✅ 充足    │
+│  └──────────────────────────────────────────────┘              │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Solana 程序 (Rust)**:
+
+```rust
+// programs/privacy_pool/src/lib.rs
+
+use anchor_lang::prelude::*;
+use groth16_solana::verify_proof;
+
+declare_id!("TitanPrivacy11111111111111111111111111111111");
+
+#[program]
+pub mod privacy_pool {
+    use super::*;
+
+    /// 初始化隐私池
+    pub fn initialize(ctx: Context<Initialize>) -> Result<()> {
+        let pool = &mut ctx.accounts.pool;
+        pool.merkle_root = [0u8; 32];
+        pool.tree_size = 0;
+        pool.authority = ctx.accounts.authority.key();
+        Ok(())
+    }
+
+    /// 处理隐私交换
+    pub fn process_swap(
+        ctx: Context<ProcessSwap>,
+        pcm: ProofCarryingMessage,
+    ) -> Result<()> {
+        let pool = &mut ctx.accounts.pool;
+        let nullifier_set = &mut ctx.accounts.nullifier_set;
+
+        // 1. 验证 Merkle 根是最新的
+        require!(
+            pool.merkle_root == pcm.public_outputs.merkle_root,
+            ErrorCode::InvalidMerkleRoot
+        );
+
+        // 2. 检查 Nullifier 未被使用
+        let nullifier_key = derive_nullifier_key(
+            &pcm.public_outputs.nullifier_a,
+            ctx.accounts.nullifier_set.key(),
+        );
+        require!(
+            !nullifier_set.is_spent(&pcm.public_outputs.nullifier_a),
+            ErrorCode::NullifierAlreadyUsed
+        );
+        require!(
+            !nullifier_set.is_spent(&pcm.public_outputs.nullifier_b),
+            ErrorCode::NullifierAlreadyUsed
+        );
+
+        // 3. 验证 ZK 证明 (核心 ~200K CU)
+        let vk = get_verification_key(VKType::Swap);
+
+        let public_inputs = [
+            pcm.public_outputs.merkle_root,
+            pcm.public_outputs.nullifier_a,
+            pcm.public_outputs.nullifier_b,
+            pcm.public_outputs.output_commitment_a,
+            pcm.public_outputs.output_commitment_b,
+            pool.get_state_hash(),
+        ];
+
+        let is_valid = verify_proof(
+            &vk,
+            &pcm.proof,
+            &public_inputs,
+        )?;
+
+        require!(is_valid, ErrorCode::InvalidProof);
+
+        // 4. 记录 Nullifiers (防止双花)
+        nullifier_set.mark_spent(&pcm.public_outputs.nullifier_a)?;
+        nullifier_set.mark_spent(&pcm.public_outputs.nullifier_b)?;
+
+        // 5. 插入新承诺到 Merkle 树
+        pool.insert_commitment(&pcm.public_outputs.output_commitment_a)?;
+        pool.insert_commitment(&pcm.public_outputs.output_commitment_b)?;
+
+        // 6. 发出事件
+        emit!(SwapEvent {
+            nullifier_a: pcm.public_outputs.nullifier_a,
+            nullifier_b: pcm.public_outputs.nullifier_b,
+            commitment_a: pcm.public_outputs.output_commitment_a,
+            commitment_b: pcm.public_outputs.output_commitment_b,
+            new_merkle_root: pool.merkle_root,
+            timestamp: Clock::get()?.unix_timestamp,
+        });
+
+        Ok(())
+    }
+
+    /// 处理存款 (将公开代币转为隐私笔记)
+    pub fn deposit(
+        ctx: Context<Deposit>,
+        amount: u64,
+        commitment: [u8; 32],
+    ) -> Result<()> {
+        let pool = &mut ctx.accounts.pool;
+
+        // 1. 转移代币到池子
+        anchor_spl::token::transfer(
+            CpiContext::new(
+                ctx.accounts.token_program.to_account_info(),
+                anchor_spl::token::Transfer {
+                    from: ctx.accounts.user_token_account.to_account_info(),
+                    to: ctx.accounts.pool_token_account.to_account_info(),
+                    authority: ctx.accounts.user.to_account_info(),
+                },
+            ),
+            amount,
+        )?;
+
+        // 2. 插入承诺到 Merkle 树
+        pool.insert_commitment(&commitment)?;
+
+        // 3. 发出事件
+        emit!(DepositEvent {
+            commitment,
+            amount,
+            new_merkle_root: pool.merkle_root,
+            leaf_index: pool.tree_size - 1,
+        });
+
+        Ok(())
+    }
+
+    /// 处理提款 (将隐私笔记转为公开代币)
+    pub fn withdraw(
+        ctx: Context<Withdraw>,
+        pcm: WithdrawPCM,
+    ) -> Result<()> {
+        let pool = &mut ctx.accounts.pool;
+        let nullifier_set = &mut ctx.accounts.nullifier_set;
+
+        // 1. 验证 Merkle 根
+        require!(
+            pool.merkle_root == pcm.merkle_root,
+            ErrorCode::InvalidMerkleRoot
+        );
+
+        // 2. 检查 Nullifier
+        require!(
+            !nullifier_set.is_spent(&pcm.nullifier),
+            ErrorCode::NullifierAlreadyUsed
+        );
+
+        // 3. 验证证明
+        let vk = get_verification_key(VKType::Withdraw);
+        let public_inputs = [
+            pcm.merkle_root,
+            pcm.nullifier,
+            pcm.recipient.to_bytes(),
+            pcm.amount.to_le_bytes(),
+        ];
+
+        require!(
+            verify_proof(&vk, &pcm.proof, &public_inputs)?,
+            ErrorCode::InvalidProof
+        );
+
+        // 4. 标记 Nullifier
+        nullifier_set.mark_spent(&pcm.nullifier)?;
+
+        // 5. 转移代币给用户
+        let pool_seeds = &[b"pool", &[ctx.bumps.pool]];
+        anchor_spl::token::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                anchor_spl::token::Transfer {
+                    from: ctx.accounts.pool_token_account.to_account_info(),
+                    to: ctx.accounts.recipient_token_account.to_account_info(),
+                    authority: pool.to_account_info(),
+                },
+                &[pool_seeds],
+            ),
+            pcm.amount,
+        )?;
+
+        emit!(WithdrawEvent {
+            nullifier: pcm.nullifier,
+            recipient: pcm.recipient,
+            amount: pcm.amount,
+        });
+
+        Ok(())
+    }
+}
+
+/// PCM 数据结构
+#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
+pub struct ProofCarryingMessage {
+    pub command: Command,
+    pub params_commitment: [u8; 32],
+    pub identifier: Identifier,
+    pub proof: Groth16Proof,
+    pub public_outputs: SwapPublicOutputs,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
+pub struct Identifier {
+    pub origin: Pubkey,
+    pub nonce: u64,
+    pub timestamp: i64,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
+pub struct SwapPublicOutputs {
+    pub merkle_root: [u8; 32],
+    pub nullifier_a: [u8; 32],
+    pub nullifier_b: [u8; 32],
+    pub output_commitment_a: [u8; 32],
+    pub output_commitment_b: [u8; 32],
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
+pub struct Groth16Proof {
+    pub a: [u8; 64],  // G1 点
+    pub b: [u8; 128], // G2 点
+    pub c: [u8; 64],  // G1 点
+}
+
+/// 隐私池状态
+#[account]
+pub struct PrivacyPool {
+    pub authority: Pubkey,
+    pub merkle_root: [u8; 32],
+    pub tree_size: u64,
+    pub bump: u8,
+}
+
+impl PrivacyPool {
+    pub fn insert_commitment(&mut self, commitment: &[u8; 32]) -> Result<()> {
+        // 简化实现: 实际需要维护完整 Merkle 树
+        // 这里使用链下索引器计算新根
+        self.merkle_root = self.compute_new_root(commitment);
+        self.tree_size += 1;
+        Ok(())
+    }
+
+    fn compute_new_root(&self, new_leaf: &[u8; 32]) -> [u8; 32] {
+        // 使用 Poseidon 哈希更新根
+        // 实际实现需要链下索引器辅助
+        solana_program::keccak::hash(&[&self.merkle_root[..], &new_leaf[..]].concat()).0
+    }
+
+    pub fn get_state_hash(&self) -> [u8; 32] {
+        solana_program::keccak::hash(&self.try_to_vec().unwrap()).0
+    }
+}
+
+/// Nullifier 集合
+#[account]
+pub struct NullifierSet {
+    pub nullifiers: Vec<[u8; 32]>,
+}
+
+impl NullifierSet {
+    pub fn is_spent(&self, nullifier: &[u8; 32]) -> bool {
+        self.nullifiers.contains(nullifier)
+    }
+
+    pub fn mark_spent(&mut self, nullifier: &[u8; 32]) -> Result<()> {
+        self.nullifiers.push(*nullifier);
+        Ok(())
+    }
+}
+
+/// 事件定义
+#[event]
+pub struct SwapEvent {
+    pub nullifier_a: [u8; 32],
+    pub nullifier_b: [u8; 32],
+    pub commitment_a: [u8; 32],
+    pub commitment_b: [u8; 32],
+    pub new_merkle_root: [u8; 32],
+    pub timestamp: i64,
+}
+
+#[event]
+pub struct DepositEvent {
+    pub commitment: [u8; 32],
+    pub amount: u64,
+    pub new_merkle_root: [u8; 32],
+    pub leaf_index: u64,
+}
+
+#[event]
+pub struct WithdrawEvent {
+    pub nullifier: [u8; 32],
+    pub recipient: Pubkey,
+    pub amount: u64,
+}
+
+#[error_code]
+pub enum ErrorCode {
+    #[msg("Invalid Merkle root")]
+    InvalidMerkleRoot,
+    #[msg("Nullifier already used")]
+    NullifierAlreadyUsed,
+    #[msg("Invalid ZK proof")]
+    InvalidProof,
+}
+```
+
+#### 18.43.3 完整数据流
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         MVP 完整数据流                                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌──────────────────────────────────────────────────────────────────────┐  │
+│  │ Step 1: 用户发起交换请求                                              │  │
+│  │                                                                      │  │
+│  │   $ titan swap 10 SOL -> USDC                                        │  │
+│  │                                                                      │  │
+│  │   输入:                                                               │  │
+│  │   • 用户持有的 SOL 笔记 (本地加密存储)                               │  │
+│  │   • 期望获得的 USDC 数量                                             │  │
+│  │                                                                      │  │
+│  └────────────────────────────────┬─────────────────────────────────────┘  │
+│                                   │                                         │
+│                                   ▼                                         │
+│  ┌──────────────────────────────────────────────────────────────────────┐  │
+│  │ Step 2: 链下状态查询                                                  │  │
+│  │                                                                      │  │
+│  │   查询内容:                                                           │  │
+│  │   ├─ 当前 Merkle 根 (RPC: getAccountData)                           │  │
+│  │   ├─ 池子储备量 (计算汇率)                                           │  │
+│  │   └─ 用户笔记在树中的路径                                            │  │
+│  │                                                                      │  │
+│  │   结果:                                                               │  │
+│  │   ├─ merkle_root: 0x1234...                                         │  │
+│  │   ├─ exchange_rate: 10.05 USDC/SOL                                  │  │
+│  │   └─ merkle_path: [h0, h1, ..., h19]                                │  │
+│  │                                                                      │  │
+│  └────────────────────────────────┬─────────────────────────────────────┘  │
+│                                   │                                         │
+│                                   ▼                                         │
+│  ┌──────────────────────────────────────────────────────────────────────┐  │
+│  │ Step 3: ZK 证明生成 (链下，~2-5秒)                                    │  │
+│  │                                                                      │  │
+│  │   ┌────────────────────────────────────────────────────────────────┐│  │
+│  │   │  Noir Circuit Prover (via C ABI)                               ││  │
+│  │   │                                                                ││  │
+│  │   │  Private Inputs:                      Public Outputs:         ││  │
+│  │   │  ├─ amount: 10 SOL                   ├─ nullifier: 0xabc...  ││  │
+│  │   │  ├─ sender_key: 0xprivkey...         ├─ commitment: 0xdef... ││  │
+│  │   │  ├─ merkle_path: [...]               └─ merkle_root: 0x123..  ││  │
+│  │   │  └─ note_preimage: [...]                                      ││  │
+│  │   │                                                                ││  │
+│  │   │  Output: Groth16 Proof (192 bytes)                            ││  │
+│  │   └────────────────────────────────────────────────────────────────┘│  │
+│  │                                                                      │  │
+│  └────────────────────────────────┬─────────────────────────────────────┘  │
+│                                   │                                         │
+│                                   ▼                                         │
+│  ┌──────────────────────────────────────────────────────────────────────┐  │
+│  │ Step 4: 客户端验证 (三重安全)                                         │  │
+│  │                                                                      │  │
+│  │   ✓ Check 1: 证明有效性                                              │  │
+│  │      noir_verify_proof(proof, public_outputs) == true               │  │
+│  │                                                                      │  │
+│  │   ✓ Check 2: Merkle 根一致                                           │  │
+│  │      rpc.getMerkleRoot() == proof.merkle_root                       │  │
+│  │                                                                      │  │
+│  │   ✓ Check 3: 参数匹配用户意图                                        │  │
+│  │      proof.output_amount == user_requested_amount                   │  │
+│  │                                                                      │  │
+│  └────────────────────────────────┬─────────────────────────────────────┘  │
+│                                   │                                         │
+│                                   ▼                                         │
+│  ┌──────────────────────────────────────────────────────────────────────┐  │
+│  │ Step 5: 构建 PCM 并提交                                               │  │
+│  │                                                                      │  │
+│  │   PCM = {                                                            │  │
+│  │     command: "swap",                                                 │  │
+│  │     params_commitment: keccak256(10, SOL, USDC),                    │  │
+│  │     identifier: { origin, nonce, timestamp },                       │  │
+│  │     proof: <192 bytes>,                                             │  │
+│  │     public_outputs: { merkle_root, nullifier, commitment }          │  │
+│  │   }                                                                  │  │
+│  │                                                                      │  │
+│  │   Transaction: solana send privacy_pool::process_swap(PCM)          │  │
+│  │                                                                      │  │
+│  └────────────────────────────────┬─────────────────────────────────────┘  │
+│                                   │                                         │
+│                                   ▼                                         │
+│  ┌──────────────────────────────────────────────────────────────────────┐  │
+│  │ Step 6: 链上验证执行 (~250K CU)                                       │  │
+│  │                                                                      │  │
+│  │   Solana Program 执行:                                                │  │
+│  │                                                                      │  │
+│  │   ├─ 1. require!(pool.merkle_root == pcm.merkle_root)    [5K CU]   │  │
+│  │   ├─ 2. require!(!nullifier_set.contains(pcm.nullifier)) [3K CU]   │  │
+│  │   ├─ 3. verify_groth16(proof, public_inputs)             [200K CU] │  │
+│  │   ├─ 4. nullifier_set.insert(pcm.nullifier)              [10K CU]  │  │
+│  │   └─ 5. pool.insert_commitment(pcm.commitment)           [10K CU]  │  │
+│  │                                                                      │  │
+│  │   Result: ✅ 交易成功, slot: 123456789                               │  │
+│  │                                                                      │  │
+│  └────────────────────────────────┬─────────────────────────────────────┘  │
+│                                   │                                         │
+│                                   ▼                                         │
+│  ┌──────────────────────────────────────────────────────────────────────┐  │
+│  │ Step 7: 状态同步                                                      │  │
+│  │                                                                      │  │
+│  │   客户端:                                                             │  │
+│  │   ├─ 删除已使用的 SOL 笔记                                           │  │
+│  │   ├─ 创建新的 USDC 笔记 (100.5 USDC)                                │  │
+│  │   └─ 更新本地 Merkle 树                                              │  │
+│  │                                                                      │  │
+│  │   输出:                                                               │  │
+│  │   $ titan balance                                                    │  │
+│  │   SOL:  0.0 (private)                                               │  │
+│  │   USDC: 100.5 (private)                                             │  │
+│  │                                                                      │  │
+│  └──────────────────────────────────────────────────────────────────────┘  │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.43.4 技术挑战与解决方案
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    技术挑战与解决方案矩阵                         │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ┌───────────────────────────────────────────────────────────┐ │
+│  │ 挑战 1: Trusted Setup                                     │ │
+│  ├───────────────────────────────────────────────────────────┤ │
+│  │                                                           │ │
+│  │  问题: Groth16 需要可信设置，存在安全风险                   │ │
+│  │                                                           │ │
+│  │  解决方案:                                                 │ │
+│  │  ├─ 使用 Zcash Powers of Tau ceremony (已有 10万+ 参与者) │ │
+│  │  ├─ 或者使用 Aztec/Hermez 的 ceremony                     │ │
+│  │  └─ 未来可迁移到 PLONK (无需可信设置)                      │ │
+│  │                                                           │ │
+│  │  MVP 策略: 直接使用现有 ceremony 结果，不自己做            │ │
+│  │                                                           │ │
+│  └───────────────────────────────────────────────────────────┘ │
+│                                                                 │
+│  ┌───────────────────────────────────────────────────────────┐ │
+│  │ 挑战 2: 证明生成时间                                       │ │
+│  ├───────────────────────────────────────────────────────────┤ │
+│  │                                                           │ │
+│  │  问题: ZK 证明生成可能需要 2-30 秒                         │ │
+│  │                                                           │ │
+│  │  解决方案:                                                 │ │
+│  │  ├─ 使用 Noir 优化的电路 (~2-5 秒)                        │ │
+│  │  ├─ GPU 加速 (CUDA/Metal)                                 │ │
+│  │  ├─ 预计算常用路径                                        │ │
+│  │  └─ 异步生成，用户可同时进行其他操作                       │ │
+│  │                                                           │ │
+│  │  MVP 策略: 接受 2-5 秒延迟，显示进度条                     │ │
+│  │                                                           │ │
+│  └───────────────────────────────────────────────────────────┘ │
+│                                                                 │
+│  ┌───────────────────────────────────────────────────────────┐ │
+│  │ 挑战 3: Merkle 树大小                                      │ │
+│  ├───────────────────────────────────────────────────────────┤ │
+│  │                                                           │ │
+│  │  问题: 链上无法存储完整 Merkle 树                          │ │
+│  │                                                           │ │
+│  │  解决方案:                                                 │ │
+│  │  ├─ 链上只存储根 (32 bytes)                               │ │
+│  │  ├─ 使用链下索引器维护完整树                               │ │
+│  │  ├─ 客户端本地维护用户相关的子树                           │ │
+│  │  └─ 增量更新优化                                          │ │
+│  │                                                           │ │
+│  │  MVP 策略: 使用 Helius 索引器 + 本地轻量同步              │ │
+│  │                                                           │ │
+│  └───────────────────────────────────────────────────────────┘ │
+│                                                                 │
+│  ┌───────────────────────────────────────────────────────────┐ │
+│  │ 挑战 4: 用户密钥管理                                       │ │
+│  ├───────────────────────────────────────────────────────────┤ │
+│  │                                                           │ │
+│  │  问题: 用户需要管理 Solana 密钥 + 隐私密钥                 │ │
+│  │                                                           │ │
+│  │  解决方案:                                                 │ │
+│  │  ├─ 从 Solana 密钥派生隐私密钥 (BIP-340 风格)             │ │
+│  │  ├─ 用户只需记住一个助记词                                 │ │
+│  │  └─ 本地加密存储隐私密钥                                   │ │
+│  │                                                           │ │
+│  │  派生方案:                                                 │ │
+│  │  privacy_key = keccak256(sign(solana_key, "titan-privacy"))│ │
+│  │                                                           │ │
+│  └───────────────────────────────────────────────────────────┘ │
+│                                                                 │
+│  ┌───────────────────────────────────────────────────────────┐ │
+│  │ 挑战 5: 多资产支持                                         │ │
+│  ├───────────────────────────────────────────────────────────┤ │
+│  │                                                           │ │
+│  │  问题: 不同代币需要不同的池子和电路                        │ │
+│  │                                                           │ │
+│  │  解决方案:                                                 │ │
+│  │  ├─ 电路参数化 (asset_id 作为输入)                        │ │
+│  │  ├─ 统一的笔记格式 (asset, amount, owner, nonce)          │ │
+│  │  └─ 单一 Merkle 树存储所有资产的笔记                       │ │
+│  │                                                           │ │
+│  │  MVP 策略: 先支持 SOL + USDC，后续扩展                     │ │
+│  │                                                           │ │
+│  └───────────────────────────────────────────────────────────┘ │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.43.5 MVP 组件清单
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    MVP 交付物清单                                │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  1. ZK 电路 (Noir)                                              │
+│  ┌───────────────────────────────────────────────────────────┐ │
+│  │  circuits/                                                 │ │
+│  │  ├── private_swap.nr     # 隐私交换电路                   │ │
+│  │  ├── deposit.nr          # 存款电路                       │ │
+│  │  ├── withdraw.nr         # 提款电路                       │ │
+│  │  └── lib/                                                  │ │
+│  │      ├── merkle.nr       # Merkle 树验证                  │ │
+│  │      ├── nullifier.nr    # Nullifier 计算                 │ │
+│  │      └── pedersen.nr     # Pedersen 承诺                  │ │
+│  │                                                           │ │
+│  │  编译输出:                                                 │ │
+│  │  ├── swap.acir           # 编译后的电路                   │ │
+│  │  ├── swap.vk             # 验证密钥                       │ │
+│  │  └── swap.pk             # 证明密钥                       │ │
+│  └───────────────────────────────────────────────────────────┘ │
+│                                                                 │
+│  2. Titan CLI/SDK (Zig)                                         │
+│  ┌───────────────────────────────────────────────────────────┐ │
+│  │  titan/                                                    │ │
+│  │  ├── main.zig            # CLI 入口                       │ │
+│  │  ├── zk.zig              # ZK 证明 C ABI 绑定             │ │
+│  │  ├── state.zig           # 混合状态管理                   │ │
+│  │  ├── pcm.zig             # PCM 构建                       │ │
+│  │  ├── concurrency.zig     # 并发处理                       │ │
+│  │  ├── merkle.zig          # Merkle 树实现                  │ │
+│  │  └── rpc.zig             # Solana RPC 客户端              │ │
+│  │                                                           │ │
+│  │  CLI 命令:                                                 │ │
+│  │  ├── titan init          # 初始化钱包                     │ │
+│  │  ├── titan deposit       # 存款                           │ │
+│  │  ├── titan withdraw      # 提款                           │ │
+│  │  ├── titan swap          # 隐私交换                       │ │
+│  │  ├── titan balance       # 查看余额                       │ │
+│  │  └── titan sync          # 同步状态                       │ │
+│  └───────────────────────────────────────────────────────────┘ │
+│                                                                 │
+│  3. 链上合约 (Rust/Anchor)                                      │
+│  ┌───────────────────────────────────────────────────────────┐ │
+│  │  programs/privacy_pool/                                    │ │
+│  │  ├── src/                                                  │ │
+│  │  │   ├── lib.rs          # 主程序                         │ │
+│  │  │   ├── state.rs        # 状态定义                       │ │
+│  │  │   ├── verifier.rs     # Groth16 验证器                 │ │
+│  │  │   └── merkle.rs       # 链上 Merkle 操作               │ │
+│  │  ├── tests/                                                │ │
+│  │  │   └── integration.rs  # 集成测试                       │ │
+│  │  └── Anchor.toml                                           │ │
+│  │                                                           │ │
+│  │  部署地址: TitanPrivacy11111111111111111111111111111111   │ │
+│  └───────────────────────────────────────────────────────────┘ │
+│                                                                 │
+│  4. C ABI 包装层                                                │
+│  ┌───────────────────────────────────────────────────────────┐ │
+│  │  lib/                                                      │ │
+│  │  ├── libnoir_bridge.so   # Noir 证明器 C 库               │ │
+│  │  ├── noir_bridge.h       # C 头文件                       │ │
+│  │  └── build.rs            # 构建脚本                       │ │
+│  │                                                           │ │
+│  │  C ABI 函数:                                               │ │
+│  │  ├── noir_init_circuit()                                   │ │
+│  │  ├── noir_generate_proof()                                 │ │
+│  │  ├── noir_verify_proof()                                   │ │
+│  │  ├── noir_pedersen_hash()                                  │ │
+│  │  └── noir_free_circuit()                                   │ │
+│  └───────────────────────────────────────────────────────────┘ │
+│                                                                 │
+│  5. 测试与文档                                                  │
+│  ┌───────────────────────────────────────────────────────────┐ │
+│  │  tests/                                                    │ │
+│  │  ├── e2e/                                                  │ │
+│  │  │   ├── deposit_test.zig                                 │ │
+│  │  │   ├── withdraw_test.zig                                │ │
+│  │  │   └── swap_test.zig                                    │ │
+│  │  └── unit/                                                 │ │
+│  │      ├── merkle_test.zig                                  │ │
+│  │      └── pcm_test.zig                                     │ │
+│  │                                                           │ │
+│  │  docs/                                                     │ │
+│  │  ├── README.md           # 快速开始                       │ │
+│  │  ├── ARCHITECTURE.md     # 架构说明                       │ │
+│  │  └── SECURITY.md         # 安全考虑                       │ │
+│  └───────────────────────────────────────────────────────────┘ │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.43.6 三日实现计划
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    MVP 三日实现计划                              │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Day 1: 基础设施                                                 │
+│  ┌───────────────────────────────────────────────────────────┐ │
+│  │                                                           │ │
+│  │  上午:                                                     │ │
+│  │  ├─ [ ] 设置 Noir 开发环境                                │ │
+│  │  ├─ [ ] 编写 Pedersen 承诺电路                            │ │
+│  │  └─ [ ] 编写 Merkle 树验证电路                            │ │
+│  │                                                           │ │
+│  │  下午:                                                     │ │
+│  │  ├─ [ ] 编写 Nullifier 计算电路                           │ │
+│  │  ├─ [ ] 集成测试基础电路                                   │ │
+│  │  └─ [ ] 构建 C ABI 包装层                                 │ │
+│  │                                                           │ │
+│  │  晚上:                                                     │ │
+│  │  ├─ [ ] Zig 项目初始化                                    │ │
+│  │  └─ [ ] 实现 C ABI 绑定 (zk.zig)                          │ │
+│  │                                                           │ │
+│  │  交付物: 可工作的 ZK 电路 + Zig 绑定                       │ │
+│  │                                                           │ │
+│  └───────────────────────────────────────────────────────────┘ │
+│                                                                 │
+│  Day 2: 核心功能                                                 │
+│  ┌───────────────────────────────────────────────────────────┐ │
+│  │                                                           │ │
+│  │  上午:                                                     │ │
+│  │  ├─ [ ] 编写存款电路 (deposit.nr)                         │ │
+│  │  ├─ [ ] 编写提款电路 (withdraw.nr)                        │ │
+│  │  └─ [ ] 实现 Zig 状态管理 (state.zig)                     │ │
+│  │                                                           │ │
+│  │  下午:                                                     │ │
+│  │  ├─ [ ] 编写隐私交换电路 (swap.nr)                        │ │
+│  │  ├─ [ ] 实现 PCM 构建 (pcm.zig)                           │ │
+│  │  └─ [ ] 实现并发处理 (concurrency.zig)                    │ │
+│  │                                                           │ │
+│  │  晚上:                                                     │ │
+│  │  ├─ [ ] 实现 CLI 框架                                     │ │
+│  │  └─ [ ] 本地端到端测试                                    │ │
+│  │                                                           │ │
+│  │  交付物: 完整 CLI + 本地测试通过                           │ │
+│  │                                                           │ │
+│  └───────────────────────────────────────────────────────────┘ │
+│                                                                 │
+│  Day 3: 链上集成                                                 │
+│  ┌───────────────────────────────────────────────────────────┐ │
+│  │                                                           │ │
+│  │  上午:                                                     │ │
+│  │  ├─ [ ] 编写 Anchor 程序框架                              │ │
+│  │  ├─ [ ] 实现 Groth16 验证器                               │ │
+│  │  └─ [ ] 实现 Nullifier 集合                               │ │
+│  │                                                           │ │
+│  │  下午:                                                     │ │
+│  │  ├─ [ ] 部署到 Devnet                                     │ │
+│  │  ├─ [ ] 端到端集成测试                                    │ │
+│  │  └─ [ ] 修复发现的问题                                    │ │
+│  │                                                           │ │
+│  │  晚上:                                                     │ │
+│  │  ├─ [ ] 编写文档                                          │ │
+│  │  ├─ [ ] 录制 Demo 视频                                    │ │
+│  │  └─ [ ] 准备提交材料                                      │ │
+│  │                                                           │ │
+│  │  交付物: Devnet 部署 + Demo + 文档                         │ │
+│  │                                                           │ │
+│  └───────────────────────────────────────────────────────────┘ │
+│                                                                 │
+│  风险缓解:                                                       │
+│  ├─ 如果 Noir 编译慢 → 使用预编译的电路                        │
+│  ├─ 如果 CU 超限 → 简化电路或使用 syscall                      │
+│  └─ 如果时间不够 → 优先保证 deposit + withdraw                 │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.43.7 成功标准
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    MVP 成功标准                                  │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  功能验证:                                                       │
+│  ┌───────────────────────────────────────────────────────────┐ │
+│  │                                                           │ │
+│  │  ✓ 用户可以将 SOL 存入隐私池                              │ │
+│  │    $ titan deposit 10 SOL                                 │ │
+│  │    > Deposited 10 SOL. Note commitment: 0xabc...         │ │
+│  │                                                           │ │
+│  │  ✓ 用户可以查看隐私余额                                   │ │
+│  │    $ titan balance                                        │ │
+│  │    > SOL: 10.0 (private)                                 │ │
+│  │                                                           │ │
+│  │  ✓ 用户可以进行隐私交换                                   │ │
+│  │    $ titan swap 10 SOL -> USDC                           │ │
+│  │    > Generating proof... (3.2s)                          │ │
+│  │    > Swap complete. Received 100.5 USDC                  │ │
+│  │                                                           │ │
+│  │  ✓ 用户可以提取隐私资产                                   │ │
+│  │    $ titan withdraw 50 USDC                              │ │
+│  │    > Withdrew 50 USDC to wallet                          │ │
+│  │                                                           │ │
+│  └───────────────────────────────────────────────────────────┘ │
+│                                                                 │
+│  安全验证:                                                       │
+│  ┌───────────────────────────────────────────────────────────┐ │
+│  │                                                           │ │
+│  │  ✓ 链上只能看到:                                          │ │
+│  │    • Nullifiers (无法关联用户身份)                        │ │
+│  │    • Commitments (无法得知金额)                           │ │
+│  │    • 有效证明 (无法伪造)                                  │ │
+│  │                                                           │ │
+│  │  ✓ 无法双花 (Nullifier 检查)                              │ │
+│  │  ✓ 无法伪造余额 (ZK 证明约束)                             │ │
+│  │  ✓ 无法关联交易 (承诺机制)                                │ │
+│  │                                                           │ │
+│  └───────────────────────────────────────────────────────────┘ │
+│                                                                 │
+│  性能指标:                                                       │
+│  ┌───────────────────────────────────────────────────────────┐ │
+│  │                                                           │ │
+│  │  目标                              │ 实际                  │ │
+│  │  ──────────────────────────────────┼────────────────────  │ │
+│  │  证明生成时间                       │  < 5 秒              │ │
+│  │  链上验证 CU                        │  < 300K CU           │ │
+│  │  交易确认时间                       │  < 1 秒              │ │
+│  │  证明大小                           │  ~192 bytes          │ │
+│  │                                                           │ │
+│  └───────────────────────────────────────────────────────────┘ │
+│                                                                 │
+│  评审标准 (Hackathon):                                           │
+│  ┌───────────────────────────────────────────────────────────┐ │
+│  │                                                           │ │
+│  │  创新性:                                                   │ │
+│  │  • 首个 Zig + Noir 的隐私方案                             │ │
+│  │  • 基于 arXiv 学术论文的严谨实现                          │ │
+│  │  • Pure Zig 架构 (零 Python 依赖)                         │ │
+│  │                                                           │ │
+│  │  实用性:                                                   │ │
+│  │  • 完整的 CLI 体验                                        │ │
+│  │  • Devnet 可验证                                          │ │
+│  │  • 清晰的文档                                             │ │
+│  │                                                           │ │
+│  │  技术深度:                                                 │ │
+│  │  • 五大安全不变量实现                                     │ │
+│  │  • PCM 协议实现                                           │ │
+│  │  • 完整的状态管理                                         │ │
+│  │                                                           │ │
+│  └───────────────────────────────────────────────────────────┘ │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.43.8 与论文理论的对应关系
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    MVP 与论文理论映射                            │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  论文概念                           MVP 实现                     │
+│  ─────────────────────────────────────────────────────────────  │
+│                                                                 │
+│  Two-Axis Model                                                 │
+│  ├─ Proof Surface (链上验证)       │ Groth16 Verifier          │
+│  └─ Private Execution (链下执行)   │ Titan CLI + Noir          │
+│                                                                 │
+│  PCM Tuple (m, Com(θ), i, π)                                    │
+│  ├─ m (command)                    │ "swap", "deposit", etc.   │
+│  ├─ Com(θ) (params commitment)     │ Pedersen 承诺              │
+│  ├─ i (identifier)                 │ {origin, nonce, timestamp}│
+│  └─ π (proof)                      │ Groth16 证明              │
+│                                                                 │
+│  Five Security Invariants                                       │
+│  ├─ Origin Authenticity            │ i.origin = sender.pubkey  │
+│  ├─ Replay Safety                  │ Nullifier Set             │
+│  ├─ Finality Alignment             │ Merkle Root 验证          │
+│  ├─ Parameter Binding              │ Com(θ) 约束               │
+│  └─ Private Consumption            │ 证明消费即销毁            │
+│                                                                 │
+│  Verifier Router Interface                                      │
+│  └─ verify(π, pub, vk_id) → {0,1}  │ process_swap() 内的验证   │
+│                                                                 │
+│  Application Patterns                                           │
+│  ├─ ZK Compression                 │ (未来扩展)                │
+│  ├─ Confidential Transfers         │ ✅ 隐私交换               │
+│  └─ Light Clients                  │ (未来扩展)                │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
 ## 相关文档
 
 | 文档 | 说明 |
