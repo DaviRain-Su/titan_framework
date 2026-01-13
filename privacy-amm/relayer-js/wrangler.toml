@@ -1,10 +1,37 @@
+# Cloudflare Workers Configuration for Privacy AMM Relayer
+# See: https://developers.cloudflare.com/workers/wrangler/configuration/
+
 name = "privacy-amm-relayer"
 main = "src/index.js"
 compatibility_date = "2024-01-01"
 
+# Account ID - Set this to your Cloudflare account ID
+# account_id = "your-account-id"
+
+# Environment Variables (non-secrets)
 [vars]
 SOLANA_RPC_URL = "https://api.testnet.solana.com"
-PROGRAM_ID = "7DGg2ouvHsZecGDocaY1nu6ZmSDvSq9NsLSHd16ENHbQ"
+PROGRAM_ID = "GZfqgHqekzR4D8TAq165XB8U2boVdK5ehEEH4n7u4Xts"
 
-# For production, use secrets instead of vars for sensitive data
-# wrangler secret put RELAYER_PRIVATE_KEY
+# Production environment
+[env.production]
+name = "privacy-amm-relayer"
+
+[env.production.vars]
+SOLANA_RPC_URL = "https://api.mainnet-beta.solana.com"
+# PROGRAM_ID will be different on mainnet
+
+# Staging environment (testnet)
+[env.staging]
+name = "privacy-amm-relayer-staging"
+
+[env.staging.vars]
+SOLANA_RPC_URL = "https://api.testnet.solana.com"
+PROGRAM_ID = "GZfqgHqekzR4D8TAq165XB8U2boVdK5ehEEH4n7u4Xts"
+
+# Secrets (set via wrangler secret put):
+# - RELAYER_SECRET_KEY: JSON array of the relayer's secret key bytes
+#
+# Example:
+#   wrangler secret put RELAYER_SECRET_KEY
+#   (paste the JSON array when prompted)

@@ -1,0 +1,13 @@
+# Relayer secrets - NEVER commit these!
+relayer-keypair.json
+.env
+.env.local
+
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Cloudflare
+.wrangler/

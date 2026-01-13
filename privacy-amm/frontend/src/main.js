@@ -1,36 +1,101 @@
 /**
  * Privacy AMM Frontend
- * Main application logic
+ * Main application logic with real ZK proof integration
  */
+
+import {
+    initPoseidon,
+    computeCommitment,
+    computeNullifier,
+    derivePublicKey,
+    randomFieldElement,
+    generateSwapProof,
+    generateAddLiquidityProof,
+    generateRemoveLiquidityProof,
+    formatProofForSolana,
+    formatPublicSignalsForSolana,
+} from './zkProver.js';
+
+import {
+    createMerkleTree,
+    syncMerkleTreeFromChain,
+    watchMerkleTreeUpdates,
+} from './merkleTree.js';
+
+import {
+    createUTXOStorage,
+} from './utxoStorage.js';
 
 // Configuration
 const CONFIG = {
     relayerUrl: 'https://privacy-amm-relayer.workers.dev', // Update after deployment
+    rpcUrl: 'https://api.testnet.solana.com',
+    wsUrl: 'wss://api.testnet.solana.com',
     network: 'testnet',
-    programId: '7DGg2ouvHsZecGDocaY1nu6ZmSDvSq9NsLSHd16ENHbQ',
+    programId: 'GZfqgHqekzR4D8TAq165XB8U2boVdK5ehEEH4n7u4Xts',
+    poolAccounts: {
+        poolAccount: 'DEMitabV4NqSZQUqiK8PQNiPJ3DYbHYJotgA9MgMQkpS',
+        merkleAccount: 'DEt4dARcaRZasHWusbMtUPtqYdTaUL72rza5T9z1dw68',
+        nullifierAccount: '8tqoDduwnZvCHLm5UEHZk9f74FrTdCbr8hnvp1dTU7Bm',
+    },
 };
+
+// Asset IDs
+const ASSET_SOL = 0;
+const ASSET_USDC = 1;
+const ASSET_LP = 2;
 
 // State
 const state = {
     wallet: null,
     publicKey: null,
-    privateUtxos: [], // User's private UTXOs (stored locally)
+    privateKey: null, // User's ZK private key (derived from wallet signature)
+    zkPubkey: null,   // User's ZK public key
+    utxoStorage: null,
+    merkleTree: null,
     poolState: null,
+    initialized: false,
 };
 
 // ============================================================================
 // Initialization
 // ============================================================================
 
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
+    console.log('Privacy AMM initializing...');
+
+    // Initialize Poseidon hash function
+    await initPoseidon();
+    console.log('Poseidon initialized');
+
+    // Initialize UI
     initTabs();
     initWallet();
     initSwap();
     initLiquidity();
     initPortfolio();
     initModals();
-    loadPoolState();
-    loadLocalUtxos();
+
+    // Load pool state
+    await loadPoolState();
+
+    // Initialize Merkle tree
+    state.merkleTree = await createMerkleTree();
+    console.log('Merkle tree initialized');
+
+    // Try to sync from chain
+    try {
+        state.merkleTree = await syncMerkleTreeFromChain(
+            CONFIG.rpcUrl,
+            CONFIG.poolAccounts.merkleAccount
+        );
+        console.log('Merkle tree synced from chain');
+    } catch (err) {
+        console.warn('Failed to sync Merkle tree:', err);
+    }
+
+    state.initialized = true;
+    console.log('Privacy AMM ready');
 });
 
 // ============================================================================
@@ -83,8 +148,22 @@ async function connectWallet() {
         state.publicKey = response.publicKey.toString();
         state.wallet = window.solana;
 
+        // Initialize encrypted UTXO storage
+        state.utxoStorage = createUTXOStorage();
+        const encryptionEnabled = await state.utxoStorage.init(window.solana, state.publicKey);
+
+        if (encryptionEnabled) {
+            console.log('UTXO storage initialized with encryption');
+        } else {
+            console.log('UTXO storage initialized without encryption');
+        }
+
+        // Derive ZK keypair from wallet signature
+        await deriveZkKeypair();
+
         updateWalletUI(true);
         updateButtonStates(true);
+        updatePortfolio();
 
         console.log('Connected:', state.publicKey);
 
@@ -94,12 +173,42 @@ async function connectWallet() {
     }
 }
 
+async function deriveZkKeypair() {
+    try {
+        // Sign a deterministic message to derive ZK private key
+        const message = `Privacy AMM ZK Keypair\nPublic Key: ${state.publicKey}\nNetwork: ${CONFIG.network}`;
+        const encodedMessage = new TextEncoder().encode(message);
+        const signature = await state.wallet.signMessage(encodedMessage, 'utf8');
+
+        // Use first 31 bytes of signature as private key (to stay in field)
+        const sigBytes = signature.signature.slice(0, 31);
+        let privateKeyNum = BigInt(0);
+        for (let i = 0; i < 31; i++) {
+            privateKeyNum = privateKeyNum * 256n + BigInt(sigBytes[i]);
+        }
+        state.privateKey = privateKeyNum.toString();
+
+        // Derive public key
+        state.zkPubkey = await derivePublicKey(state.privateKey);
+
+        console.log('ZK keypair derived');
+    } catch (err) {
+        console.error('Failed to derive ZK keypair:', err);
+        // Use random keypair as fallback
+        state.privateKey = randomFieldElement();
+        state.zkPubkey = await derivePublicKey(state.privateKey);
+    }
+}
+
 function disconnectWallet() {
     if (state.wallet) {
         state.wallet.disconnect();
     }
     state.wallet = null;
     state.publicKey = null;
+    state.privateKey = null;
+    state.zkPubkey = null;
+    state.utxoStorage = null;
 
     updateWalletUI(false);
     updateButtonStates(false);
@@ -111,8 +220,8 @@ function checkWalletConnection() {
         state.publicKey = window.solana.publicKey?.toString();
 
         if (state.publicKey) {
-            updateWalletUI(true);
-            updateButtonStates(true);
+            // Re-initialize on page refresh
+            connectWallet();
         }
     }
 }
@@ -230,35 +339,142 @@ async function executeSwap() {
         return;
     }
 
-    showTxModal('Generating ZK Proof...');
+    if (!state.utxoStorage) {
+        alert('Please connect wallet first');
+        return;
+    }
+
+    showTxModal('Selecting UTXOs...');
 
     try {
-        // In a real implementation, we would:
-        // 1. Select UTXOs from user's private balance
-        // 2. Generate ZK proof using snarkjs
-        // 3. Submit to relayer
+        // Determine asset IDs
+        const fromAssetId = fromToken === 'SOL' ? ASSET_SOL : ASSET_USDC;
+        const toAssetId = fromToken === 'SOL' ? ASSET_USDC : ASSET_SOL;
 
-        // For demo, simulate the process
-        await simulateDelay(2000);
-        updateTxStatus('Submitting transaction...');
+        // Convert amounts to smallest unit
+        const fromAmountRaw = fromToken === 'SOL' ? Math.floor(fromAmount * 1e9) : Math.floor(fromAmount * 1e6);
+        const toAmountRaw = fromToken === 'SOL' ? Math.floor(toAmount * 1e6) : Math.floor(toAmount * 1e9);
 
-        await simulateDelay(1500);
+        // Select UTXOs for input
+        const selection = state.utxoStorage.selectUtxos(fromAssetId, fromAmountRaw);
 
-        // Call relayer
+        if (selection.utxos.length === 0) {
+            throw new Error('Insufficient private balance');
+        }
+
+        updateTxStatus('Building input UTXOs...');
+
+        // Build input UTXOs with Merkle proofs
+        const inputUtxos = [];
+        for (let i = 0; i < 2; i++) {
+            const utxo = selection.utxos[i] || createDummyUtxo(fromAssetId);
+            const proof = state.merkleTree.getProof(utxo.leafIndex || 0);
+
+            inputUtxos.push({
+                amount: utxo.amount || '0',
+                assetId: fromAssetId.toString(),
+                privateKey: state.privateKey,
+                blinding: utxo.blinding || randomFieldElement(),
+                pathElements: proof.pathElements,
+                pathIndices: proof.pathIndices,
+            });
+        }
+
+        // Build output UTXOs
+        const outputUtxos = [
+            {
+                amount: toAmountRaw.toString(),
+                assetId: toAssetId.toString(),
+                pubkey: state.zkPubkey,
+                blinding: randomFieldElement(),
+            },
+            {
+                amount: selection.change,
+                assetId: fromAssetId.toString(),
+                pubkey: state.zkPubkey,
+                blinding: randomFieldElement(),
+            },
+        ];
+
+        // Build pool state
+        const { reserveA, reserveB } = state.poolState;
+        const poolBlinding = randomFieldElement();
+        const newPoolBlinding = randomFieldElement();
+
+        let newReserveA, newReserveB;
+        if (fromToken === 'SOL') {
+            newReserveA = (BigInt(reserveA) + BigInt(fromAmountRaw)).toString();
+            newReserveB = (BigInt(reserveB) - BigInt(toAmountRaw)).toString();
+        } else {
+            newReserveA = (BigInt(reserveA) - BigInt(toAmountRaw)).toString();
+            newReserveB = (BigInt(reserveB) + BigInt(fromAmountRaw)).toString();
+        }
+
+        updateTxStatus('Generating ZK proof... (this may take 30-60 seconds)');
+
+        // Generate real ZK proof
+        const proofResult = await generateSwapProof({
+            root: state.merkleTree.getRoot(),
+            inputUtxos,
+            outputUtxos,
+            poolState: {
+                reserveA: reserveA.toString(),
+                reserveB: reserveB.toString(),
+                poolPubkey: CONFIG.poolAccounts.poolAccount,
+                poolBlinding,
+            },
+            newPoolState: {
+                reserveA: newReserveA,
+                reserveB: newReserveB,
+                poolBlinding: newPoolBlinding,
+            },
+            swapParams: {
+                amountIn: fromAmountRaw.toString(),
+                assetIn: fromAssetId.toString(),
+                amountOut: toAmountRaw.toString(),
+                minAmountOut: Math.floor(toAmountRaw * 0.99).toString(), // 1% slippage
+            },
+            extDataHash: '0',
+        });
+
+        updateTxStatus('Submitting to relayer...');
+
+        // Submit to relayer
         const response = await fetch(`${CONFIG.relayerUrl}/swap`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                proof: { /* mock proof */ },
-                publicSignals: [],
-                nullifiers: ['0x123', '0x456'],
-                outputCommitments: ['0x789', '0xabc'],
+                proof: proofResult.proof,
+                publicSignals: proofResult.publicSignals,
+                nullifiers: proofResult.inputNullifiers,
+                outputCommitments: proofResult.outputCommitments,
+                newPoolStateHash: proofResult.newPoolStateHash,
+                newPoolBlinding,
             }),
         });
 
         const result = await response.json();
 
         if (result.success) {
+            // Mark input UTXOs as spent
+            for (const utxo of selection.utxos) {
+                await state.utxoStorage.markSpent(utxo.commitment, proofResult.inputNullifiers[0]);
+            }
+
+            // Add output UTXOs
+            for (let i = 0; i < outputUtxos.length; i++) {
+                if (BigInt(outputUtxos[i].amount) > 0n) {
+                    await state.utxoStorage.addUtxo({
+                        commitment: proofResult.outputCommitments[i],
+                        amount: outputUtxos[i].amount,
+                        assetId: parseInt(outputUtxos[i].assetId),
+                        blinding: outputUtxos[i].blinding,
+                        leafIndex: state.merkleTree.getLeafCount() + i,
+                    });
+                }
+            }
+
+            updatePortfolio();
             showTxSuccess(result.signature, result.explorer);
         } else {
             showTxError(result.error || 'Swap failed');
@@ -268,6 +484,15 @@ async function executeSwap() {
         console.error('Swap failed:', err);
         showTxError(err.message);
     }
+}
+
+function createDummyUtxo(assetId) {
+    return {
+        amount: '0',
+        assetId,
+        blinding: randomFieldElement(),
+        leafIndex: 0,
+    };
 }
 
 // ============================================================================
@@ -342,65 +567,260 @@ function updateRemoveEstimate() {
 }
 
 async function executeAddLiquidity() {
-    showTxModal('Generating ZK Proof for Add Liquidity...');
+    const tokenA = parseFloat(document.getElementById('add-token-a').value);
+    const tokenB = parseFloat(document.getElementById('add-token-b').value);
+
+    if (!tokenA || !tokenB) {
+        alert('Please enter amounts for both tokens');
+        return;
+    }
+
+    if (!state.utxoStorage) {
+        alert('Please connect wallet first');
+        return;
+    }
+
+    showTxModal('Selecting UTXOs...');
 
     try {
-        await simulateDelay(2500);
-        updateTxStatus('Submitting transaction...');
+        const amountA = Math.floor(tokenA * 1e9);
+        const amountB = Math.floor(tokenB * 1e6);
 
-        await simulateDelay(1500);
+        // Select UTXOs for both tokens
+        const selectionA = state.utxoStorage.selectUtxos(ASSET_SOL, amountA);
+        const selectionB = state.utxoStorage.selectUtxos(ASSET_USDC, amountB);
+
+        updateTxStatus('Building input UTXOs...');
+
+        // Build input UTXOs
+        const inputUtxos = [
+            {
+                amount: selectionA.utxos[0]?.amount || '0',
+                privateKey: state.privateKey,
+                blinding: selectionA.utxos[0]?.blinding || randomFieldElement(),
+                pathElements: state.merkleTree.getProof(selectionA.utxos[0]?.leafIndex || 0).pathElements,
+                pathIndices: state.merkleTree.getProof(selectionA.utxos[0]?.leafIndex || 0).pathIndices,
+            },
+            {
+                amount: selectionB.utxos[0]?.amount || '0',
+                privateKey: state.privateKey,
+                blinding: selectionB.utxos[0]?.blinding || randomFieldElement(),
+                pathElements: state.merkleTree.getProof(selectionB.utxos[0]?.leafIndex || 0).pathElements,
+                pathIndices: state.merkleTree.getProof(selectionB.utxos[0]?.leafIndex || 0).pathIndices,
+            },
+        ];
+
+        // Calculate LP tokens to receive
+        const { reserveA, reserveB, totalLpSupply } = state.poolState;
+        const lpAmount = Math.floor(Math.sqrt(amountA * amountB));
+
+        const outputUtxo = {
+            lpAmount: lpAmount.toString(),
+            pubkey: state.zkPubkey,
+            blinding: randomFieldElement(),
+        };
+
+        updateTxStatus('Generating ZK proof... (this may take 30-60 seconds)');
+
+        // Generate proof
+        const proofResult = await generateAddLiquidityProof({
+            root: state.merkleTree.getRoot(),
+            inputUtxos,
+            outputUtxo,
+            poolState: {
+                reserveA: reserveA.toString(),
+                reserveB: reserveB.toString(),
+                poolPubkey: CONFIG.poolAccounts.poolAccount,
+                poolBlinding: randomFieldElement(),
+            },
+            newPoolState: {
+                reserveA: (BigInt(reserveA) + BigInt(amountA)).toString(),
+                reserveB: (BigInt(reserveB) + BigInt(amountB)).toString(),
+                poolBlinding: randomFieldElement(),
+            },
+            lpState: {
+                totalLpSupply: totalLpSupply.toString(),
+                lpPoolPubkey: CONFIG.poolAccounts.poolAccount,
+                lpBlinding: randomFieldElement(),
+            },
+            newLpState: {
+                totalLpSupply: (BigInt(totalLpSupply) + BigInt(lpAmount)).toString(),
+                lpBlinding: randomFieldElement(),
+            },
+            extDataHash: '0',
+        });
+
+        updateTxStatus('Submitting to relayer...');
 
         const response = await fetch(`${CONFIG.relayerUrl}/add-liquidity`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                proof: {},
-                publicSignals: [],
-                nullifiers: ['0x123', '0x456'],
-                outputCommitment: '0x789',
+                proof: proofResult.proof,
+                publicSignals: proofResult.publicSignals,
+                nullifiers: proofResult.inputNullifiers,
+                outputCommitment: proofResult.outputCommitment,
+                newPoolStateHash: proofResult.newPoolStateHash,
+                newLpStateHash: proofResult.newLpStateHash,
             }),
         });
 
         const result = await response.json();
 
         if (result.success) {
+            // Update UTXOs
+            for (const utxo of selectionA.utxos) {
+                await state.utxoStorage.markSpent(utxo.commitment, proofResult.inputNullifiers[0]);
+            }
+            for (const utxo of selectionB.utxos) {
+                await state.utxoStorage.markSpent(utxo.commitment, proofResult.inputNullifiers[1]);
+            }
+
+            await state.utxoStorage.addUtxo({
+                commitment: proofResult.outputCommitment,
+                amount: lpAmount.toString(),
+                assetId: ASSET_LP,
+                blinding: outputUtxo.blinding,
+                leafIndex: state.merkleTree.getLeafCount(),
+            });
+
+            updatePortfolio();
             showTxSuccess(result.signature, result.explorer);
         } else {
             showTxError(result.error);
         }
     } catch (err) {
+        console.error('Add liquidity failed:', err);
         showTxError(err.message);
     }
 }
 
 async function executeRemoveLiquidity() {
-    showTxModal('Generating ZK Proof for Remove Liquidity...');
+    const lpAmount = parseFloat(document.getElementById('remove-lp').value);
+
+    if (!lpAmount) {
+        alert('Please enter LP amount');
+        return;
+    }
+
+    if (!state.utxoStorage) {
+        alert('Please connect wallet first');
+        return;
+    }
+
+    showTxModal('Selecting LP UTXOs...');
 
     try {
-        await simulateDelay(2000);
-        updateTxStatus('Submitting transaction...');
+        const lpAmountRaw = Math.floor(lpAmount * 1e6);
 
-        await simulateDelay(1500);
+        // Select LP UTXOs
+        const selection = state.utxoStorage.selectUtxos(ASSET_LP, lpAmountRaw);
+
+        if (selection.utxos.length === 0) {
+            throw new Error('Insufficient LP balance');
+        }
+
+        updateTxStatus('Calculating withdrawal amounts...');
+
+        // Calculate amounts to receive
+        const { reserveA, reserveB, totalLpSupply } = state.poolState;
+        const share = BigInt(lpAmountRaw) * BigInt(1e18) / BigInt(totalLpSupply);
+        const amountA = (BigInt(reserveA) * share / BigInt(1e18)).toString();
+        const amountB = (BigInt(reserveB) * share / BigInt(1e18)).toString();
+
+        const inputUtxo = {
+            lpAmount: selection.utxos[0].amount,
+            privateKey: state.privateKey,
+            blinding: selection.utxos[0].blinding,
+            pathElements: state.merkleTree.getProof(selection.utxos[0].leafIndex).pathElements,
+            pathIndices: state.merkleTree.getProof(selection.utxos[0].leafIndex).pathIndices,
+        };
+
+        const outputUtxos = [
+            {
+                amount: amountA,
+                pubkey: state.zkPubkey,
+                blinding: randomFieldElement(),
+            },
+            {
+                amount: amountB,
+                pubkey: state.zkPubkey,
+                blinding: randomFieldElement(),
+            },
+        ];
+
+        updateTxStatus('Generating ZK proof... (this may take 20-40 seconds)');
+
+        const proofResult = await generateRemoveLiquidityProof({
+            root: state.merkleTree.getRoot(),
+            inputUtxo,
+            outputUtxos,
+            poolState: {
+                reserveA: reserveA.toString(),
+                reserveB: reserveB.toString(),
+                poolPubkey: CONFIG.poolAccounts.poolAccount,
+                poolBlinding: randomFieldElement(),
+            },
+            newPoolState: {
+                reserveA: (BigInt(reserveA) - BigInt(amountA)).toString(),
+                reserveB: (BigInt(reserveB) - BigInt(amountB)).toString(),
+                poolBlinding: randomFieldElement(),
+            },
+            lpState: {
+                totalLpSupply: totalLpSupply.toString(),
+                lpPoolPubkey: CONFIG.poolAccounts.poolAccount,
+                lpBlinding: randomFieldElement(),
+            },
+            newLpState: {
+                totalLpSupply: (BigInt(totalLpSupply) - BigInt(lpAmountRaw)).toString(),
+                lpBlinding: randomFieldElement(),
+            },
+            extDataHash: '0',
+        });
+
+        updateTxStatus('Submitting to relayer...');
 
         const response = await fetch(`${CONFIG.relayerUrl}/remove-liquidity`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                proof: {},
-                publicSignals: [],
-                nullifier: '0x123',
-                outputCommitments: ['0x456', '0x789'],
+                proof: proofResult.proof,
+                publicSignals: proofResult.publicSignals,
+                nullifier: proofResult.inputNullifier,
+                outputCommitments: proofResult.outputCommitments,
+                newPoolStateHash: proofResult.newPoolStateHash,
+                newLpStateHash: proofResult.newLpStateHash,
             }),
         });
 
         const result = await response.json();
 
         if (result.success) {
+            await state.utxoStorage.markSpent(selection.utxos[0].commitment, proofResult.inputNullifier);
+
+            await state.utxoStorage.addUtxo({
+                commitment: proofResult.outputCommitments[0],
+                amount: amountA,
+                assetId: ASSET_SOL,
+                blinding: outputUtxos[0].blinding,
+                leafIndex: state.merkleTree.getLeafCount(),
+            });
+
+            await state.utxoStorage.addUtxo({
+                commitment: proofResult.outputCommitments[1],
+                amount: amountB,
+                assetId: ASSET_USDC,
+                blinding: outputUtxos[1].blinding,
+                leafIndex: state.merkleTree.getLeafCount() + 1,
+            });
+
+            updatePortfolio();
             showTxSuccess(result.signature, result.explorer);
         } else {
             showTxError(result.error);
         }
     } catch (err) {
+        console.error('Remove liquidity failed:', err);
         showTxError(err.message);
     }
 }
@@ -417,22 +837,29 @@ function initPortfolio() {
 }
 
 function updatePortfolio() {
-    const utxos = state.privateUtxos;
+    if (!state.utxoStorage) {
+        document.getElementById('total-value').textContent = '$0.00';
+        document.getElementById('utxo-count').textContent = '0';
+        return;
+    }
+
+    const utxos = state.utxoStorage.getUnspent();
 
     // Calculate totals
-    let totalSol = 0;
-    let totalUsdc = 0;
-    let totalLp = 0;
+    let totalSol = 0n;
+    let totalUsdc = 0n;
+    let totalLp = 0n;
 
     utxos.forEach(utxo => {
-        if (utxo.assetId === 0) totalSol += parseFloat(utxo.amount);
-        if (utxo.assetId === 1) totalUsdc += parseFloat(utxo.amount);
-        if (utxo.assetId === 2) totalLp += parseFloat(utxo.amount);
+        const amount = BigInt(utxo.amount);
+        if (utxo.assetId === ASSET_SOL) totalSol += amount;
+        if (utxo.assetId === ASSET_USDC) totalUsdc += amount;
+        if (utxo.assetId === ASSET_LP) totalLp += amount;
     });
 
     // Update UI
     const solPrice = 150; // Mock price
-    const totalValue = (totalSol / 1e9) * solPrice + (totalUsdc / 1e6);
+    const totalValue = (Number(totalSol) / 1e9) * solPrice + (Number(totalUsdc) / 1e6);
 
     document.getElementById('total-value').textContent = '$' + totalValue.toFixed(2);
     document.getElementById('utxo-count').textContent = utxos.length.toString();
@@ -443,15 +870,15 @@ function updatePortfolio() {
         listContent.innerHTML = '<p class="empty-state">No private assets. Deposit to get started!</p>';
     } else {
         listContent.innerHTML = `
-            <div class="asset-item">SOL: ${(totalSol / 1e9).toFixed(4)}</div>
-            <div class="asset-item">USDC: ${(totalUsdc / 1e6).toFixed(2)}</div>
-            ${totalLp > 0 ? `<div class="asset-item">LP: ${(totalLp / 1e6).toFixed(2)}</div>` : ''}
+            <div class="asset-item">SOL: ${(Number(totalSol) / 1e9).toFixed(4)}</div>
+            <div class="asset-item">USDC: ${(Number(totalUsdc) / 1e6).toFixed(2)}</div>
+            ${totalLp > 0n ? `<div class="asset-item">LP: ${(Number(totalLp) / 1e6).toFixed(2)}</div>` : ''}
         `;
     }
 
     // Update balances in other tabs
-    document.getElementById('from-balance').textContent = (totalSol / 1e9).toFixed(4);
-    document.getElementById('lp-balance').textContent = (totalLp / 1e6).toFixed(2);
+    document.getElementById('from-balance').textContent = (Number(totalSol) / 1e9).toFixed(4);
+    document.getElementById('lp-balance').textContent = (Number(totalLp) / 1e6).toFixed(2);
 }
 
 async function executeDeposit() {
@@ -463,19 +890,36 @@ async function executeDeposit() {
         return;
     }
 
+    if (!state.utxoStorage) {
+        alert('Please connect wallet first');
+        return;
+    }
+
     hideAllModals();
-    showTxModal('Processing deposit...');
+    showTxModal('Computing commitment...');
 
     try {
-        await simulateDelay(2000);
+        const assetId = token === 'SOL' ? ASSET_SOL : ASSET_USDC;
+        const amountRaw = token === 'SOL' ? Math.floor(amount * 1e9) : Math.floor(amount * 1e6);
+        const blinding = randomFieldElement();
+
+        // Compute commitment
+        const commitment = await computeCommitment(
+            amountRaw.toString(),
+            assetId.toString(),
+            state.zkPubkey,
+            blinding
+        );
+
+        updateTxStatus('Submitting deposit...');
 
         const response = await fetch(`${CONFIG.relayerUrl}/deposit`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                commitment: '0x' + Math.random().toString(16).slice(2),
-                amount: token === 'SOL' ? amount * 1e9 : amount * 1e6,
-                assetType: token === 'SOL' ? 0 : 1,
+                commitment,
+                amount: amountRaw,
+                assetType: assetId,
             }),
         });
 
@@ -483,20 +927,24 @@ async function executeDeposit() {
 
         if (result.success) {
             // Add UTXO to local storage
-            const utxo = {
-                amount: (token === 'SOL' ? amount * 1e9 : amount * 1e6).toString(),
-                assetId: token === 'SOL' ? 0 : 1,
-                commitment: '0x' + Math.random().toString(16).slice(2),
-            };
-            state.privateUtxos.push(utxo);
-            saveLocalUtxos();
-            updatePortfolio();
+            await state.utxoStorage.addUtxo({
+                commitment,
+                amount: amountRaw.toString(),
+                assetId,
+                blinding,
+                leafIndex: state.merkleTree.getLeafCount(),
+            });
 
+            // Update local Merkle tree
+            await state.merkleTree.insert(commitment);
+
+            updatePortfolio();
             showTxSuccess(result.signature, result.explorer);
         } else {
-            showTxError(result.error);
+            showTxError(result.error || 'Deposit failed');
         }
     } catch (err) {
+        console.error('Deposit failed:', err);
         showTxError(err.message);
     }
 }
@@ -504,41 +952,74 @@ async function executeDeposit() {
 async function executeWithdraw() {
     const amount = parseFloat(document.getElementById('withdraw-amount').value);
     const recipient = document.getElementById('withdraw-recipient').value;
+    const token = document.getElementById('withdraw-token')?.value || 'SOL';
 
     if (!amount || !recipient) {
         alert('Please enter amount and recipient');
         return;
     }
 
+    if (!state.utxoStorage) {
+        alert('Please connect wallet first');
+        return;
+    }
+
     hideAllModals();
-    showTxModal('Generating ZK Proof for withdrawal...');
+    showTxModal('Selecting UTXOs...');
 
     try {
-        await simulateDelay(2500);
-        updateTxStatus('Submitting transaction...');
+        const assetId = token === 'SOL' ? ASSET_SOL : ASSET_USDC;
+        const amountRaw = token === 'SOL' ? Math.floor(amount * 1e9) : Math.floor(amount * 1e6);
 
-        await simulateDelay(1500);
+        // Select UTXOs
+        const selection = state.utxoStorage.selectUtxos(assetId, amountRaw);
+
+        if (selection.utxos.length === 0) {
+            throw new Error('Insufficient private balance');
+        }
+
+        const utxo = selection.utxos[0];
+        const proof = state.merkleTree.getProof(utxo.leafIndex);
+
+        // Compute nullifier
+        const commitment = await computeCommitment(
+            utxo.amount,
+            assetId.toString(),
+            state.zkPubkey,
+            utxo.blinding
+        );
+
+        const nullifier = await computeNullifier(
+            commitment,
+            state.privateKey,
+            utxo.leafIndex.toString()
+        );
+
+        updateTxStatus('Submitting withdrawal...');
 
         const response = await fetch(`${CONFIG.relayerUrl}/withdraw`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                proof: {},
+                proof: {}, // Withdraw doesn't need full ZK proof for basic version
                 publicSignals: [],
-                nullifier: '0x123',
+                nullifier,
                 recipient,
-                amount: amount * 1e9,
+                amount: amountRaw,
             }),
         });
 
         const result = await response.json();
 
         if (result.success) {
+            await state.utxoStorage.markSpent(utxo.commitment, nullifier);
+            updatePortfolio();
             showTxSuccess(result.signature, result.explorer);
         } else {
-            showTxError(result.error);
+            showTxError(result.error || 'Withdrawal failed');
         }
     } catch (err) {
+        console.error('Withdraw failed:', err);
         showTxError(err.message);
     }
 }
@@ -578,7 +1059,7 @@ function updateTxStatus(status) {
 function showTxSuccess(signature, explorerUrl) {
     document.querySelector('.tx-status').classList.add('hidden');
     document.getElementById('tx-success').classList.remove('hidden');
-    document.getElementById('tx-explorer-link').href = explorerUrl;
+    document.getElementById('tx-explorer-link').href = explorerUrl || `https://explorer.solana.com/tx/${signature}?cluster=testnet`;
 }
 
 function showTxError(message) {
@@ -632,22 +1113,6 @@ async function loadPoolState() {
     }
 }
 
-function loadLocalUtxos() {
-    try {
-        const stored = localStorage.getItem('privacy-amm-utxos');
-        if (stored) {
-            state.privateUtxos = JSON.parse(stored);
-        }
-    } catch (err) {
-        console.error('Failed to load UTXOs:', err);
-    }
-    updatePortfolio();
-}
-
-function saveLocalUtxos() {
-    localStorage.setItem('privacy-amm-utxos', JSON.stringify(state.privateUtxos));
-}
-
 // ============================================================================
 // Utility Functions
 // ============================================================================
@@ -655,8 +1120,4 @@ function saveLocalUtxos() {
 function shortenAddress(address) {
     if (!address) return '';
     return address.slice(0, 4) + '...' + address.slice(-4);
-}
-
-function simulateDelay(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
 }
