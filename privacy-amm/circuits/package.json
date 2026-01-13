@@ -4,21 +4,22 @@
   "description": "ZK circuits for Privacy AMM on Solana",
   "scripts": {
     "compile": "circom private_swap.circom --r1cs --wasm --sym -o build",
-    "setup": "snarkjs groth16 setup build/private_swap.r1cs pot12_final.ptau build/private_swap.zkey",
+    "setup": "snarkjs groth16 setup build/private_swap.r1cs build/pot14_final.ptau build/private_swap_0000.zkey && cp build/private_swap_0000.zkey build/private_swap.zkey",
     "export-vkey": "snarkjs zkey export verificationkey build/private_swap.zkey build/verification_key.json",
     "build": "npm run compile && npm run setup && npm run export-vkey",
-    "test": "mocha tests/*.test.js",
+    "test": "node test/test_private_swap.js",
     "prove": "snarkjs groth16 prove build/private_swap.zkey witness.wtns proof.json public.json",
     "verify": "snarkjs groth16 verify build/verification_key.json public.json proof.json"
   },
   "dependencies": {
     "circomlib": "^2.0.5",
-    "snarkjs": "^0.7.4",
-    "ffjavascript": "^0.3.0"
+    "circomlibjs": "^0.1.7",
+    "ffjavascript": "^0.3.0",
+    "snarkjs": "^0.7.4"
   },
   "devDependencies": {
     "chai": "^4.3.10",
-    "mocha": "^10.2.0",
-    "circom_tester": "^0.0.19"
+    "circom_tester": "^0.0.19",
+    "mocha": "^10.2.0"
   }
 }

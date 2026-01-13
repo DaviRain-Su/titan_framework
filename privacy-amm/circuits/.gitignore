@@ -1,0 +1,18 @@
+# Build artifacts (large binary files)
+build/*.ptau
+build/*.zkey
+build/*.r1cs
+build/*.sym
+build/private_swap_js/
+
+# Test output
+build/test_*.json
+
+# Keep verification key (needed for verifier)
+!build/verification_key.json
+
+# Node modules
+node_modules/
+
+# Log files
+*.log
