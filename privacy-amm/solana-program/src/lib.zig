@@ -119,6 +119,14 @@ fn handleInitialize(context: sol.context.Context, data: []const u8) u64 {
 fn handleDeposit(context: sol.context.Context, data: []const u8) u64 {
     sol.log.log("Deposit");
 
+    // Account layout:
+    // [0] depositor: User depositing funds (signer)
+    // [1] pool_account: Pool state
+    // [2] merkle_account: Merkle tree state
+    // [3] user_token_account: User's token account (optional - for token deposits)
+    // [4] pool_vault: Pool's token vault (optional - for token deposits)
+    // [5] token_program: SPL Token program (optional)
+
     if (context.accounts.len < 3) {
         return @intFromEnum(ErrorCode.NotEnoughAccountKeys);
     }
@@ -135,10 +143,23 @@ fn handleDeposit(context: sol.context.Context, data: []const u8) u64 {
         return @intFromEnum(ErrorCode.InvalidInstructionData);
     };
 
+    // If token accounts are provided, transfer tokens from user to pool vault
+    if (context.accounts.len >= 5 and params.amount > 0) {
+        const user_token_account = context.accounts[3];
+        const pool_vault = context.accounts[4];
+
+        spl_token.transfer(user_token_account, pool_vault, depositor, params.amount) catch {
+            sol.log.log("Token transfer failed");
+            return @intFromEnum(ErrorCode.InvalidAccountData);
+        };
+    }
+
+    // Insert commitment into Merkle tree
     _ = merkle.insertLeaf(merkle_account, params.commitment) catch {
         return @intFromEnum(ErrorCode.MerkleTreeFull);
     };
 
+    // Update pool state
     pool.updateAfterDeposit(pool_account, params) catch {
         return @intFromEnum(ErrorCode.InvalidAccountData);
     };
@@ -149,6 +170,15 @@ fn handleDeposit(context: sol.context.Context, data: []const u8) u64 {
 
 fn handleWithdraw(context: sol.context.Context, data: []const u8) u64 {
     sol.log.log("Withdraw");
+
+    // Account layout:
+    // [0] pool_account: Pool state
+    // [1] merkle_account: Merkle tree state
+    // [2] nullifier_account: Nullifier set
+    // [3] pool_vault: Pool's token vault (optional - for token withdrawals)
+    // [4] recipient_token_account: Recipient's token account (optional)
+    // [5] pool_authority: PDA authority for the pool (optional)
+    // [6] token_program: SPL Token program (optional)
 
     if (context.accounts.len < 3) {
         return @intFromEnum(ErrorCode.NotEnoughAccountKeys);
@@ -174,10 +204,31 @@ fn handleWithdraw(context: sol.context.Context, data: []const u8) u64 {
         return @intFromEnum(ErrorCode.NullifierAlreadyUsed);
     }
 
+    // 标记 nullifier
     nullifier_set.insert(nullifier_account, params.nullifier) catch {
         return @intFromEnum(ErrorCode.InvalidAccountData);
     };
 
+    // If token accounts are provided, transfer tokens from pool vault to recipient
+    if (context.accounts.len >= 6 and params.amount > 0) {
+        const pool_vault = context.accounts[3];
+        const recipient_token_account = context.accounts[4];
+        const pool_authority = context.accounts[5];
+
+        // Get bump from pool state for PDA signing
+        const pool_data = pool_account.data();
+        const bump_value = pool_data[1]; // bump is at offset 1 in PoolState
+        const bump_slice: [1]u8 = .{bump_value};
+
+        const pool_info = pool_account.info();
+        const pool_seeds = getPoolAuthoritySeedsWithBump(pool_info, &bump_slice);
+        spl_token.transferSigned(pool_vault, recipient_token_account, pool_authority, params.amount, &pool_seeds) catch {
+            sol.log.log("Token transfer failed");
+            return @intFromEnum(ErrorCode.InvalidAccountData);
+        };
+    }
+
+    // Update pool state
     pool.updateAfterWithdraw(pool_account, params) catch {
         return @intFromEnum(ErrorCode.InvalidAccountData);
     };

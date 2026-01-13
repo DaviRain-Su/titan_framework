@@ -15,8 +15,8 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-// Program ID (deployed to testnet - fixed nullifier set size)
-const PROGRAM_ID = new PublicKey('7PGfSGUnUhw3qehV64q3C7DnZfcCWHpAxrhoKxTCJHKp');
+// Program ID (deployed to testnet - with SPL Token transfers)
+const PROGRAM_ID = new PublicKey('GZfqgHqekzR4D8TAq165XB8U2boVdK5ehEEH4n7u4Xts');
 
 // Instruction discriminator for InitializePool = 0
 const INIT_INSTRUCTION = 0;
