@@ -40654,6 +40654,1212 @@ pub extern "C" fn noir_free_circuit(circuit: *mut c_void) {
 
 ---
 
+### 18.42 学术理论支撑: Solana ZK 架构理论与 Titan OS
+
+> **论文来源**: Jotaro Yano, "Zero-Knowledge Extensions on Solana: A Theory of ZK Architecture", arXiv:2511.00415, November 2025
+>
+> **定位**: 这篇论文为 Titan OS 提供了严谨的学术框架和理论背书，将 Titan OS 从 "一个开发工具" 提升为 **"前沿理论的工程化落地"**。
+
+#### 18.42.1 论文概述
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                 │
+│     Zero-Knowledge Extensions on Solana:                        │
+│     A Theory of ZK Architecture                                 │
+│                                                                 │
+│     作者: Jotaro Yano                                           │
+│     日期: 2025 年 11 月 1 日                                     │
+│     来源: arXiv:2511.00415                                      │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  摘要:                                                           │
+│                                                                 │
+│  本文提出了 Solana 上零知识系统的架构框架。                       │
+│                                                                 │
+│  核心贡献:                                                       │
+│  1. 双轴模型 (Two-Axis Model)                                   │
+│     按目的 (可扩展性 vs 隐私) 和部署位置 (链上 vs 链下)         │
+│     对 ZK 应用进行分类                                          │
+│                                                                 │
+│  2. 五大安全不变量 (Five Security Invariants)                   │
+│     起源真实性、重放安全性、最终性对齐、参数绑定、私有消费       │
+│                                                                 │
+│  3. 两大设计抽象 (Design Abstractions)                          │
+│     • 携带证明的消息 (Proof-Carrying Message, PCM)              │
+│     • 验证者路由接口 (Verifier Router Interface)                │
+│                                                                 │
+│  4. 跨链扩展 (Cross-Chain Extension)                            │
+│     携带证明的跨链消息 (PCIM)                                   │
+│                                                                 │
+│  涵盖 Solana 基金会三大 ZK 支柱:                                 │
+│  • ZK Compression (Light Protocol)                              │
+│  • Confidential Transfer                                        │
+│  • Light Clients / Bridges                                      │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.42.2 双轴模型 (Two-Axis Model): Titan OS 的象限定位
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                 │
+│                      双轴分类模型                                │
+│                                                                 │
+│  轴 1: 目的 (Purpose)      - 可扩展性 vs 隐私性                 │
+│  轴 2: 位置 (Placement)    - 链上 vs 链下                       │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│                        可扩展性 (Scalability)                    │
+│                              ▲                                  │
+│                              │                                  │
+│     链下 × 可扩展性          │         链上 × 可扩展性          │
+│  ┌─────────────────────┐    │    ┌─────────────────────┐       │
+│  │                     │    │    │                     │       │
+│  │  ZK Coprocessors    │    │    │  zkVM Receipts      │       │
+│  │  (SP1, RISC Zero)   │    │    │  (On-chain verify)  │       │
+│  │                     │    │    │                     │       │
+│  │  ┌───────────────┐  │    │    └─────────────────────┘       │
+│  │  │  TITAN OS     │  │    │                                  │
+│  │  │  适用于此!    │  │    │                                  │
+│  │  └───────────────┘  │    │                                  │
+│  │                     │    │                                  │
+│  └─────────────────────┘    │                                  │
+│                              │                                  │
+│  链下 ◄──────────────────────┼─────────────────────────► 链上   │
+│  (Off-chain)                 │                    (On-chain)   │
+│                              │                                  │
+│     链下 × 隐私              │         链上 × 隐私              │
+│  ┌─────────────────────┐    │    ┌─────────────────────┐       │
+│  │                     │    │    │                     │       │
+│  │  Private L2s        │    │    │  Confidential       │       │
+│  │  MPC Networks       │    │    │  Transfer           │       │
+│  │  (Arcium, Aztec)    │    │    │  (Privacy proofs)   │       │
+│  │                     │    │    │                     │       │
+│  │  ┌───────────────┐  │    │    └─────────────────────┘       │
+│  │  │  TITAN OS     │  │    │                                  │
+│  │  │  也适用于此!  │  │    │                                  │
+│  │  └───────────────┘  │    │                                  │
+│  │                     │    │                                  │
+│  └─────────────────────┘    │                                  │
+│                              │                                  │
+│                              ▼                                  │
+│                        隐私性 (Privacy)                          │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Titan OS 的定位**:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                 │
+│           Titan OS = 链下象限的通用开发者实现                    │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Titan OS 完美占据两个象限:                                      │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                                                         │   │
+│  │  1. 链下 × 可扩展性 (Off-chain × Scalability)           │   │
+│  │                                                         │   │
+│  │     • 链下执行复杂逻辑                                  │   │
+│  │     • 生成简洁证明                                      │   │
+│  │     • 链上只验证，不执行                                │   │
+│  │                                                         │   │
+│  │     参考案例: SP1, RISC Zero, Bonsai                    │   │
+│  │                                                         │   │
+│  │     Titan 实现:                                         │   │
+│  │     • Zig 编写链下逻辑                                  │   │
+│  │     • 编译到 Native Binary                              │   │
+│  │     • 生成 ZK 证明提交链上                              │   │
+│  │                                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                                                         │   │
+│  │  2. 链下 × 隐私 (Off-chain × Privacy)                   │   │
+│  │                                                         │   │
+│  │     • 私有计算在本地执行                                │   │
+│  │     • 使用 Commitments 和 Nullifiers                    │   │
+│  │     • 链上无法看到具体数据                              │   │
+│  │                                                         │   │
+│  │     参考案例: Aztec, Arcium, Elusiv                     │   │
+│  │                                                         │   │
+│  │     Titan 实现:                                         │   │
+│  │     • 隐私 Swap (金额隐藏)                              │   │
+│  │     • Nullifier 防双花                                  │   │
+│  │     • Pedersen Commitment 隐藏状态                      │   │
+│  │                                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│  叙事升级:                                                       │
+│                                                                 │
+│  "Titan OS 是 Solana ZK 架构理论中'链下计算象限'的                │
+│   通用开发者实现。我们不是在造轮子，我们是在实现                  │
+│   该理论框架中的关键一环——将复杂的链下行为标准化。"              │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.42.3 携带证明的消息 (Proof-Carrying Message, PCM)
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                 │
+│              Proof-Carrying Message (PCM) 定义                   │
+│                                                                 │
+│  论文定义:                                                       │
+│  PCM 是一个元组 (m, Com(params), i)，其中:                       │
+│                                                                 │
+│  • m           = 更新命令 (Update Command)                      │
+│  • Com(params) = 链下参数的承诺 (Commitment to off-chain params)│
+│  • i           = 起源和重放检查的标识符 (Identifier)            │
+│  • π           = 证明更新满足状态转换关系 (Proof)               │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  接收者验证:                                                     │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                                                         │   │
+│  │  1. 起源/单次使用语义 (Origin / Single-use semantics)   │   │
+│  │     • 验证发送者身份                                    │   │
+│  │     • 防止消息重放                                      │   │
+│  │                                                         │   │
+│  │  2. 参数绑定 (Parameter Binding)                        │   │
+│  │     • 通过承诺值验证参数完整性                          │   │
+│  │     • 防止参数替换/抢跑攻击                             │   │
+│  │                                                         │   │
+│  │  3. 状态一致性 (State Consistency)                      │   │
+│  │     • 验证 pre-state 和 post-state roots 的一致性       │   │
+│  │                                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│  核心价值:                                                       │
+│                                                                 │
+│  将压缩从一种存储格式提升为一种"可验证的更新协议"               │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Titan 的 PCM 实现**:
+
+```zig
+// titan/pcm.zig
+// Titan Proof-Carrying Message Implementation
+
+const std = @import("std");
+const titan = @import("titan");
+
+/// Proof-Carrying Message (PCM)
+/// 遵循 arXiv:2511.00415 的形式化定义
+pub const ProofCarryingMessage = struct {
+    /// m: 更新命令 (Update Command)
+    /// 描述要执行的状态转换
+    command: Command,
+
+    /// Com(params): 链下参数的承诺
+    /// 使用 Pedersen Hash 确保参数绑定
+    params_commitment: [32]u8,
+
+    /// i: 标识符 (Identifier)
+    /// 用于起源验证和重放保护
+    identifier: Identifier,
+
+    /// π: 有效性证明 (Validity Proof)
+    /// 证明状态转换满足约束条件
+    proof: titan.zk.Proof,
+
+    /// 额外的公开输出
+    public_outputs: PublicOutputs,
+
+    /// 创建 PCM
+    pub fn create(
+        command: Command,
+        private_params: anytype,
+        signer: titan.Keypair,
+        proof: titan.zk.Proof,
+    ) !ProofCarryingMessage {
+        // Com(params): 计算参数承诺
+        const params_commitment = titan.pedersen_hash(private_params);
+
+        // i: 生成标识符
+        const identifier = Identifier{
+            .origin = signer.public_key,
+            .nonce = try generateNonce(),
+            .timestamp = std.time.timestamp(),
+        };
+
+        return ProofCarryingMessage{
+            .command = command,
+            .params_commitment = params_commitment,
+            .identifier = identifier,
+            .proof = proof,
+            .public_outputs = .{},
+        };
+    }
+
+    /// 序列化为链上提交格式
+    pub fn serialize(self: *const ProofCarryingMessage, allocator: std.mem.Allocator) ![]u8 {
+        var buffer = std.ArrayList(u8).init(allocator);
+        errdefer buffer.deinit();
+
+        // 写入魔数标识 PCM 格式
+        try buffer.appendSlice(&[_]u8{ 'P', 'C', 'M', 0x01 });
+
+        // 写入命令
+        try buffer.appendSlice(std.mem.asBytes(&self.command));
+
+        // 写入参数承诺
+        try buffer.appendSlice(&self.params_commitment);
+
+        // 写入标识符
+        try buffer.appendSlice(std.mem.asBytes(&self.identifier));
+
+        // 写入证明
+        try buffer.appendSlice(self.proof.serialize());
+
+        return buffer.toOwnedSlice();
+    }
+};
+
+/// 更新命令类型
+pub const Command = struct {
+    /// 命令类型标识
+    tag: CommandTag,
+    /// 命令数据
+    data: [64]u8,
+
+    pub const CommandTag = enum(u8) {
+        /// 隐私交换
+        private_swap = 0x01,
+        /// 添加流动性
+        add_liquidity = 0x02,
+        /// 移除流动性
+        remove_liquidity = 0x03,
+        /// 隐私转账
+        private_transfer = 0x04,
+    };
+};
+
+/// 标识符 (用于起源验证和重放保护)
+pub const Identifier = struct {
+    /// 起源公钥 (Origin Authenticity)
+    origin: [32]u8,
+    /// Nonce (Replay Safety)
+    nonce: u64,
+    /// 时间戳 (Finality Alignment)
+    timestamp: i64,
+
+    /// 计算 Nullifier (防双花)
+    pub fn computeNullifier(self: *const Identifier, secret: [32]u8) [32]u8 {
+        return titan.hash(.{
+            self.origin,
+            self.nonce,
+            secret,
+        });
+    }
+};
+
+/// 公开输出
+pub const PublicOutputs = struct {
+    /// 新状态根
+    new_state_root: [32]u8 = undefined,
+    /// 输出承诺
+    output_commitment: [32]u8 = undefined,
+    /// Nullifier 哈希
+    nullifier_hash: [32]u8 = undefined,
+};
+
+fn generateNonce() !u64 {
+    var buf: [8]u8 = undefined;
+    std.crypto.random.bytes(&buf);
+    return std.mem.readInt(u64, &buf, .little);
+}
+```
+
+**Titan Transaction 结构对照**:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                 │
+│           Titan Transaction = PCM 的工程化实现                   │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  论文 PCM 定义              Titan 实现                           │
+│  ────────────────────────────────────────────────────────────── │
+│                                                                 │
+│  m (Update Command)         Command struct                      │
+│  │                          │                                   │
+│  │ • 描述状态转换           │ • tag: CommandTag                 │
+│  │                          │ • data: 命令参数                  │
+│  │                          │                                   │
+│  ├──────────────────────────┼───────────────────────────────────│
+│                                                                 │
+│  Com(params)                params_commitment: [32]u8           │
+│  │                          │                                   │
+│  │ • 链下参数承诺           │ • Pedersen Hash of private inputs │
+│  │ • 防止参数替换           │ • 绑定 amount, secret 等          │
+│  │                          │                                   │
+│  ├──────────────────────────┼───────────────────────────────────│
+│                                                                 │
+│  i (Identifier)             Identifier struct                   │
+│  │                          │                                   │
+│  │ • 起源验证               │ • origin: 发送者公钥              │
+│  │ • 重放保护               │ • nonce: 唯一标识                 │
+│  │ • 最终性对齐             │ • timestamp: 时间戳               │
+│  │                          │                                   │
+│  ├──────────────────────────┼───────────────────────────────────│
+│                                                                 │
+│  π (Proof)                  titan.zk.Proof                      │
+│  │                          │                                   │
+│  │ • 有效性证明             │ • 256 bytes Groth16 proof         │
+│  │ • 状态转换正确           │ • 由 Noir 生成                    │
+│  │                          │                                   │
+│  └──────────────────────────┴───────────────────────────────────│
+│                                                                 │
+│  价值:                                                           │
+│                                                                 │
+│  Titan Transaction 不是自定义 JSON，                             │
+│  而是符合学术定义的 "可组合压缩状态更新协议"                     │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.42.4 五大安全不变量 (Five Security Invariants)
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                 │
+│               五大跨层安全不变量                                  │
+│                                                                 │
+│  论文定义了五个关键不变量，用于推理 ZK 系统的安全性              │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                                                         │   │
+│  │  1. Origin Authenticity (起源真实性)                    │   │
+│  │  ─────────────────────────────────────────────────────  │   │
+│  │                                                         │   │
+│  │  定义: "接收者可以在给定签名假设下验证发送者身份"       │   │
+│  │                                                         │   │
+│  │  执行层: 传输层证明 / Portal / L1                       │   │
+│  │                                                         │   │
+│  │  Titan 实现:                                            │   │
+│  │  • Ed25519 签名验证                                     │   │
+│  │  • 公钥绑定到 Identifier.origin                         │   │
+│  │  • ZK 电路内验证签名有效性                              │   │
+│  │                                                         │   │
+│  │  代码:                                                  │   │
+│  │  ```zig                                                 │   │
+│  │  try zk.assert_signature_valid(user_secret, ctx.signer);│   │
+│  │  ```                                                    │   │
+│  │                                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                                                         │   │
+│  │  2. Replay Safety (重放安全性)                          │   │
+│  │  ─────────────────────────────────────────────────────  │   │
+│  │                                                         │   │
+│  │  定义: "每个消息标识符只能被接受一次；重复提交失败"     │   │
+│  │                                                         │   │
+│  │  执行层: 接收方 Portal / L1                             │   │
+│  │                                                         │   │
+│  │  Titan 实现:                                            │   │
+│  │  • Nullifier 机制 (类似 UTXO 花费)                      │   │
+│  │  • Nonce 单调递增                                       │   │
+│  │  • 链上 Nullifier Set 防双花                            │   │
+│  │                                                         │   │
+│  │  代码:                                                  │   │
+│  │  ```zig                                                 │   │
+│  │  const nullifier = identifier.computeNullifier(secret); │   │
+│  │  try onchain.markNullifierUsed(nullifier);              │   │
+│  │  ```                                                    │   │
+│  │                                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                                                         │   │
+│  │  3. Finality Alignment (最终性对齐)                     │   │
+│  │  ─────────────────────────────────────────────────────  │   │
+│  │                                                         │   │
+│  │  定义: "接受行为尊重发送方的共识最终性谓词"             │   │
+│  │                                                         │   │
+│  │  执行层: 接收方策略 / Bridge / L1                       │   │
+│  │                                                         │   │
+│  │  Titan 实现:                                            │   │
+│  │  • Slot 绑定到消息                                      │   │
+│  │  • 等待确认后才接受状态                                 │   │
+│  │  • 时间戳验证                                           │   │
+│  │                                                         │   │
+│  │  代码:                                                  │   │
+│  │  ```zig                                                 │   │
+│  │  const slot = ctx.slot();                               │   │
+│  │  try zk.assert_slot_finalized(slot);                    │   │
+│  │  ```                                                    │   │
+│  │                                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                                                         │   │
+│  │  4. Parameter Binding (参数绑定)                        │   │
+│  │  ─────────────────────────────────────────────────────  │   │
+│  │                                                         │   │
+│  │  定义: "链下参数绑定到消息；防止替换/抢跑攻击"          │   │
+│  │                                                         │   │
+│  │  执行层: 消息中的承诺 / L2 Inbox / Portal / L1          │   │
+│  │                                                         │   │
+│  │  Titan 实现:                                            │   │
+│  │  • Pedersen Commitment 绑定私有参数                     │   │
+│  │  • ZK 电路验证 Com(params) 与实际参数一致               │   │
+│  │  • 编译器自动生成绑定约束                               │   │
+│  │                                                         │   │
+│  │  代码:                                                  │   │
+│  │  ```zig                                                 │   │
+│  │  const commitment = titan.pedersen_hash(.{              │   │
+│  │      amount_in,                                         │   │
+│  │      user_secret,                                       │   │
+│  │  });                                                    │   │
+│  │  try zk.assert_eq(commitment, pcm.params_commitment);   │   │
+│  │  ```                                                    │   │
+│  │                                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                                                         │   │
+│  │  5. Private Consumption (私有消费)                      │   │
+│  │  ─────────────────────────────────────────────────────  │   │
+│  │                                                         │   │
+│  │  定义: "消费由秘密知识(或见证)门控，可控制披露"         │   │
+│  │                                                         │   │
+│  │  执行层: 隐私 L2 / MPC 层                               │   │
+│  │                                                         │   │
+│  │  Titan 实现:                                            │   │
+│  │  • 私有输入只在本地存在                                 │   │
+│  │  • 使用 Witness (见证) 解锁资产                         │   │
+│  │  • 选择性披露机制                                       │   │
+│  │                                                         │   │
+│  │  代码:                                                  │   │
+│  │  ```zig                                                 │   │
+│  │  // 只有知道 secret 的人才能花费                        │   │
+│  │  const witness = ctx.read_private_input([32]u8);        │   │
+│  │  try zk.assert_witness_valid(witness, note_commitment); │   │
+│  │  ```                                                    │   │
+│  │                                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**五大不变量的 Titan 实现矩阵**:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                 │
+│              Titan OS 安全不变量实现矩阵                         │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  不变量              Titan 组件          自动化程度              │
+│  ──────────────────────────────────────────────────────────────│
+│                                                                 │
+│  Origin              titan.crypto        ✅ 自动                │
+│  Authenticity        Ed25519 签名         SDK 自动处理签名      │
+│                                                                 │
+│  Replay              titan.nullifier     ✅ 自动                │
+│  Safety              Nullifier Set        编译器生成 nullifier  │
+│                                                                 │
+│  Finality            titan.solana        ✅ 自动                │
+│  Alignment           Slot 绑定            SDK 自动验证最终性    │
+│                                                                 │
+│  Parameter           titan.pedersen      ✅ 自动                │
+│  Binding             承诺生成             编译器生成承诺约束    │
+│                                                                 │
+│  Private             titan.zk.witness    ✅ 自动                │
+│  Consumption         见证机制             SDK 自动处理私有输入  │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  关键价值:                                                       │
+│                                                                 │
+│  开发者无需手动实现这 5 个不变量，                               │
+│  Titan 编译器自动处理，确保安全性。                              │
+│                                                                 │
+│  "The 5 Security Invariants identified in the paper             │
+│   are automatically handled by our compiler."                   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.42.5 验证者路由接口 (Verifier Router Interface)
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                 │
+│              Verifier Router Interface                           │
+│                                                                 │
+│  论文定义:                                                       │
+│  统一的应用级接口，抽象底层证明系统                              │
+│                                                                 │
+│  verify(proof, public_values, vk_id) → {0, 1}                   │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  痛点:                                                           │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                                                         │   │
+│  │  当前问题: 应用绑定特定证明系统                         │   │
+│  │                                                         │   │
+│  │  App A ────► Groth16 Verifier    (换 PLONK 要重写)      │   │
+│  │  App B ────► PLONK Verifier      (换 STARK 要重写)      │   │
+│  │  App C ────► STARK Verifier      (换 Groth16 要重写)    │   │
+│  │                                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│  解决方案:                                                       │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                                                         │   │
+│  │  Verifier Router: 将应用与证明系统解耦                  │   │
+│  │                                                         │   │
+│  │  ┌───────────────────────────────────────────────────┐ │   │
+│  │  │                                                   │ │   │
+│  │  │  App A ───┐                                       │ │   │
+│  │  │           │                                       │ │   │
+│  │  │  App B ───┼────► Verifier Router ────┬──► Groth16│ │   │
+│  │  │           │      verify(π, pub, vk)  ├──► PLONK  │ │   │
+│  │  │  App C ───┘                          └──► STARK  │ │   │
+│  │  │                                                   │ │   │
+│  │  └───────────────────────────────────────────────────┘ │   │
+│  │                                                         │   │
+│  │  优势:                                                  │   │
+│  │  • 应用无需关心底层证明格式                            │   │
+│  │  • 运维可按部署选择证明系统                            │   │
+│  │  • 支持证明系统替换和聚合                              │   │
+│  │  • 无需重写应用逻辑                                    │   │
+│  │                                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Titan 的 Verifier Router 实现**:
+
+```zig
+// titan/verifier_router.zig
+// Titan Verifier Router - On-chain proof verification router
+
+const std = @import("std");
+
+/// 验证密钥 ID
+pub const VerifierKeyId = enum(u8) {
+    groth16_bn254 = 0x01,
+    plonk_bn254 = 0x02,
+    stark_goldilocks = 0x03,
+    sp1_receipt = 0x04,
+    risc_zero_receipt = 0x05,
+    noir_ultraplonk = 0x06,
+};
+
+/// 验证者路由接口
+/// 遵循 arXiv:2511.00415 的规范
+pub const VerifierRouter = struct {
+    /// 注册的验证器
+    verifiers: std.AutoHashMap(VerifierKeyId, *const Verifier),
+
+    /// 验证密钥注册表
+    vk_registry: std.AutoHashMap([32]u8, VerificationKey),
+
+    /// 主验证函数
+    /// verify(proof, public_values, vk_id) → {0, 1}
+    pub fn verify(
+        self: *const VerifierRouter,
+        proof: []const u8,
+        public_values: []const u8,
+        vk_id: VerifierKeyId,
+    ) !bool {
+        // 获取对应的验证器
+        const verifier = self.verifiers.get(vk_id) orelse
+            return error.VerifierNotFound;
+
+        // 路由到具体验证器
+        return verifier.verify(proof, public_values);
+    }
+
+    /// 批量验证 (优化 gas)
+    pub fn verifyBatch(
+        self: *const VerifierRouter,
+        proofs: []const ProofBundle,
+    ) !bool {
+        for (proofs) |bundle| {
+            const valid = try self.verify(
+                bundle.proof,
+                bundle.public_values,
+                bundle.vk_id,
+            );
+            if (!valid) return false;
+        }
+        return true;
+    }
+};
+
+/// 证明包
+pub const ProofBundle = struct {
+    proof: []const u8,
+    public_values: []const u8,
+    vk_id: VerifierKeyId,
+};
+
+/// 验证密钥
+pub const VerificationKey = struct {
+    id: [32]u8,
+    vk_type: VerifierKeyId,
+    data: []const u8,
+    version: u32,
+    audit_hash: [32]u8,
+};
+
+/// 抽象验证器接口
+pub const Verifier = struct {
+    verify_fn: *const fn ([]const u8, []const u8) bool,
+
+    pub fn verify(self: *const Verifier, proof: []const u8, public_values: []const u8) bool {
+        return self.verify_fn(proof, public_values);
+    }
+};
+
+// ============================================================
+// 链上程序入口
+// ============================================================
+
+/// Titan On-chain Program = Verifier Router
+pub fn processInstruction(
+    instruction_data: []const u8,
+) !void {
+    // 解析指令
+    const ix_type = instruction_data[0];
+
+    switch (ix_type) {
+        0x01 => {
+            // VERIFY_PROOF
+            const vk_id: VerifierKeyId = @enumFromInt(instruction_data[1]);
+            const proof_len = std.mem.readInt(u32, instruction_data[2..6], .little);
+            const proof = instruction_data[6..][0..proof_len];
+            const public_values = instruction_data[6 + proof_len ..];
+
+            var router = getRouterInstance();
+            const valid = try router.verify(proof, public_values, vk_id);
+
+            if (!valid) {
+                return error.InvalidProof;
+            }
+        },
+        0x02 => {
+            // REGISTER_VK
+            // 注册新验证密钥
+        },
+        0x03 => {
+            // UPDATE_VK
+            // 更新验证密钥版本
+        },
+        else => return error.UnknownInstruction,
+    }
+}
+
+fn getRouterInstance() *VerifierRouter {
+    // 获取单例路由器
+    // 实际实现中从 Account 读取状态
+    return undefined;
+}
+```
+
+**Titan 的威力**:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                 │
+│           Titan = Verifier Router 的工程化实现                   │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  开发者体验:                                                     │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                                                         │   │
+│  │  用户写 Zig 代码                                        │   │
+│  │                                                         │   │
+│  │  ```zig                                                 │   │
+│  │  const titan = @import("titan");                        │   │
+│  │                                                         │   │
+│  │  pub fn private_swap(ctx: titan.Context) !void {        │   │
+│  │      // 业务逻辑                                        │   │
+│  │  }                                                      │   │
+│  │  ```                                                    │   │
+│  │                          │                              │   │
+│  │                          ▼                              │   │
+│  │                                                         │   │
+│  │  Titan 编译器决定底层证明系统                           │   │
+│  │                          │                              │   │
+│  │          ┌───────────────┼───────────────┐              │   │
+│  │          │               │               │              │   │
+│  │          ▼               ▼               ▼              │   │
+│  │      ┌──────┐       ┌──────┐       ┌──────┐            │   │
+│  │      │ Noir │       │ SP1  │       │RISC0 │            │   │
+│  │      └───┬──┘       └───┬──┘       └───┬──┘            │   │
+│  │          │              │              │                │   │
+│  │          └──────────────┼──────────────┘                │   │
+│  │                         │                               │   │
+│  │                         ▼                               │   │
+│  │              ┌───────────────────┐                      │   │
+│  │              │ Verifier Router   │                      │   │
+│  │              │ (On-chain)        │                      │   │
+│  │              │                   │                      │   │
+│  │              │ verify(π, pub, vk)│                      │   │
+│  │              └───────────────────┘                      │   │
+│  │                                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│  完美体现 Titan 作为 "抽象层" 的价值                            │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.42.6 携带证明的跨链消息 (PCIM)
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                 │
+│          Proof-Carrying Interchain Message (PCIM)                │
+│                                                                 │
+│  定义:                                                           │
+│  PCM 的跨链扩展，嵌入:                                           │
+│  • 最终性标签 (Finality Tag)                                    │
+│  • 单次使用标识符 (Single-use Identifier)                       │
+│  • 参数承诺 (Parameter Commitment)                              │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                                                         │   │
+│  │                      PCIM 结构                          │   │
+│  │                                                         │   │
+│  │  ┌───────────────────────────────────────────────────┐ │   │
+│  │  │                                                   │ │   │
+│  │  │  ┌─────────────────────────────────────────────┐ │ │   │
+│  │  │  │  PCM (基础消息)                             │ │ │   │
+│  │  │  │  • command                                  │ │ │   │
+│  │  │  │  • params_commitment                        │ │ │   │
+│  │  │  │  • identifier                               │ │ │   │
+│  │  │  │  • proof                                    │ │ │   │
+│  │  │  └─────────────────────────────────────────────┘ │ │   │
+│  │  │                                                   │ │   │
+│  │  │  ┌─────────────────────────────────────────────┐ │ │   │
+│  │  │  │  跨链扩展字段                               │ │ │   │
+│  │  │  │  • source_chain_id                          │ │ │   │
+│  │  │  │  • finality_tag                             │ │ │   │
+│  │  │  │  • destination_chain_id                     │ │ │   │
+│  │  │  │  • bridge_attestation                       │ │ │   │
+│  │  │  └─────────────────────────────────────────────┘ │ │   │
+│  │  │                                                   │ │   │
+│  │  └───────────────────────────────────────────────────┘ │   │
+│  │                                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│  价值:                                                           │
+│                                                                 │
+│  接收者可以机械地验证:                                           │
+│  1. 消息起源 (不依赖 bridge 内部实现)                           │
+│  2. 防止重放攻击                                                │
+│  3. 确认参数绑定跨域有效                                        │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Titan 的 PCIM 扩展** (为跨链准备):
+
+```zig
+// titan/pcim.zig
+// Titan Proof-Carrying Interchain Message
+
+const std = @import("std");
+const titan = @import("titan");
+const pcm = @import("pcm.zig");
+
+/// 链 ID
+pub const ChainId = enum(u32) {
+    solana_mainnet = 1,
+    solana_devnet = 2,
+    bitcoin_mainnet = 100,
+    ton_mainnet = 200,
+    kaspa_mainnet = 300,
+    // ... 更多链
+};
+
+/// Proof-Carrying Interchain Message (PCIM)
+/// arXiv:2511.00415 定义的跨链扩展
+pub const ProofCarryingInterchainMessage = struct {
+    /// 基础 PCM
+    base: pcm.ProofCarryingMessage,
+
+    /// 源链 ID
+    source_chain_id: ChainId,
+
+    /// 目标链 ID
+    destination_chain_id: ChainId,
+
+    /// 最终性标签
+    /// 证明消息在源链上已达到最终性
+    finality_tag: FinalityTag,
+
+    /// Bridge 证明
+    /// 可以是签名、ZK 证明、或其他形式
+    bridge_attestation: BridgeAttestation,
+
+    /// 创建 PCIM
+    pub fn create(
+        base_pcm: pcm.ProofCarryingMessage,
+        source: ChainId,
+        destination: ChainId,
+        finality: FinalityTag,
+    ) ProofCarryingInterchainMessage {
+        return .{
+            .base = base_pcm,
+            .source_chain_id = source,
+            .destination_chain_id = destination,
+            .finality_tag = finality,
+            .bridge_attestation = .{},
+        };
+    }
+
+    /// 验证跨链消息
+    pub fn verify(self: *const ProofCarryingInterchainMessage) !bool {
+        // 1. 验证基础 PCM
+        // ...
+
+        // 2. 验证最终性标签
+        if (!self.finality_tag.isFinalized()) {
+            return error.NotFinalized;
+        }
+
+        // 3. 验证 Bridge 证明
+        if (!self.bridge_attestation.isValid()) {
+            return error.InvalidBridgeAttestation;
+        }
+
+        return true;
+    }
+};
+
+/// 最终性标签
+pub const FinalityTag = struct {
+    /// 区块高度
+    block_height: u64,
+    /// 区块哈希
+    block_hash: [32]u8,
+    /// 确认数
+    confirmations: u32,
+    /// 最终性类型
+    finality_type: FinalityType,
+
+    pub const FinalityType = enum {
+        /// 概率最终性 (如比特币)
+        probabilistic,
+        /// 即时最终性 (如 Tendermint)
+        instant,
+        /// 经济最终性 (如以太坊 PoS)
+        economic,
+    };
+
+    pub fn isFinalized(self: *const FinalityTag) bool {
+        return switch (self.finality_type) {
+            .probabilistic => self.confirmations >= 6,
+            .instant => self.confirmations >= 1,
+            .economic => self.confirmations >= 32,
+        };
+    }
+};
+
+/// Bridge 证明
+pub const BridgeAttestation = struct {
+    /// 证明类型
+    attestation_type: AttestationType,
+    /// 证明数据
+    data: []const u8,
+
+    pub const AttestationType = enum {
+        /// 多签证明 (如 Wormhole VAA)
+        multisig,
+        /// ZK 证明 (轻客户端)
+        zk_light_client,
+        /// 乐观证明 (带挑战期)
+        optimistic,
+    };
+
+    pub fn isValid(self: *const BridgeAttestation) bool {
+        // 验证逻辑
+        return true;
+    }
+};
+```
+
+#### 18.42.7 与 Solana 三大 ZK 支柱的对齐
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                 │
+│           Titan OS 与 Solana 三大 ZK 支柱的对齐                  │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Solana Foundation 三大 ZK 支柱:                                 │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                                                         │   │
+│  │  1. ZK Compression                                      │   │
+│  │     • 实现: Light Protocol + Helius                     │   │
+│  │     • 功能: 压缩状态存储，100-1000x 成本降低            │   │
+│  │                                                         │   │
+│  │     Titan 对接:                                         │   │
+│  │     • titan.compression 模块                            │   │
+│  │     • 通过 C ABI 调用 Light Protocol SDK                │   │
+│  │     • 统一压缩状态 API                                  │   │
+│  │                                                         │   │
+│  │  ─────────────────────────────────────────────────────  │   │
+│  │                                                         │   │
+│  │  2. Confidential Transfer                               │   │
+│  │     • 功能: 隐私资产转账，选择性披露                    │   │
+│  │     • 特性: 角色化披露，审计能力                        │   │
+│  │                                                         │   │
+│  │     Titan 对接:                                         │   │
+│  │     • titan.privacy 模块                                │   │
+│  │     • 隐私 Swap 实现                                    │   │
+│  │     • Pedersen Commitment + Nullifier                   │   │
+│  │                                                         │   │
+│  │  ─────────────────────────────────────────────────────  │   │
+│  │                                                         │   │
+│  │  3. Light Clients / Bridges                             │   │
+│  │     • 功能: 轻量级状态验证                              │   │
+│  │     • 实现: Tinydancer, Wormhole                        │   │
+│  │                                                         │   │
+│  │     Titan 对接:                                         │   │
+│  │     • PCIM 跨链消息标准                                 │   │
+│  │     • 支持多链状态同步                                  │   │
+│  │     • Bitcoin, TON 集成                                 │   │
+│  │                                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│  Titan 的定位:                                                   │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                                                         │   │
+│  │                  三大 ZK 支柱                            │   │
+│  │                      ▲                                  │   │
+│  │                      │                                  │   │
+│  │  ┌───────────────────┼───────────────────────────────┐ │   │
+│  │  │                   │                               │ │   │
+│  │  │               TITAN OS                            │ │   │
+│  │  │     (开发者工具链 + 统一抽象层)                   │ │   │
+│  │  │                   │                               │ │   │
+│  │  │   ┌───────────────┼───────────────────────────┐  │ │   │
+│  │  │   │               │                           │  │ │   │
+│  │  │   ▼               ▼                           ▼  │ │   │
+│  │  │ ZK           Confidential         Light         │ │   │
+│  │  │ Compression  Transfer             Clients       │ │   │
+│  │  │                                                  │ │   │
+│  │  └──────────────────────────────────────────────────┘ │   │
+│  │                                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.42.8 Hackathon Pitch 升级
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                 │
+│           Titan OS - 学术理论背书的 Pitch                        │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  英文 Pitch (面向国际评委):                                      │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                                                         │   │
+│  │  "Recent research on Solana ZK Architecture             │   │
+│  │   (arXiv:2511.00415) proposes a theoretical framework   │   │
+│  │   for off-chain execution known as                      │   │
+│  │   Proof-Carrying Messages (PCM).                        │   │
+│  │                                                         │   │
+│  │   Titan OS is the FIRST practical implementation        │   │
+│  │   of this theory.                                       │   │
+│  │                                                         │   │
+│  │   We provide:                                           │   │
+│  │   • Developer tooling (Zig SDK) to generate PCMs        │   │
+│  │   • On-chain Verifier Router to settle them             │   │
+│  │                                                         │   │
+│  │   We ensure the 5 Security Invariants identified        │   │
+│  │   in the paper are AUTOMATICALLY handled by             │   │
+│  │   our compiler, making secure ZK development            │   │
+│  │   accessible to everyone.                               │   │
+│  │                                                         │   │
+│  │   Titan OS: Theory meets Practice."                     │   │
+│  │                                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│  中文 Pitch (面向中文评委):                                      │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                                                         │   │
+│  │  "2025 年 11 月发表的 Solana ZK 架构理论                │   │
+│  │   (arXiv:2511.00415) 提出了链下执行的理论框架            │   │
+│  │   —— 携带证明的消息 (PCM)。                              │   │
+│  │                                                         │   │
+│  │   Titan OS 是这一理论的首个工程化实现。                 │   │
+│  │                                                         │   │
+│  │   我们提供:                                             │   │
+│  │   • Zig SDK: 生成符合 PCM 标准的交易                    │   │
+│  │   • Verifier Router: 链上验证路由接口                   │   │
+│  │                                                         │   │
+│  │   论文定义的 5 大安全不变量                             │   │
+│  │   由我们的编译器自动处理，                              │   │
+│  │   让安全的 ZK 开发触手可及。                            │   │
+│  │                                                         │   │
+│  │   Titan OS: 从前沿理论到工程落地。"                     │   │
+│  │                                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  价值提升:                                                       │
+│                                                                 │
+│  之前: "一个 Zig 开发工具"                                       │
+│                                                                 │
+│  现在: "前沿学术理论的工程化落地"                                │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                                                         │   │
+│  │  学术理论                     工程实现                  │   │
+│  │  (arXiv:2511.00415)          (Titan OS)                 │   │
+│  │                                                         │   │
+│  │  PCM 定义        ──────────►  Titan Transaction        │   │
+│  │  5 大不变量      ──────────►  编译器自动处理           │   │
+│  │  Verifier Router ──────────►  链上程序                 │   │
+│  │  PCIM 跨链      ──────────►  多链扩展                  │   │
+│  │                                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.42.9 理论与实现的完整映射
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                 │
+│           arXiv:2511.00415 → Titan OS 完整映射表                 │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  论文概念                    Titan 实现                          │
+│  ───────────────────────────────────────────────────────────── │
+│                                                                 │
+│  双轴模型                                                        │
+│  ├─ 链下 × 可扩展性          titan build (SBF + Native)         │
+│  └─ 链下 × 隐私              titan.zk.assert_* 约束             │
+│                                                                 │
+│  PCM 元组 (m, Com, i, π)                                        │
+│  ├─ m (命令)                 Command struct                     │
+│  ├─ Com(params)              params_commitment: [32]u8          │
+│  ├─ i (标识符)               Identifier struct                  │
+│  └─ π (证明)                 titan.zk.Proof                     │
+│                                                                 │
+│  5 大安全不变量                                                  │
+│  ├─ Origin Authenticity      Ed25519 签名验证                   │
+│  ├─ Replay Safety            Nullifier 机制                     │
+│  ├─ Finality Alignment       Slot 绑定                          │
+│  ├─ Parameter Binding        Pedersen Commitment                │
+│  └─ Private Consumption      私有 Witness                       │
+│                                                                 │
+│  Verifier Router Interface   VerifierRouter struct              │
+│  └─ verify(π, pub, vk_id)    router.verify() 方法               │
+│                                                                 │
+│  PCIM (跨链扩展)             ProofCarryingInterchainMessage     │
+│  ├─ finality_tag             FinalityTag struct                 │
+│  └─ bridge_attestation       BridgeAttestation struct           │
+│                                                                 │
+│  三大 ZK 支柱                                                    │
+│  ├─ ZK Compression           titan.compression 模块             │
+│  ├─ Confidential Transfer    titan.privacy 模块                 │
+│  └─ Light Clients            PCIM + 多链支持                    │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Titan OS = arXiv:2511.00415 理论的首个完整实现                  │
+│                                                                 │
+│  "Theory meets Practice."                                       │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.42.10 论文引用与致谢
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                 │
+│                        学术引用                                  │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  BibTeX 引用:                                                    │
+│                                                                 │
+│  @article{yano2025zksolana,                                     │
+│    title   = {Zero-Knowledge Extensions on Solana:              │
+│               A Theory of ZK Architecture},                     │
+│    author  = {Yano, Jotaro},                                    │
+│    journal = {arXiv preprint arXiv:2511.00415},                 │
+│    year    = {2025},                                            │
+│    month   = {November}                                         │
+│  }                                                              │
+│                                                                 │
+│  在白皮书中引用:                                                 │
+│                                                                 │
+│  "Titan OS 的架构设计基于 Yano (2025) 提出的                     │
+│   Solana ZK 架构理论框架 [arXiv:2511.00415]，                   │
+│   特别是其中的携带证明消息 (PCM) 抽象和                         │
+│   五大安全不变量定义。"                                         │
+│                                                                 │
+│  "The architectural design of Titan OS is based on              │
+│   the Solana ZK Architecture theoretical framework              │
+│   proposed by Yano (2025) [arXiv:2511.00415],                   │
+│   particularly the Proof-Carrying Message (PCM)                 │
+│   abstraction and the five security invariants."                │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  相关项目引用 (来自论文):                                        │
+│                                                                 │
+│  • Light Protocol - ZK Compression 实现                         │
+│  • Helius - 索引基础设施                                        │
+│  • Arcium - MPC 隐私计算                                        │
+│  • SP1 / RISC Zero - 通用 zkVM                                  │
+│  • Wormhole - 跨链消息证明                                      │
+│  • Tinydancer - Solana 轻客户端                                 │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
 ## 相关文档
 
 | 文档 | 说明 |
