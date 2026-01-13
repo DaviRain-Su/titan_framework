@@ -38,9 +38,18 @@ const CONFIG = {
     network: 'testnet',
     programId: 'GZfqgHqekzR4D8TAq165XB8U2boVdK5ehEEH4n7u4Xts',
     poolAccounts: {
-        poolAccount: '3Lz9gKbA1kB4V4bu4cGVpXrvStpUs48iBKX56ksw6Wbt',
-        merkleAccount: 'DNNEL3RqN2kNYdGn65VgLHiMoUEoi49mms15nsYFVwgQ',
-        nullifierAccount: 'Hh6pbngRGfnQ7T5casM4eobwQyJe1LDSRjAA9EVx2rtE',
+        poolAccount: '4K65JKhxhUtDarHarbKXLnk6Uq8XN6ocnqfPTTmweQ1D',
+        merkleAccount: 'FhmBWQcLxFAFqRUvGPzUeZ6N8gSEk7eqc2LQbJidbBfr',
+        nullifierAccount: 'jeXXRuP24GSd43E6kjTa1yct6P65XwbjvjNxQ99AymY',
+        poolAuthority: 'DEuAfZux9RonRvB3bP4BL6xeE576y54dLFuAQEoTub55',
+    },
+    // SPL Token accounts for public swaps
+    tokenAccounts: {
+        wsolMint: 'So11111111111111111111111111111111111111112',
+        usdcMint: '3fZgymugtSbiW6eQgnVkGRwPeJxueXrSHPgMhBRWkFN6',
+        lpMint: '5jx6pL7uGSfZqiG94Bh6b94M1yNt7YwLS1AWcQQ2i3XB',
+        poolWsolVault: 'HNgkrsnGRZRPStxuv8LuDWaxQFQfGA9TpjvLHPavW7k8',
+        poolUsdcVault: '6wpex9bRe3Gw2yeAYpXSFfjZPLVyVpWYhGoqJnDzuhWJ',
     },
 };
 
