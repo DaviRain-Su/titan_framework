@@ -20,12 +20,14 @@ pub const Instruction = enum(u8) {
     Deposit = 1,
     /// 取出资产 (隐私 → 公开)
     Withdraw = 2,
-    /// 隐私交换
+    /// 隐私交换 (需要 ZK 证明)
     Swap = 3,
     /// 添加流动性 (LP)
     AddLiquidity = 4,
     /// 移除流动性 (LP)
     RemoveLiquidity = 5,
+    /// 公开交换 (用于测试 AMM 逻辑)
+    PublicSwap = 6,
 };
 
 // 程序错误码
@@ -67,6 +69,7 @@ fn processEntry(input: [*]u8) u64 {
         .Swap => handleSwap(context, ix_data),
         .AddLiquidity => handleAddLiquidity(context, ix_data),
         .RemoveLiquidity => handleRemoveLiquidity(context, ix_data),
+        .PublicSwap => handlePublicSwap(context, ix_data),
     };
 
     return result;
@@ -380,6 +383,72 @@ fn handleRemoveLiquidity(context: sol.context.Context, data: []const u8) u64 {
     return 0;
 }
 
+fn handlePublicSwap(context: sol.context.Context, data: []const u8) u64 {
+    sol.log.log("PublicSwap");
+
+    // Account layout:
+    // [0] swapper: User performing the swap (signer)
+    // [1] pool_account: Pool state
+    // [2] user_token_in: User's input token account
+    // [3] user_token_out: User's output token account
+    // [4] pool_vault_in: Pool's input token vault
+    // [5] pool_vault_out: Pool's output token vault
+    // [6] pool_authority: PDA authority for the pool
+    // [7] token_program: SPL Token program
+
+    if (context.accounts.len < 8) {
+        return @intFromEnum(ErrorCode.NotEnoughAccountKeys);
+    }
+
+    const swapper = context.accounts[0];
+    if (!swapper.isSigner()) {
+        return @intFromEnum(ErrorCode.MissingRequiredSignature);
+    }
+
+    const pool_account = context.accounts[1];
+    const user_token_in = context.accounts[2];
+    const user_token_out = context.accounts[3];
+    const pool_vault_in = context.accounts[4];
+    const pool_vault_out = context.accounts[5];
+    const pool_authority = context.accounts[6];
+    // accounts[7] = token_program
+
+    const params = pool.PublicSwapParams.deserialize(data) catch {
+        return @intFromEnum(ErrorCode.InvalidInstructionData);
+    };
+
+    // Execute swap calculation
+    const result = pool.publicSwap(pool_account, params) catch |err| {
+        return switch (err) {
+            error.InsufficientLiquidity => @intFromEnum(ErrorCode.InsufficientLiquidity),
+            error.SlippageExceeded => @intFromEnum(ErrorCode.SlippageExceeded),
+            error.InvalidInstructionData => @intFromEnum(ErrorCode.InvalidInstructionData),
+            else => @intFromEnum(ErrorCode.InvalidAccountData),
+        };
+    };
+
+    // Transfer input tokens from user to pool vault
+    spl_token.transfer(user_token_in, pool_vault_in, swapper, params.amount_in) catch {
+        sol.log.log("Input transfer failed");
+        return @intFromEnum(ErrorCode.InvalidAccountData);
+    };
+
+    // Transfer output tokens from pool vault to user (pool_authority is PDA signer)
+    const pool_data = pool_account.data();
+    const bump_value = pool_data[1]; // bump is at offset 1 in PoolState
+    const bump_slice: [1]u8 = .{bump_value};
+
+    const pool_info = pool_account.info();
+    const pool_seeds = getPoolAuthoritySeedsWithBump(pool_info, &bump_slice);
+    spl_token.transferSigned(pool_vault_out, user_token_out, pool_authority, result.amount_out, &pool_seeds) catch {
+        sol.log.log("Output transfer failed");
+        return @intFromEnum(ErrorCode.InvalidAccountData);
+    };
+
+    sol.log.log("PublicSwap done");
+    return 0;
+}
+
 /// Pool authority PDA seed prefix
 const POOL_AUTHORITY_SEED: []const u8 = "pool_authority";
 
@@ -418,6 +487,9 @@ test "instruction enum" {
 
     const remove_liq: Instruction = .RemoveLiquidity;
     try std.testing.expectEqual(@as(u8, 5), @intFromEnum(remove_liq));
+
+    const public_swap: Instruction = .PublicSwap;
+    try std.testing.expectEqual(@as(u8, 6), @intFromEnum(public_swap));
 }
 
 test "imports" {

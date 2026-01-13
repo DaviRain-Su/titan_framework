@@ -222,6 +222,27 @@ pub const RemoveLiquidityParams = struct {
     }
 };
 
+/// 公开交换参数 (用于测试 AMM 逻辑)
+pub const PublicSwapParams = struct {
+    /// 输入金额
+    amount_in: u64,
+    /// 最小输出金额 (滑点保护)
+    min_amount_out: u64,
+    /// 交换方向: 0 = A→B, 1 = B→A
+    direction: u8,
+
+    pub fn deserialize(data: []const u8) !PublicSwapParams {
+        if (data.len < 17) {
+            return error.InvalidInstructionData;
+        }
+        var params: PublicSwapParams = undefined;
+        params.amount_in = std.mem.readInt(u64, data[0..8], .little);
+        params.min_amount_out = std.mem.readInt(u64, data[8..16], .little);
+        params.direction = data[16];
+        return params;
+    }
+};
+
 /// Swap 参数
 pub const SwapParams = struct {
     /// ZK 证明
@@ -428,6 +449,81 @@ pub fn removeLiquidity(account: sol.account.Account, params: RemoveLiquidityPara
     return .{ .a = amount_a, .b = amount_b };
 }
 
+/// 公开交换 (恒定乘积 AMM)
+/// 公式: dy = (y * dx * 997) / (x * 1000 + dx * 997)
+/// 0.3% 手续费
+pub fn publicSwap(account: sol.account.Account, params: PublicSwapParams) !struct { amount_out: u64 } {
+    const data = account.data();
+    var state = try PoolState.deserialize(data);
+
+    // 检查池是否已初始化
+    if (!state.is_initialized) {
+        return error.InvalidAccountData;
+    }
+
+    // 确定输入/输出储备
+    var reserve_in: u64 = undefined;
+    var reserve_out: u64 = undefined;
+
+    if (params.direction == 0) {
+        // A → B
+        reserve_in = state.reserve_a;
+        reserve_out = state.reserve_b;
+    } else {
+        // B → A
+        reserve_in = state.reserve_b;
+        reserve_out = state.reserve_a;
+    }
+
+    // 检查输入有效性
+    if (params.amount_in == 0) {
+        return error.InvalidInstructionData;
+    }
+
+    // 检查流动性
+    if (reserve_in == 0 or reserve_out == 0) {
+        return error.InsufficientLiquidity;
+    }
+
+    // 恒定乘积公式 (含 0.3% 手续费)
+    // amount_out = (reserve_out * amount_in * 997) / (reserve_in * 1000 + amount_in * 997)
+    const amount_in_with_fee = @as(u128, params.amount_in) * 997;
+    const numerator = @as(u128, reserve_out) * amount_in_with_fee;
+    const denominator = @as(u128, reserve_in) * 1000 + amount_in_with_fee;
+
+    const amount_out: u64 = @truncate(numerator / denominator);
+
+    // 检查输出有效性
+    if (amount_out == 0) {
+        return error.InsufficientLiquidity;
+    }
+
+    // 检查输出不超过储备
+    if (amount_out >= reserve_out) {
+        return error.InsufficientLiquidity;
+    }
+
+    // 检查滑点
+    if (amount_out < params.min_amount_out) {
+        return error.SlippageExceeded;
+    }
+
+    // 更新储备量
+    if (params.direction == 0) {
+        // A → B
+        state.reserve_a += params.amount_in;
+        state.reserve_b -= amount_out;
+    } else {
+        // B → A
+        state.reserve_b += params.amount_in;
+        state.reserve_a -= amount_out;
+    }
+
+    try state.serialize(data);
+
+    return .{ .amount_out = amount_out };
+}
+
 /// 整数平方根 (牛顿法)
 fn sqrt_u128(n: u128) u64 {
     if (n == 0) return 0;
@@ -468,4 +564,42 @@ test "pool state serialization" {
     try std.testing.expect(decoded.is_initialized);
     try std.testing.expectEqual(state.reserve_a, decoded.reserve_a);
     try std.testing.expectEqual(state.reserve_b, decoded.reserve_b);
+}
+
+test "constant product swap formula" {
+    // 验证恒定乘积公式
+    // reserve_a = 1000, reserve_b = 1000
+    // swap 100 A → B
+    // 预期: amount_out = (1000 * 100 * 997) / (1000 * 1000 + 100 * 997)
+    //                  = 99700000 / 1099700
+    //                  ≈ 90.66
+
+    const reserve_a: u128 = 1000;
+    const reserve_b: u128 = 1000;
+    const amount_in: u128 = 100;
+
+    const amount_in_with_fee = amount_in * 997;
+    const numerator = reserve_b * amount_in_with_fee;
+    const denominator = reserve_a * 1000 + amount_in_with_fee;
+
+    const amount_out: u64 = @truncate(numerator / denominator);
+
+    // 预期约 90 (含 0.3% 手续费)
+    try std.testing.expect(amount_out >= 90);
+    try std.testing.expect(amount_out <= 91);
+
+    // 验证 k 值增长 (手续费导致)
+    const k_before = reserve_a * reserve_b;
+    const k_after = (reserve_a + amount_in) * (reserve_b - amount_out);
+    try std.testing.expect(k_after >= k_before);
+}
+
+test "sqrt_u128" {
+    try std.testing.expectEqual(@as(u64, 0), sqrt_u128(0));
+    try std.testing.expectEqual(@as(u64, 1), sqrt_u128(1));
+    try std.testing.expectEqual(@as(u64, 10), sqrt_u128(100));
+    try std.testing.expectEqual(@as(u64, 100), sqrt_u128(10000));
+    try std.testing.expectEqual(@as(u64, 1000), sqrt_u128(1000000));
+    // sqrt(1000000 * 2000000) ≈ 1414213
+    try std.testing.expectEqual(@as(u64, 1414213), sqrt_u128(1000000 * 2000000));
 }
