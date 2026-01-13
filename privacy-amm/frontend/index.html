@@ -33,10 +33,85 @@
             <!-- Swap Tab -->
             <div id="swap-tab" class="tab-content active">
                 <div class="card swap-card">
-                    <h2>Private Swap</h2>
-                    <p class="subtitle">Swap tokens with zero-knowledge privacy</p>
+                    <!-- Swap Mode Toggle -->
+                    <div class="tabs-inner swap-mode-tabs">
+                        <button class="tab-btn active" data-swap-mode="public">Public Swap</button>
+                        <button class="tab-btn" data-swap-mode="private">Private Swap</button>
+                    </div>
 
-                    <div class="swap-form">
+                    <!-- Public Swap Form -->
+                    <div id="public-swap-form" class="swap-form">
+                        <h2>Public Swap</h2>
+                        <p class="subtitle">Swap wSOL/tUSDC directly from your wallet</p>
+
+                        <div class="input-group">
+                            <label>From</label>
+                            <div class="token-input">
+                                <input type="number" id="public-swap-from-amount" placeholder="0.0" step="0.000001">
+                                <select id="public-swap-from-token">
+                                    <option value="wSOL">wSOL</option>
+                                    <option value="tUSDC">tUSDC</option>
+                                </select>
+                            </div>
+                            <div class="balance">Wallet Balance: <span id="public-from-balance">0.00</span></div>
+                        </div>
+
+                        <button class="swap-direction" id="public-swap-direction">⇅</button>
+
+                        <div class="input-group">
+                            <label>To</label>
+                            <div class="token-input">
+                                <input type="number" id="public-swap-to-amount" placeholder="0.0" readonly>
+                                <select id="public-swap-to-token">
+                                    <option value="tUSDC">tUSDC</option>
+                                    <option value="wSOL">wSOL</option>
+                                </select>
+                            </div>
+                            <div class="balance">Wallet Balance: <span id="public-to-balance">0.00</span></div>
+                        </div>
+
+                        <div class="swap-info">
+                            <div class="info-row">
+                                <span>Rate</span>
+                                <span id="public-swap-rate">1 wSOL = -- tUSDC</span>
+                            </div>
+                            <div class="info-row">
+                                <span>Price Impact</span>
+                                <span id="public-price-impact">--</span>
+                            </div>
+                            <div class="info-row">
+                                <span>Fee</span>
+                                <span>0.3%</span>
+                            </div>
+                        </div>
+
+                        <button id="public-swap-btn" class="btn btn-primary btn-large" disabled>
+                            Connect Wallet to Swap
+                        </button>
+
+                        <div class="info-text" style="margin-top: 1rem; font-size: 0.85rem; color: #888;">
+                            <div style="margin-bottom: 0.5rem;">
+                                <strong>Native SOL Balance:</strong> <span id="native-sol-balance">0.00</span> SOL
+                            </div>
+                            <div style="display: flex; gap: 0.5rem; margin-bottom: 0.5rem;">
+                                <button id="wrap-sol-btn" class="btn btn-secondary btn-small" style="flex: 1;">
+                                    Wrap SOL → wSOL
+                                </button>
+                                <button id="unwrap-sol-btn" class="btn btn-secondary btn-small" style="flex: 1;">
+                                    Unwrap wSOL → SOL
+                                </button>
+                            </div>
+                            <div style="font-size: 0.8rem;">
+                                Note: Public swap uses wSOL (wrapped SOL). Click "Wrap SOL" to convert.
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Private Swap Form (Hidden by default) -->
+                    <div id="private-swap-form" class="swap-form hidden">
+                        <h2>Private Swap</h2>
+                        <p class="subtitle">Swap tokens with zero-knowledge privacy</p>
+
                         <div class="input-group">
                             <label>From</label>
                             <div class="token-input">
@@ -46,7 +121,7 @@
                                     <option value="USDC">USDC</option>
                                 </select>
                             </div>
-                            <div class="balance">Balance: <span id="from-balance">0.00</span></div>
+                            <div class="balance">Private Balance: <span id="from-balance">0.00</span></div>
                         </div>
 
                         <button class="swap-direction" id="swap-direction">⇅</button>
@@ -60,7 +135,7 @@
                                     <option value="SOL">SOL</option>
                                 </select>
                             </div>
-                            <div class="balance">Balance: <span id="to-balance">0.00</span></div>
+                            <div class="balance">Private Balance: <span id="to-balance">0.00</span></div>
                         </div>
 
                         <div class="swap-info">
@@ -81,11 +156,11 @@
                         <button id="swap-btn" class="btn btn-primary btn-large" disabled>
                             Connect Wallet to Swap
                         </button>
-                    </div>
 
-                    <div class="privacy-badge">
-                        <span class="badge-icon">🛡️</span>
-                        <span>Protected by Zero-Knowledge Proofs</span>
+                        <div class="privacy-badge">
+                            <span class="badge-icon">🛡️</span>
+                            <span>Protected by Zero-Knowledge Proofs</span>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -196,6 +271,22 @@
                             Withdraw (Private → Public)
                         </button>
                     </div>
+
+                    <div class="recovery-section" style="margin-top: 1.5rem; padding-top: 1.5rem; border-top: 1px solid var(--border-color);">
+                        <h3 style="font-size: 14px; margin-bottom: 0.5rem;">Lost your UTXOs?</h3>
+                        <p style="font-size: 12px; color: var(--text-secondary); margin-bottom: 0.75rem;">
+                            If you cleared browser data or switched devices, click below to scan the blockchain and recover your private assets.
+                        </p>
+                        <button id="clear-rebuild-btn" class="btn btn-primary" style="width: 100%; margin-bottom: 0.5rem;" disabled>
+                            Clear & Rebuild from Chain
+                        </button>
+                        <button id="recover-utxo-btn" class="btn btn-secondary" style="width: 100%; margin-bottom: 0.5rem;" disabled>
+                            Auto-Recover (Common Amounts)
+                        </button>
+                        <button id="manual-recover-btn" class="btn btn-secondary" style="width: 100%; opacity: 0.8;" disabled>
+                            Manual Recovery (Specific Amount)
+                        </button>
+                    </div>
                 </div>
             </div>
         </main>
@@ -253,14 +344,16 @@
                         <div class="token-input">
                             <input type="number" id="deposit-amount" placeholder="0.0">
                             <select id="deposit-token">
-                                <option value="SOL">SOL</option>
-                                <option value="USDC">USDC</option>
+                                <option value="SOL">wSOL</option>
+                                <option value="USDC">tUSDC</option>
                             </select>
                         </div>
                     </div>
                     <p class="info-text">
-                        This will convert your public tokens to private UTXOs.
-                        Only you will know your balance.
+                        This will transfer wSOL/tUSDC from your wallet to the private pool
+                        and create a private UTXO. Only you will know your balance.
+                        <br><br>
+                        <strong>Note:</strong> You need wSOL (wrapped SOL) or tUSDC tokens.
                     </p>
                     <button id="confirm-deposit" class="btn btn-primary btn-large">
                         Deposit
@@ -280,21 +373,51 @@
                         <div class="token-input">
                             <input type="number" id="withdraw-amount" placeholder="0.0">
                             <select id="withdraw-token">
-                                <option value="SOL">SOL</option>
-                                <option value="USDC">USDC</option>
+                                <option value="SOL">wSOL</option>
+                                <option value="USDC">tUSDC</option>
                             </select>
                         </div>
                     </div>
                     <div class="input-group">
-                        <label>Recipient Address</label>
-                        <input type="text" id="withdraw-recipient" placeholder="Solana address...">
+                        <label>Recipient Wallet Address</label>
+                        <input type="text" id="withdraw-recipient" placeholder="Solana wallet address...">
                     </div>
                     <p class="info-text">
-                        This will convert your private UTXOs to public tokens.
-                        A ZK proof will be generated to verify ownership.
+                        This will transfer wSOL/tUSDC from the private pool to the recipient's
+                        token account. The recipient must have the corresponding token account.
                     </p>
                     <button id="confirm-withdraw" class="btn btn-primary btn-large">
                         Withdraw
+                    </button>
+                </div>
+            </div>
+
+            <!-- Manual Recovery Modal -->
+            <div id="manual-recovery-modal" class="modal hidden">
+                <div class="modal-header">
+                    <h3>Manual UTXO Recovery</h3>
+                    <button class="modal-close">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <p class="info-text" style="margin-bottom: 1rem;">
+                        Enter the exact amount you deposited. The system will scan the blockchain to find your UTXO.
+                    </p>
+                    <div class="input-group">
+                        <label>Deposit Amount</label>
+                        <div class="token-input">
+                            <input type="number" id="manual-recovery-amount" placeholder="0.0" step="0.000001">
+                            <select id="manual-recovery-token">
+                                <option value="SOL">wSOL</option>
+                                <option value="USDC">tUSDC</option>
+                            </select>
+                        </div>
+                    </div>
+                    <p style="font-size: 11px; color: var(--text-secondary); margin-bottom: 1rem;">
+                        Note: This only works for deposits made after the recovery update.
+                        Deposits made with the old version cannot be recovered.
+                    </p>
+                    <button id="confirm-manual-recovery" class="btn btn-primary btn-large">
+                        Search for UTXO
                     </button>
                 </div>
             </div>

@@ -101,39 +101,63 @@ export class UTXOStorage {
     }
 
     /**
-     * Initialize storage with wallet signature
-     * User signs a message to derive encryption key
+     * Initialize storage with wallet public key
+     * Uses wallet-specific storage key for isolation
      */
     async init(wallet, publicKey) {
+        this.walletKey = publicKey;
+        this.storageKey = `privacy-amm-utxos-${publicKey}`;
+
+        // Always use unencrypted storage (encryption was causing issues with some wallets)
+        // The storage is still isolated per wallet address
+        this.key = null;
+        this.loadWalletUtxos();
+        this.initialized = true;
+
+        console.log(`UTXO storage initialized for wallet ${publicKey.slice(0, 8)}...`);
+        console.log(`Loaded ${this.utxos.length} UTXOs from storage`);
+
+        return true;
+    }
+
+    /**
+     * Load UTXOs for current wallet from localStorage
+     */
+    loadWalletUtxos() {
         try {
-            // Create a deterministic message to sign
-            const message = `Privacy AMM UTXO Storage\nPublic Key: ${publicKey}\nPurpose: Derive encryption key`;
-            const encodedMessage = new TextEncoder().encode(message);
+            // Try wallet-specific storage first
+            const data = localStorage.getItem(this.storageKey);
+            if (data) {
+                this.utxos = JSON.parse(data);
+                console.log(`Loaded UTXOs from wallet-specific storage: ${this.utxos.length}`);
+                return;
+            }
 
-            // Request signature from wallet
-            const signature = await wallet.signMessage(encodedMessage, 'utf8');
+            // Fallback to legacy unencrypted storage (migration)
+            const legacyData = localStorage.getItem('privacy-amm-utxos');
+            if (legacyData) {
+                this.utxos = JSON.parse(legacyData);
+                console.log(`Migrated UTXOs from legacy storage: ${this.utxos.length}`);
+                // Save to new wallet-specific location
+                this.saveSync();
+                return;
+            }
 
-            // Use signature as password for key derivation
-            const signatureHex = Array.from(signature.signature)
-                .map(b => b.toString(16).padStart(2, '0'))
-                .join('');
-
-            const salt = getOrCreateSalt();
-            this.key = await deriveEncryptionKey(signatureHex, salt);
-
-            // Load existing UTXOs
-            await this.load();
-
-            this.initialized = true;
-            return true;
-
+            this.utxos = [];
         } catch (err) {
-            console.error('Failed to initialize UTXO storage:', err);
-            // Fallback to unencrypted storage
-            this.key = null;
-            this.loadUnencrypted();
-            this.initialized = true;
-            return false;
+            console.error('Failed to load UTXOs:', err);
+            this.utxos = [];
+        }
+    }
+
+    /**
+     * Synchronous save (used during migration)
+     */
+    saveSync() {
+        try {
+            localStorage.setItem(this.storageKey, JSON.stringify(this.utxos));
+        } catch (err) {
+            console.error('Failed to save UTXOs:', err);
         }
     }
 
@@ -171,13 +195,9 @@ export class UTXOStorage {
      */
     async save() {
         try {
-            if (this.key) {
-                const encrypted = await encrypt(this.utxos, this.key);
-                localStorage.setItem(STORAGE_KEY, encrypted);
-            } else {
-                // Fallback to unencrypted
-                localStorage.setItem('privacy-amm-utxos', JSON.stringify(this.utxos));
-            }
+            // Use wallet-specific storage key
+            const key = this.storageKey || 'privacy-amm-utxos';
+            localStorage.setItem(key, JSON.stringify(this.utxos));
         } catch (err) {
             console.error('Failed to save UTXOs:', err);
         }
@@ -243,7 +263,13 @@ export class UTXOStorage {
      */
     selectUtxos(assetId, targetAmount) {
         const available = this.getByAsset(assetId)
-            .sort((a, b) => BigInt(b.amount) - BigInt(a.amount)); // Largest first
+            .sort((a, b) => {
+                // BigInt comparison - sort() needs Number return value
+                const diff = BigInt(b.amount) - BigInt(a.amount);
+                if (diff > 0n) return 1;
+                if (diff < 0n) return -1;
+                return 0;
+            }); // Largest first
 
         const selected = [];
         let total = 0n;
@@ -314,4 +340,29 @@ export class UTXOStorage {
  */
 export function createUTXOStorage() {
     return new UTXOStorage();
+}
+
+/**
+ * Get the current deposit nonce (next available)
+ * Used for deterministic blinding derivation
+ */
+export function getDepositNonce() {
+    const nonce = localStorage.getItem('privacy-amm-deposit-nonce');
+    return nonce ? parseInt(nonce, 10) : 0;
+}
+
+/**
+ * Increment and save the deposit nonce
+ */
+export function incrementDepositNonce() {
+    const nonce = getDepositNonce();
+    localStorage.setItem('privacy-amm-deposit-nonce', (nonce + 1).toString());
+    return nonce + 1;
+}
+
+/**
+ * Reset the deposit nonce (use with caution!)
+ */
+export function resetDepositNonce() {
+    localStorage.setItem('privacy-amm-deposit-nonce', '0');
 }

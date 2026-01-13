@@ -215,20 +215,24 @@ export async function syncMerkleTreeFromChain(rpcUrl, merkleAccountPubkey) {
         const data = Buffer.from(result.result.value.data[0], 'base64');
 
         // Parse on-chain Merkle state
-        // Format: [next_index: u32, leaves: [commitment; max_leaves]]
-        const nextIndex = data.readUInt32LE(0);
+        // Format: [root: [u8; 32], next_index: u32, leaves: [commitment; max_leaves]]
+        // Root is at offset 0-32, next_index at offset 32-36, leaves start at offset 36
+        const ROOT_SIZE = 32;
+        const NEXT_INDEX_OFFSET = ROOT_SIZE;
+        const LEAVES_OFFSET = ROOT_SIZE + 4;
+        const COMMITMENT_SIZE = 32;
+
+        const nextIndex = data.readUInt32LE(NEXT_INDEX_OFFSET);
+        console.log(`On-chain Merkle tree has ${nextIndex} leaves`);
 
         const tree = await createMerkleTree();
 
         // Read and insert leaves
-        const COMMITMENT_SIZE = 32;
-        const HEADER_SIZE = 4;
-
         for (let i = 0; i < nextIndex; i++) {
-            const offset = HEADER_SIZE + i * COMMITMENT_SIZE;
+            const offset = LEAVES_OFFSET + i * COMMITMENT_SIZE;
             const commitmentBytes = data.slice(offset, offset + COMMITMENT_SIZE);
 
-            // Convert bytes to field element string
+            // Convert bytes to field element string (little-endian)
             let commitment = BigInt(0);
             for (let j = 31; j >= 0; j--) {
                 commitment = commitment * 256n + BigInt(commitmentBytes[j]);

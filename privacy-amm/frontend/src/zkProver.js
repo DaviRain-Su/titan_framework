@@ -106,6 +106,50 @@ export function randomFieldElement() {
 }
 
 /**
+ * Derive deterministic blinding factor for UTXO recovery
+ * blinding = Poseidon(privateKey, nonce, amount, assetId)
+ * This allows recovery by scanning nonces if localStorage is lost
+ */
+export async function deriveBlinding(privateKey, nonce, amount, assetId) {
+    return poseidonHash([privateKey, nonce.toString(), amount.toString(), assetId.toString()]);
+}
+
+/**
+ * Try to find UTXO by scanning nonces
+ * Returns the nonce and blinding if found, null otherwise
+ */
+export async function scanForUtxo(commitment, privateKey, pubkey, amount, assetId, maxNonce = 1000) {
+    for (let nonce = 0; nonce < maxNonce; nonce++) {
+        const blinding = await deriveBlinding(privateKey, nonce, amount, assetId);
+        const computedCommitment = await computeCommitment(
+            amount.toString(),
+            assetId.toString(),
+            pubkey,
+            blinding
+        );
+
+        if (computedCommitment === commitment) {
+            return { nonce, blinding };
+        }
+    }
+    return null;
+}
+
+/**
+ * Batch scan for multiple possible amounts
+ * Used for recovery when exact amount is unknown
+ */
+export async function scanForUtxoWithAmounts(commitment, privateKey, pubkey, assetId, possibleAmounts, maxNonce = 100) {
+    for (const amount of possibleAmounts) {
+        const result = await scanForUtxo(commitment, privateKey, pubkey, amount, assetId, maxNonce);
+        if (result) {
+            return { amount, ...result };
+        }
+    }
+    return null;
+}
+
+/**
  * Convert base58 public key to field element
  * Used for ZK circuit inputs that need numeric representation of addresses
  */
@@ -187,6 +231,17 @@ export async function generateSwapProof(params) {
             utxo.blinding
         );
         inputCommitments.push(commitment);
+
+        // Debug: Show commitment computation details
+        console.log(`=== Input UTXO ${i} Debug ===`);
+        console.log(`Amount: ${utxo.amount}`);
+        console.log(`AssetId: ${utxo.assetId}`);
+        console.log(`Pubkey (derived): ${pubkey.slice(0, 20)}...`);
+        console.log(`Blinding: ${utxo.blinding.slice(0, 20)}...`);
+        console.log(`Computed commitment: ${commitment.slice(0, 20)}...`);
+        console.log(`Root passed: ${root.slice(0, 20)}...`);
+        console.log(`PathElements[0]: ${utxo.pathElements[0]?.slice(0, 20)}...`);
+        console.log(`=== End Debug ===`);
 
         const nullifier = await computeNullifier(
             commitment,

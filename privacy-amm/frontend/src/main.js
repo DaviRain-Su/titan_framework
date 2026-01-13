@@ -13,6 +13,9 @@ import {
     computeNullifier,
     derivePublicKey,
     randomFieldElement,
+    deriveBlinding,
+    scanForUtxo,
+    scanForUtxoWithAmounts,
     generateSwapProof,
     generateAddLiquidityProof,
     generateRemoveLiquidityProof,
@@ -28,6 +31,9 @@ import {
 
 import {
     createUTXOStorage,
+    getDepositNonce,
+    incrementDepositNonce,
+    resetDepositNonce,
 } from './utxoStorage.js';
 
 // Configuration
@@ -85,6 +91,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     initTabs();
     initWallet();
     initSwap();
+    initPublicSwap();
     initLiquidity();
     initPortfolio();
     initModals();
@@ -180,6 +187,9 @@ async function connectWallet() {
         updateButtonStates(true);
         updatePortfolio();
 
+        // Fetch SPL Token balances for public swap
+        await fetchTokenBalances();
+
         console.log('Connected:', state.publicKey);
 
     } catch (err) {
@@ -189,29 +199,72 @@ async function connectWallet() {
 }
 
 async function deriveZkKeypair() {
+    const storageKey = `privacy-amm-zk-keypair-${state.publicKey}`;
+
+    // First, try to load existing keypair from localStorage
+    const savedKeypair = localStorage.getItem(storageKey);
+    if (savedKeypair) {
+        try {
+            const parsed = JSON.parse(savedKeypair);
+            state.privateKey = parsed.privateKey;
+            state.zkPubkey = parsed.zkPubkey;
+            console.log('ZK keypair loaded from localStorage');
+            return;
+        } catch (parseErr) {
+            console.error('Failed to parse saved keypair:', parseErr);
+        }
+    }
+
+    // Try to derive from wallet signature
     try {
         // Sign a deterministic message to derive ZK private key
         const message = `Privacy AMM ZK Keypair\nPublic Key: ${state.publicKey}\nNetwork: ${CONFIG.network}`;
         const encodedMessage = new TextEncoder().encode(message);
-        const signature = await state.wallet.signMessage(encodedMessage, 'utf8');
+
+        // Try different signMessage patterns for wallet compatibility
+        let signature;
+        try {
+            signature = await state.wallet.signMessage(encodedMessage, 'utf8');
+        } catch (e1) {
+            // Try without encoding parameter
+            signature = await state.wallet.signMessage(encodedMessage);
+        }
 
         // Use first 31 bytes of signature as private key (to stay in field)
-        const sigBytes = signature.signature.slice(0, 31);
+        const sigBytes = signature.signature || signature;
+        const keyBytes = Array.isArray(sigBytes) ? sigBytes.slice(0, 31) : Array.from(new Uint8Array(sigBytes)).slice(0, 31);
+
         let privateKeyNum = BigInt(0);
         for (let i = 0; i < 31; i++) {
-            privateKeyNum = privateKeyNum * 256n + BigInt(sigBytes[i]);
+            privateKeyNum = privateKeyNum * 256n + BigInt(keyBytes[i]);
         }
         state.privateKey = privateKeyNum.toString();
 
         // Derive public key
         state.zkPubkey = await derivePublicKey(state.privateKey);
 
-        console.log('ZK keypair derived');
+        // Save to localStorage for future sessions
+        localStorage.setItem(storageKey, JSON.stringify({
+            privateKey: state.privateKey,
+            zkPubkey: state.zkPubkey,
+        }));
+
+        console.log('ZK keypair derived from wallet signature and saved');
     } catch (err) {
-        console.error('Failed to derive ZK keypair:', err);
-        // Use random keypair as fallback
+        console.error('Failed to derive ZK keypair from signature:', err);
+
+        // Generate new random keypair (first time only)
         state.privateKey = randomFieldElement();
         state.zkPubkey = await derivePublicKey(state.privateKey);
+
+        // Save to localStorage so it persists
+        localStorage.setItem(storageKey, JSON.stringify({
+            privateKey: state.privateKey,
+            zkPubkey: state.zkPubkey,
+        }));
+
+        console.log('Generated new ZK keypair and saved to localStorage');
+        console.log('WARNING: This keypair is random. Future sessions will use the same keypair from localStorage.');
     }
 }
 
@@ -260,15 +313,34 @@ function updateWalletUI(connected) {
 
 function updateButtonStates(connected) {
     document.getElementById('swap-btn').disabled = !connected;
+    document.getElementById('public-swap-btn').disabled = !connected;
     document.getElementById('add-liquidity-btn').disabled = !connected;
     document.getElementById('remove-liquidity-btn').disabled = !connected;
     document.getElementById('deposit-btn').disabled = !connected;
     document.getElementById('withdraw-btn').disabled = !connected;
 
+    // Recovery buttons
+    const clearRebuildBtn = document.getElementById('clear-rebuild-btn');
+    if (clearRebuildBtn) {
+        clearRebuildBtn.disabled = !connected;
+    }
+
+    const recoveryBtn = document.getElementById('recover-utxo-btn');
+    if (recoveryBtn) {
+        recoveryBtn.disabled = !connected;
+    }
+
+    const manualRecoveryBtn = document.getElementById('manual-recover-btn');
+    if (manualRecoveryBtn) {
+        manualRecoveryBtn.disabled = !connected;
+    }
+
     if (connected) {
         document.getElementById('swap-btn').textContent = 'Swap';
+        document.getElementById('public-swap-btn').textContent = 'Swap';
     } else {
         document.getElementById('swap-btn').textContent = 'Connect Wallet to Swap';
+        document.getElementById('public-swap-btn').textContent = 'Connect Wallet to Swap';
     }
 }
 
@@ -361,9 +433,23 @@ async function executeSwap() {
         return;
     }
 
-    showTxModal('Selecting UTXOs...');
+    showTxModal('Syncing Merkle tree...');
 
     try {
+        // CRITICAL: Sync Merkle tree from chain before swap
+        try {
+            state.merkleTree = await syncMerkleTreeFromChain(
+                CONFIG.rpcUrl,
+                CONFIG.poolAccounts.merkleAccount
+            );
+            console.log(`Merkle tree synced: ${state.merkleTree.getLeafCount()} leaves`);
+        } catch (syncErr) {
+            console.error('Failed to sync Merkle tree:', syncErr);
+            throw new Error('Failed to sync with blockchain. Please try again.');
+        }
+
+        updateTxStatus('Selecting UTXOs...');
+
         // Determine asset IDs
         const fromAssetId = fromToken === 'SOL' ? ASSET_SOL : ASSET_USDC;
         const toAssetId = fromToken === 'SOL' ? ASSET_USDC : ASSET_SOL;
@@ -372,11 +458,93 @@ async function executeSwap() {
         const fromAmountRaw = fromToken === 'SOL' ? Math.floor(fromAmount * 1e9) : Math.floor(fromAmount * 1e6);
         const toAmountRaw = fromToken === 'SOL' ? Math.floor(toAmount * 1e6) : Math.floor(toAmount * 1e9);
 
+        // Debug: show all UTXOs in storage
+        const allStoredUtxos = state.utxoStorage.getAll();
+        console.log('=== UTXO Debug ===');
+        console.log('All stored UTXOs:', allStoredUtxos);
+        console.log('Looking for assetId:', fromAssetId, '(type:', typeof fromAssetId, ')');
+        console.log('Target amount:', fromAmountRaw);
+
+        allStoredUtxos.forEach((u, i) => {
+            console.log(`UTXO ${i}: assetId=${u.assetId} (type: ${typeof u.assetId}), amount=${u.amount}, spent=${u.spent}`);
+        });
+
+        const matchingUtxos = allStoredUtxos.filter(u => u.assetId === fromAssetId && !u.spent);
+        console.log('Matching UTXOs (same assetId, not spent):', matchingUtxos);
+
+        const balanceForAsset = state.utxoStorage.getBalance(fromAssetId);
+        console.log('Balance for asset:', balanceForAsset.toString());
+        console.log('=== End Debug ===');
+
         // Select UTXOs for input
-        const selection = state.utxoStorage.selectUtxos(fromAssetId, fromAmountRaw);
+        let selection;
+        try {
+            selection = state.utxoStorage.selectUtxos(fromAssetId, fromAmountRaw);
+        } catch (selectErr) {
+            console.error('selectUtxos failed:', selectErr);
+            throw new Error(`Insufficient private ${fromToken} balance. Please deposit first or recover your UTXOs. (Balance: ${balanceForAsset.toString()}, Need: ${fromAmountRaw})`);
+        }
 
         if (selection.utxos.length === 0) {
-            throw new Error('Insufficient private balance');
+            throw new Error(`No private ${fromToken} balance. Please deposit first or recover your UTXOs.`);
+        }
+
+        // Get all unspent UTXOs of the same asset type (circuit requires same-asset inputs)
+        const allUtxos = state.utxoStorage.getUnspent();
+        const sameAssetUtxos = allUtxos.filter(u => u.assetId === fromAssetId);
+
+        // Check if we have at least 2 UTXOs of the same asset (circuit requirement)
+        if (sameAssetUtxos.length < 2) {
+            throw new Error(
+                `Private swap requires at least 2 ${fromToken} UTXOs. ` +
+                `You currently have ${sameAssetUtxos.length} ${fromToken} UTXO(s). ` +
+                `Please make ${2 - sameAssetUtxos.length} more ${fromToken} deposit(s) first, or use Public Swap instead.`
+            );
+        }
+
+        updateTxStatus('Validating UTXOs...');
+
+        // Validate that UTXOs are in the Merkle tree
+        // If leafIndex is wrong, try to find the correct index
+        for (const utxo of selection.utxos) {
+            const treeLeaves = state.merkleTree.leaves;
+            console.log(`Validating UTXO: commitment=${utxo.commitment.slice(0, 20)}..., leafIndex=${utxo.leafIndex}`);
+
+            // First check if the stored leafIndex is correct
+            if (utxo.leafIndex !== undefined && utxo.leafIndex < treeLeaves.length) {
+                const treeCommitment = treeLeaves[utxo.leafIndex];
+                if (treeCommitment === utxo.commitment) {
+                    console.log(`UTXO validated at leafIndex ${utxo.leafIndex}`);
+                    continue; // Valid!
+                }
+            }
+
+            // LeafIndex is wrong - try to find the commitment in the tree
+            console.log(`LeafIndex ${utxo.leafIndex} invalid, searching tree for commitment...`);
+            let foundIndex = -1;
+            for (let i = 0; i < treeLeaves.length; i++) {
+                if (treeLeaves[i] === utxo.commitment) {
+                    foundIndex = i;
+                    break;
+                }
+            }
+
+            if (foundIndex >= 0) {
+                console.log(`Found commitment at index ${foundIndex}, updating UTXO`);
+                utxo.leafIndex = foundIndex;
+                // Save the corrected leafIndex
+                await state.utxoStorage.save();
+            } else {
+                console.error('Commitment not found in tree:', {
+                    stored: utxo.commitment,
+                    treeSize: treeLeaves.length,
+                    firstFewLeaves: treeLeaves.slice(0, 5),
+                });
+                throw new Error(
+                    `UTXO commitment not found on-chain. This UTXO may not have been deposited successfully. ` +
+                    `Try using Auto-Recover to find your UTXOs.`
+                );
+            }
         }
 
         updateTxStatus('Building input UTXOs...');
@@ -384,20 +552,55 @@ async function executeSwap() {
         // Build input UTXOs with Merkle proofs
         const inputUtxos = [];
         for (let i = 0; i < 2; i++) {
-            const utxo = selection.utxos[i] || createDummyUtxo(fromAssetId);
-            const proof = state.merkleTree.getProof(utxo.leafIndex || 0);
+            let utxo, proof;
+
+            if (i < selection.utxos.length) {
+                utxo = selection.utxos[i];
+            } else {
+                // Need a second input for the circuit - find another same-asset UTXO not in selection
+                const otherUtxo = sameAssetUtxos.find(u =>
+                    !selection.utxos.some(s => s.commitment === u.commitment) &&
+                    u.leafIndex !== undefined
+                );
+
+                if (!otherUtxo) {
+                    throw new Error('Cannot find a second UTXO of the same asset. This should not happen.');
+                }
+
+                utxo = otherUtxo;
+            }
+
+            // Get Merkle proof for this UTXO
+            proof = state.merkleTree.getProof(utxo.leafIndex);
+            const treeCommitment = state.merkleTree.leaves[utxo.leafIndex];
+            console.log(`Input UTXO ${i}: leafIndex=${utxo.leafIndex}, amount=${utxo.amount}, assetId=${utxo.assetId}`);
+            console.log(`  Stored commitment: ${utxo.commitment?.slice(0, 30)}...`);
+            console.log(`  Tree commitment:   ${treeCommitment?.slice(0, 30)}...`);
+            console.log(`  Blinding: ${utxo.blinding?.slice(0, 30)}...`);
 
             inputUtxos.push({
                 amount: utxo.amount || '0',
                 assetId: fromAssetId.toString(),
                 privateKey: state.privateKey,
-                blinding: utxo.blinding || randomFieldElement(),
+                blinding: utxo.blinding,
                 pathElements: proof.pathElements,
                 pathIndices: proof.pathIndices,
             });
         }
 
+        // Calculate total input amount from ALL input UTXOs
+        const totalInputAmount = inputUtxos.reduce(
+            (sum, u) => sum + BigInt(u.amount),
+            0n
+        );
+        // Change = total input - swap amount
+        const changeAmount = totalInputAmount - BigInt(fromAmountRaw);
+
+        console.log(`Total input: ${totalInputAmount}, Swap: ${fromAmountRaw}, Change: ${changeAmount}`);
+
         // Build output UTXOs
+        // Output 0: What user receives from the swap (in the target asset)
+        // Output 1: Change returned to user (in the source asset)
         const outputUtxos = [
             {
                 amount: toAmountRaw.toString(),
@@ -406,7 +609,7 @@ async function executeSwap() {
                 blinding: randomFieldElement(),
             },
             {
-                amount: selection.change,
+                amount: changeAmount.toString(),
                 assetId: fromAssetId.toString(),
                 pubkey: state.zkPubkey,
                 blinding: randomFieldElement(),
@@ -503,13 +706,577 @@ async function executeSwap() {
     }
 }
 
+/**
+ * Create a valid dummy UTXO for the circuit
+ * The circuit requires 2 input UTXOs. If user only has 1, we need a valid dummy.
+ *
+ * IMPORTANT: The dummy UTXO's commitment must exist in the Merkle tree.
+ * Since we can't create a new commitment on-the-fly, we must use an existing one.
+ *
+ * For MVP: We require users to have 2 UTXOs. This function throws if we can't
+ * create a valid dummy (which means the user needs to deposit more).
+ */
+async function createValidDummyUtxo(assetId) {
+    // Check if user has any other UTXOs that can be used as dummy (amount 0 UTXOs)
+    const allUtxos = state.utxoStorage.getUnspent();
+    const zeroUtxo = allUtxos.find(u => u.amount === '0' || BigInt(u.amount) === 0n);
+
+    if (zeroUtxo) {
+        return zeroUtxo;
+    }
+
+    // No zero-amount UTXO available
+    // For the circuit to work, we need a commitment that exists in the Merkle tree
+    // The only way to have this is to have deposited a zero-amount UTXO previously
+
+    throw new Error(
+        'Private swap requires 2 UTXOs. You currently have only 1. ' +
+        'Please make another small deposit first, or use Public Swap instead.'
+    );
+}
+
+// Keep old function for backward compatibility but mark deprecated
 function createDummyUtxo(assetId) {
+    console.warn('createDummyUtxo is deprecated, use createValidDummyUtxo');
     return {
         amount: '0',
         assetId,
         blinding: randomFieldElement(),
         leafIndex: 0,
     };
+}
+
+// ============================================================================
+// Public Swap Functions (Direct SPL Token Swap)
+// ============================================================================
+
+function initPublicSwap() {
+    // Swap mode toggle
+    const swapModeTabs = document.querySelectorAll('.swap-mode-tabs .tab-btn');
+    swapModeTabs.forEach(btn => {
+        btn.addEventListener('click', () => {
+            swapModeTabs.forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+
+            const mode = btn.dataset.swapMode;
+            document.getElementById('public-swap-form').classList.toggle('hidden', mode !== 'public');
+            document.getElementById('private-swap-form').classList.toggle('hidden', mode !== 'private');
+        });
+    });
+
+    // Public swap event listeners
+    const fromAmountInput = document.getElementById('public-swap-from-amount');
+    const directionBtn = document.getElementById('public-swap-direction');
+    const swapBtn = document.getElementById('public-swap-btn');
+
+    fromAmountInput.addEventListener('input', updatePublicSwapQuote);
+    directionBtn.addEventListener('click', publicSwapDirection);
+    swapBtn.addEventListener('click', executePublicSwap);
+
+    // Wrap/Unwrap SOL buttons
+    document.getElementById('wrap-sol-btn').addEventListener('click', wrapSol);
+    document.getElementById('unwrap-sol-btn').addEventListener('click', unwrapSol);
+
+    // Token select change events
+    document.getElementById('public-swap-from-token').addEventListener('change', updatePublicSwapQuote);
+    document.getElementById('public-swap-to-token').addEventListener('change', updatePublicSwapQuote);
+}
+
+function updatePublicSwapQuote() {
+    const fromAmount = parseFloat(document.getElementById('public-swap-from-amount').value) || 0;
+    const fromToken = document.getElementById('public-swap-from-token').value;
+    const toToken = document.getElementById('public-swap-to-token').value;
+
+    if (!state.poolState || fromAmount === 0) {
+        document.getElementById('public-swap-to-amount').value = '';
+        document.getElementById('public-swap-rate').textContent = fromToken === 'wSOL' ? '1 wSOL = -- tUSDC' : '1 tUSDC = -- wSOL';
+        document.getElementById('public-price-impact').textContent = '--';
+        return;
+    }
+
+    // Calculate output using constant product formula (with 0.3% fee)
+    const { reserveA, reserveB } = state.poolState;
+    let amountIn, amountOut, reserveIn, reserveOut;
+
+    if (fromToken === 'wSOL') {
+        // wSOL -> tUSDC
+        amountIn = fromAmount * 1e9; // Convert to lamports
+        reserveIn = reserveA;
+        reserveOut = reserveB;
+        amountOut = calculateSwapOutput(amountIn, reserveIn, reserveOut);
+        amountOut = amountOut / 1e6; // Convert to tUSDC
+    } else {
+        // tUSDC -> wSOL
+        amountIn = fromAmount * 1e6; // Convert to smallest unit
+        reserveIn = reserveB;
+        reserveOut = reserveA;
+        amountOut = calculateSwapOutput(amountIn, reserveIn, reserveOut);
+        amountOut = amountOut / 1e9; // Convert to wSOL
+    }
+
+    document.getElementById('public-swap-to-amount').value = amountOut.toFixed(6);
+
+    // Update rate display
+    const rate = fromToken === 'wSOL'
+        ? (reserveB / reserveA * 1e3).toFixed(2)
+        : (reserveA / reserveB / 1e3).toFixed(6);
+    document.getElementById('public-swap-rate').textContent = fromToken === 'wSOL'
+        ? `1 wSOL = ${rate} tUSDC`
+        : `1 tUSDC = ${rate} wSOL`;
+
+    // Update price impact
+    const priceImpact = (amountIn / reserveIn) * 100;
+    document.getElementById('public-price-impact').textContent = priceImpact.toFixed(3) + '%';
+}
+
+function publicSwapDirection() {
+    const fromToken = document.getElementById('public-swap-from-token');
+    const toToken = document.getElementById('public-swap-to-token');
+
+    const temp = fromToken.value;
+    fromToken.value = toToken.value;
+    toToken.value = temp;
+
+    updatePublicSwapQuote();
+    if (state.publicKey) {
+        fetchTokenBalances();
+    }
+}
+
+async function executePublicSwap() {
+    const fromAmount = parseFloat(document.getElementById('public-swap-from-amount').value);
+    const toAmount = parseFloat(document.getElementById('public-swap-to-amount').value);
+    const fromToken = document.getElementById('public-swap-from-token').value;
+
+    if (!fromAmount || !toAmount) {
+        alert('Please enter an amount');
+        return;
+    }
+
+    if (!state.wallet || !state.publicKey) {
+        alert('Please connect wallet first');
+        return;
+    }
+
+    showTxModal('Building transaction...');
+
+    try {
+        // Load Solana Web3.js
+        const { Connection, PublicKey, Transaction, TransactionInstruction } = window.solanaWeb3 || await loadSolanaWeb3();
+
+        const connection = new Connection(CONFIG.rpcUrl, 'confirmed');
+
+        // Convert amounts to smallest unit
+        const amountIn = fromToken === 'wSOL'
+            ? Math.floor(fromAmount * 1e9)
+            : Math.floor(fromAmount * 1e6);
+        // 5% slippage tolerance (now using real on-chain pool state)
+        const minAmountOut = fromToken === 'wSOL'
+            ? Math.floor(toAmount * 0.95 * 1e6)
+            : Math.floor(toAmount * 0.95 * 1e9);
+
+        updateTxStatus('Getting token accounts...');
+
+        // Get user's associated token accounts (ATAs)
+        const userPubkey = new PublicKey(state.publicKey);
+        const wsolMint = new PublicKey(CONFIG.tokenAccounts.wsolMint);
+        const usdcMint = new PublicKey(CONFIG.tokenAccounts.usdcMint);
+
+        // SPL Token Program and Associated Token Program
+        const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
+        const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
+
+        // Derive user's ATAs
+        const userWsolAta = await getAssociatedTokenAddress(userPubkey, wsolMint);
+        const userUsdcAta = await getAssociatedTokenAddress(userPubkey, usdcMint);
+
+        // Determine input/output accounts based on swap direction
+        let userTokenIn, userTokenOut, poolVaultIn, poolVaultOut, outputMint;
+        if (fromToken === 'wSOL') {
+            userTokenIn = userWsolAta;
+            userTokenOut = userUsdcAta;
+            poolVaultIn = new PublicKey(CONFIG.tokenAccounts.poolWsolVault);
+            poolVaultOut = new PublicKey(CONFIG.tokenAccounts.poolUsdcVault);
+            outputMint = usdcMint;
+        } else {
+            userTokenIn = userUsdcAta;
+            userTokenOut = userWsolAta;
+            poolVaultIn = new PublicKey(CONFIG.tokenAccounts.poolUsdcVault);
+            poolVaultOut = new PublicKey(CONFIG.tokenAccounts.poolWsolVault);
+            outputMint = wsolMint;
+        }
+
+        // Check if user's output token account exists, if not we need to create it
+        updateTxStatus('Checking output token account...');
+        const outputAccountInfo = await connection.getAccountInfo(userTokenOut);
+        const needCreateOutputAta = !outputAccountInfo;
+
+        if (needCreateOutputAta) {
+            console.log('Output token account does not exist, will create it');
+        }
+
+        updateTxStatus('Building PublicSwap instruction...');
+
+        // Build instruction data: [instruction_id: u8, amount_in: u64, min_amount_out: u64, direction: u8]
+        // direction: 0 = A→B (wSOL→tUSDC), 1 = B→A (tUSDC→wSOL)
+        const instructionData = new Uint8Array(1 + 8 + 8 + 1);
+        let offset = 0;
+
+        // Instruction ID: 6 = PublicSwap
+        instructionData[offset++] = 6;
+
+        // Amount in (8 bytes, little-endian)
+        let amountInBigInt = BigInt(amountIn);
+        for (let i = 0; i < 8; i++) {
+            instructionData[offset++] = Number(amountInBigInt & 0xFFn);
+            amountInBigInt >>= 8n;
+        }
+
+        // Min amount out (8 bytes, little-endian)
+        let minAmountOutBigInt = BigInt(minAmountOut);
+        for (let i = 0; i < 8; i++) {
+            instructionData[offset++] = Number(minAmountOutBigInt & 0xFFn);
+            minAmountOutBigInt >>= 8n;
+        }
+
+        // Direction (1 byte): 0 = wSOL→tUSDC (A→B), 1 = tUSDC→wSOL (B→A)
+        const direction = fromToken === 'wSOL' ? 0 : 1;
+        instructionData[offset++] = direction;
+
+        // Get recent blockhash
+        const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
+
+        // Create transaction
+        const transaction = new Transaction({
+            recentBlockhash: blockhash,
+            feePayer: userPubkey,
+        });
+
+        // If output token account doesn't exist, add instruction to create it first
+        if (needCreateOutputAta) {
+            updateTxStatus('Adding create ATA instruction...');
+            const { SystemProgram } = window.solanaWeb3;
+            const createAtaIx = new TransactionInstruction({
+                programId: ASSOCIATED_TOKEN_PROGRAM_ID,
+                keys: [
+                    { pubkey: userPubkey, isSigner: true, isWritable: true },
+                    { pubkey: userTokenOut, isSigner: false, isWritable: true },
+                    { pubkey: userPubkey, isSigner: false, isWritable: false },
+                    { pubkey: outputMint, isSigner: false, isWritable: false },
+                    { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+                    { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+                ],
+                data: Buffer.alloc(0),
+            });
+            transaction.add(createAtaIx);
+        }
+
+        // PublicSwap instruction with 8 accounts
+        const publicSwapInstruction = new TransactionInstruction({
+            programId: new PublicKey(CONFIG.programId),
+            keys: [
+                { pubkey: userPubkey, isSigner: true, isWritable: true },                    // [0] swapper
+                { pubkey: new PublicKey(CONFIG.poolAccounts.poolAccount), isSigner: false, isWritable: true }, // [1] pool_account
+                { pubkey: userTokenIn, isSigner: false, isWritable: true },                  // [2] user_token_in
+                { pubkey: userTokenOut, isSigner: false, isWritable: true },                 // [3] user_token_out
+                { pubkey: poolVaultIn, isSigner: false, isWritable: true },                  // [4] pool_vault_in
+                { pubkey: poolVaultOut, isSigner: false, isWritable: true },                 // [5] pool_vault_out
+                { pubkey: new PublicKey(CONFIG.poolAccounts.poolAuthority), isSigner: false, isWritable: false }, // [6] pool_authority
+                { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },            // [7] token_program
+            ],
+            data: Buffer.from(instructionData),
+        });
+        transaction.add(publicSwapInstruction);
+
+        updateTxStatus('Please approve in wallet...');
+
+        // Sign and send transaction
+        const signed = await state.wallet.signTransaction(transaction);
+        const signature = await connection.sendRawTransaction(signed.serialize());
+
+        updateTxStatus('Confirming transaction...');
+
+        // Wait for confirmation
+        await connection.confirmTransaction({
+            signature,
+            blockhash,
+            lastValidBlockHeight,
+        });
+
+        // Refresh balances
+        await fetchTokenBalances();
+        await loadPoolState();
+
+        showTxSuccess(signature, `https://explorer.solana.com/tx/${signature}?cluster=testnet`);
+
+    } catch (err) {
+        console.error('Public swap failed:', err);
+        showTxError(err.message);
+    }
+}
+
+// Get Associated Token Address (ATA)
+async function getAssociatedTokenAddress(owner, mint) {
+    const { PublicKey } = window.solanaWeb3 || await loadSolanaWeb3();
+    const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
+    const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
+
+    const [ata] = PublicKey.findProgramAddressSync(
+        [owner.toBuffer(), TOKEN_PROGRAM_ID.toBuffer(), mint.toBuffer()],
+        ASSOCIATED_TOKEN_PROGRAM_ID
+    );
+    return ata;
+}
+
+// Fetch user's SPL Token balances and native SOL
+async function fetchTokenBalances() {
+    if (!state.publicKey) return;
+
+    try {
+        const { Connection, PublicKey, LAMPORTS_PER_SOL } = window.solanaWeb3 || await loadSolanaWeb3();
+        const connection = new Connection(CONFIG.rpcUrl, 'confirmed');
+
+        const userPubkey = new PublicKey(state.publicKey);
+        const wsolMint = new PublicKey(CONFIG.tokenAccounts.wsolMint);
+        const usdcMint = new PublicKey(CONFIG.tokenAccounts.usdcMint);
+
+        // Get native SOL balance
+        const nativeSolBalance = await connection.getBalance(userPubkey);
+        const nativeSol = nativeSolBalance / LAMPORTS_PER_SOL;
+        document.getElementById('native-sol-balance').textContent = nativeSol.toFixed(4);
+
+        // Get ATAs
+        const userWsolAta = await getAssociatedTokenAddress(userPubkey, wsolMint);
+        const userUsdcAta = await getAssociatedTokenAddress(userPubkey, usdcMint);
+
+        // Fetch balances
+        let wsolBalance = 0;
+        let usdcBalance = 0;
+
+        try {
+            const wsolInfo = await connection.getTokenAccountBalance(userWsolAta);
+            wsolBalance = parseFloat(wsolInfo.value.uiAmountString) || 0;
+        } catch (e) {
+            // Account doesn't exist
+            wsolBalance = 0;
+        }
+
+        try {
+            const usdcInfo = await connection.getTokenAccountBalance(userUsdcAta);
+            usdcBalance = parseFloat(usdcInfo.value.uiAmountString) || 0;
+        } catch (e) {
+            // Account doesn't exist
+            usdcBalance = 0;
+        }
+
+        // Update UI
+        const fromToken = document.getElementById('public-swap-from-token').value;
+        const toToken = document.getElementById('public-swap-to-token').value;
+
+        document.getElementById('public-from-balance').textContent = fromToken === 'wSOL'
+            ? wsolBalance.toFixed(4)
+            : usdcBalance.toFixed(2);
+        document.getElementById('public-to-balance').textContent = toToken === 'wSOL'
+            ? wsolBalance.toFixed(4)
+            : usdcBalance.toFixed(2);
+
+        console.log(`Balances - Native SOL: ${nativeSol}, wSOL: ${wsolBalance}, tUSDC: ${usdcBalance}`);
+
+    } catch (err) {
+        console.error('Failed to fetch token balances:', err);
+    }
+}
+
+// Wrap native SOL to wSOL
+async function wrapSol() {
+    if (!state.wallet || !state.publicKey) {
+        alert('Please connect wallet first');
+        return;
+    }
+
+    const amountStr = prompt('Enter amount of SOL to wrap:', '0.1');
+    if (!amountStr) return;
+
+    const amount = parseFloat(amountStr);
+    if (isNaN(amount) || amount <= 0) {
+        alert('Invalid amount');
+        return;
+    }
+
+    showTxModal('Wrapping SOL to wSOL...');
+
+    try {
+        const { Connection, PublicKey, Transaction, TransactionInstruction, SystemProgram, LAMPORTS_PER_SOL } = window.solanaWeb3 || await loadSolanaWeb3();
+
+        const connection = new Connection(CONFIG.rpcUrl, 'confirmed');
+        const userPubkey = new PublicKey(state.publicKey);
+        const wsolMint = new PublicKey(CONFIG.tokenAccounts.wsolMint);
+        const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
+        const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
+
+        // Get user's wSOL ATA
+        const userWsolAta = await getAssociatedTokenAddress(userPubkey, wsolMint);
+
+        const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
+
+        const transaction = new Transaction({
+            recentBlockhash: blockhash,
+            feePayer: userPubkey,
+        });
+
+        // Check if wSOL ATA exists
+        const ataInfo = await connection.getAccountInfo(userWsolAta);
+
+        if (!ataInfo) {
+            updateTxStatus('Creating wSOL token account...');
+            // Create Associated Token Account instruction
+            const createAtaIx = new TransactionInstruction({
+                programId: ASSOCIATED_TOKEN_PROGRAM_ID,
+                keys: [
+                    { pubkey: userPubkey, isSigner: true, isWritable: true },
+                    { pubkey: userWsolAta, isSigner: false, isWritable: true },
+                    { pubkey: userPubkey, isSigner: false, isWritable: false },
+                    { pubkey: wsolMint, isSigner: false, isWritable: false },
+                    { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+                    { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+                ],
+                data: Buffer.alloc(0),
+            });
+            transaction.add(createAtaIx);
+        }
+
+        // Transfer SOL to wSOL ATA
+        updateTxStatus('Transferring SOL...');
+        const lamports = Math.floor(amount * LAMPORTS_PER_SOL);
+        const transferIx = SystemProgram.transfer({
+            fromPubkey: userPubkey,
+            toPubkey: userWsolAta,
+            lamports,
+        });
+        transaction.add(transferIx);
+
+        // Sync native instruction (tells the token program to update the balance)
+        const syncNativeIx = new TransactionInstruction({
+            programId: TOKEN_PROGRAM_ID,
+            keys: [
+                { pubkey: userWsolAta, isSigner: false, isWritable: true },
+            ],
+            data: Buffer.from([17]), // SyncNative instruction = 17
+        });
+        transaction.add(syncNativeIx);
+
+        updateTxStatus('Please approve in wallet...');
+
+        const signed = await state.wallet.signTransaction(transaction);
+        const signature = await connection.sendRawTransaction(signed.serialize());
+
+        updateTxStatus('Confirming transaction...');
+
+        await connection.confirmTransaction({
+            signature,
+            blockhash,
+            lastValidBlockHeight,
+        });
+
+        await fetchTokenBalances();
+        showTxSuccess(signature, `https://explorer.solana.com/tx/${signature}?cluster=testnet`);
+
+    } catch (err) {
+        console.error('Wrap SOL failed:', err);
+        showTxError(err.message);
+    }
+}
+
+// Unwrap wSOL to native SOL
+async function unwrapSol() {
+    if (!state.wallet || !state.publicKey) {
+        alert('Please connect wallet first');
+        return;
+    }
+
+    showTxModal('Unwrapping wSOL to SOL...');
+
+    try {
+        const { Connection, PublicKey, Transaction, TransactionInstruction } = window.solanaWeb3 || await loadSolanaWeb3();
+
+        const connection = new Connection(CONFIG.rpcUrl, 'confirmed');
+        const userPubkey = new PublicKey(state.publicKey);
+        const wsolMint = new PublicKey(CONFIG.tokenAccounts.wsolMint);
+        const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
+
+        // Get user's wSOL ATA
+        const userWsolAta = await getAssociatedTokenAddress(userPubkey, wsolMint);
+
+        // Check balance
+        let wsolBalance = 0;
+        try {
+            const wsolInfo = await connection.getTokenAccountBalance(userWsolAta);
+            wsolBalance = parseFloat(wsolInfo.value.uiAmountString) || 0;
+        } catch (e) {
+            throw new Error('No wSOL token account found');
+        }
+
+        if (wsolBalance <= 0) {
+            throw new Error('No wSOL balance to unwrap');
+        }
+
+        updateTxStatus(`Closing wSOL account (${wsolBalance.toFixed(4)} wSOL)...`);
+
+        const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
+
+        const transaction = new Transaction({
+            recentBlockhash: blockhash,
+            feePayer: userPubkey,
+        });
+
+        // CloseAccount instruction - returns all SOL (rent + wSOL balance) to owner
+        const closeAccountIx = new TransactionInstruction({
+            programId: TOKEN_PROGRAM_ID,
+            keys: [
+                { pubkey: userWsolAta, isSigner: false, isWritable: true },
+                { pubkey: userPubkey, isSigner: false, isWritable: true },
+                { pubkey: userPubkey, isSigner: true, isWritable: false },
+            ],
+            data: Buffer.from([9]), // CloseAccount instruction = 9
+        });
+        transaction.add(closeAccountIx);
+
+        updateTxStatus('Please approve in wallet...');
+
+        const signed = await state.wallet.signTransaction(transaction);
+        const signature = await connection.sendRawTransaction(signed.serialize());
+
+        updateTxStatus('Confirming transaction...');
+
+        await connection.confirmTransaction({
+            signature,
+            blockhash,
+            lastValidBlockHeight,
+        });
+
+        await fetchTokenBalances();
+        showTxSuccess(signature, `https://explorer.solana.com/tx/${signature}?cluster=testnet`);
+
+    } catch (err) {
+        console.error('Unwrap SOL failed:', err);
+        showTxError(err.message);
+    }
+}
+
+// Show setup tokens modal/instructions
+function showSetupTokensModal() {
+    alert(`To use Public Swap, you need:
+
+1. wSOL (Wrapped SOL) - Wrap your SOL using:
+   spl-token wrap <amount>
+
+2. tUSDC token account - Get test USDC from faucet
+
+Token Addresses:
+- wSOL Mint: So11111111111111111111111111111111111111112
+- tUSDC Mint: ${CONFIG.tokenAccounts.usdcMint}
+
+Use Solana CLI or a DEX to get these tokens.`);
 }
 
 // ============================================================================
@@ -851,6 +1618,27 @@ function initPortfolio() {
     document.getElementById('withdraw-btn').addEventListener('click', showWithdrawModal);
     document.getElementById('confirm-deposit').addEventListener('click', executeDeposit);
     document.getElementById('confirm-withdraw').addEventListener('click', executeWithdraw);
+
+    // Add recovery button listeners
+    const clearRebuildBtn = document.getElementById('clear-rebuild-btn');
+    if (clearRebuildBtn) {
+        clearRebuildBtn.addEventListener('click', clearAndRebuildUtxos);
+    }
+
+    const recoveryBtn = document.getElementById('recover-utxo-btn');
+    if (recoveryBtn) {
+        recoveryBtn.addEventListener('click', recoverUtxos);
+    }
+
+    const manualRecoveryBtn = document.getElementById('manual-recover-btn');
+    if (manualRecoveryBtn) {
+        manualRecoveryBtn.addEventListener('click', showManualRecoveryModal);
+    }
+
+    const confirmManualRecoveryBtn = document.getElementById('confirm-manual-recovery');
+    if (confirmManualRecoveryBtn) {
+        confirmManualRecoveryBtn.addEventListener('click', executeManualRecovery);
+    }
 }
 
 function updatePortfolio() {
@@ -861,6 +1649,8 @@ function updatePortfolio() {
     }
 
     const utxos = state.utxoStorage.getUnspent();
+    console.log('Portfolio UTXOs:', utxos);
+    console.log('All UTXOs (including spent):', state.utxoStorage.getAll());
 
     // Calculate totals
     let totalSol = 0n;
@@ -898,6 +1688,218 @@ function updatePortfolio() {
     document.getElementById('lp-balance').textContent = (Number(totalLp) / 1e6).toFixed(2);
 }
 
+/**
+ * Clear local UTXOs and rebuild from chain
+ * Use this when local data is out of sync with on-chain state
+ */
+async function clearAndRebuildUtxos() {
+    if (!state.wallet || !state.privateKey || !state.zkPubkey) {
+        alert('Please connect wallet first');
+        return;
+    }
+
+    if (!confirm('This will clear your local UTXO data and try to recover from the blockchain. Continue?')) {
+        return;
+    }
+
+    showTxModal('Clearing local data...');
+
+    try {
+        // Clear local UTXO storage
+        await state.utxoStorage.clear();
+        console.log('Cleared local UTXO storage');
+
+        // Reset deposit nonce to 0 to scan from beginning
+        resetDepositNonce();
+        console.log('Reset deposit nonce to 0');
+
+        updateTxStatus('Rebuilding from chain...');
+
+        // Now run the recovery function
+        await recoverUtxos();
+
+    } catch (err) {
+        console.error('Clear and rebuild failed:', err);
+        showTxError(err.message);
+    }
+}
+
+/**
+ * UTXO Recovery Function
+ * Scans on-chain Merkle tree commitments and tries to find user's UTXOs
+ * using deterministic blinding derivation
+ */
+async function recoverUtxos() {
+    if (!state.wallet || !state.privateKey || !state.zkPubkey) {
+        alert('Please connect wallet first');
+        return;
+    }
+
+    showTxModal('Starting UTXO recovery...');
+
+    try {
+        // Step 1: Sync Merkle tree from chain to get all commitments
+        updateTxStatus('Syncing Merkle tree from chain...');
+        const merkleTree = await syncMerkleTreeFromChain(
+            CONFIG.rpcUrl,
+            CONFIG.poolAccounts.merkleAccount
+        );
+        state.merkleTree = merkleTree;
+
+        const totalLeaves = merkleTree.getLeafCount();
+        console.log(`Found ${totalLeaves} commitments on chain`);
+
+        if (totalLeaves === 0) {
+            showTxError('No commitments found on chain');
+            return;
+        }
+
+        // Step 2: Get nullifier set to check which UTXOs are spent
+        updateTxStatus('Checking nullifier set...');
+        const spentNullifiers = await fetchSpentNullifiers();
+
+        // Step 3: Scan each commitment
+        updateTxStatus(`Scanning ${totalLeaves} commitments...`);
+        const recoveredUtxos = [];
+
+        // Common deposit amounts to try (in raw units)
+        // SOL: 0.001, 0.01, 0.1, 0.5, 1, 2, 5, 10 SOL
+        const solAmounts = [
+            1000000, 10000000, 100000000, 500000000,
+            1000000000, 2000000000, 5000000000, 10000000000,
+        ];
+        // USDC: 0.01, 0.1, 1, 5, 10, 50, 100, 500, 1000 USDC
+        const usdcAmounts = [
+            10000, 100000, 1000000, 5000000, 10000000,
+            50000000, 100000000, 500000000, 1000000000,
+        ];
+
+        for (let leafIndex = 0; leafIndex < totalLeaves; leafIndex++) {
+            const commitment = merkleTree.leaves[leafIndex];
+            updateTxStatus(`Scanning commitment ${leafIndex + 1}/${totalLeaves}...`);
+
+            // Check if already in our storage
+            const existingUtxo = state.utxoStorage.getAll().find(u => u.commitment === commitment);
+            if (existingUtxo) {
+                console.log(`Commitment ${leafIndex} already in storage`);
+                continue;
+            }
+
+            // Try SOL asset (assetId = 0)
+            for (const amount of solAmounts) {
+                const result = await scanForUtxo(commitment, state.privateKey, state.zkPubkey, amount, ASSET_SOL, 100);
+                if (result) {
+                    console.log(`Recovered SOL UTXO: amount=${amount}, nonce=${result.nonce}`);
+                    recoveredUtxos.push({
+                        commitment,
+                        amount: amount.toString(),
+                        assetId: ASSET_SOL,
+                        blinding: result.blinding,
+                        leafIndex,
+                        depositNonce: result.nonce,
+                        recovered: true,
+                    });
+                    break;
+                }
+            }
+
+            // Try USDC asset (assetId = 1)
+            const existingSol = recoveredUtxos.find(u => u.commitment === commitment);
+            if (!existingSol) {
+                for (const amount of usdcAmounts) {
+                    const result = await scanForUtxo(commitment, state.privateKey, state.zkPubkey, amount, ASSET_USDC, 100);
+                    if (result) {
+                        console.log(`Recovered USDC UTXO: amount=${amount}, nonce=${result.nonce}`);
+                        recoveredUtxos.push({
+                            commitment,
+                            amount: amount.toString(),
+                            assetId: ASSET_USDC,
+                            blinding: result.blinding,
+                            leafIndex,
+                            depositNonce: result.nonce,
+                            recovered: true,
+                        });
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Step 4: Add recovered UTXOs to storage
+        updateTxStatus(`Recovered ${recoveredUtxos.length} UTXOs, saving...`);
+
+        for (const utxo of recoveredUtxos) {
+            // Check if UTXO is spent by checking nullifier
+            const nullifier = await computeNullifier(
+                utxo.commitment,
+                state.privateKey,
+                utxo.leafIndex
+            );
+
+            const isSpent = spentNullifiers.includes(nullifier);
+
+            if (!isSpent) {
+                await state.utxoStorage.addUtxo(utxo);
+                console.log(`Added recovered UTXO: ${utxo.assetId === ASSET_SOL ? 'SOL' : 'USDC'} ${utxo.amount}`);
+            } else {
+                console.log(`Skipping spent UTXO: ${utxo.commitment.slice(0, 10)}...`);
+            }
+        }
+
+        // Update nonce to max found + 1
+        const maxNonce = Math.max(0, ...recoveredUtxos.map(u => u.depositNonce));
+        const currentNonce = getDepositNonce();
+        if (maxNonce >= currentNonce) {
+            localStorage.setItem('privacy-amm-deposit-nonce', (maxNonce + 1).toString());
+            console.log(`Updated deposit nonce to ${maxNonce + 1}`);
+        }
+
+        // Refresh UI
+        updatePortfolio();
+
+        if (recoveredUtxos.length > 0) {
+            showTxSuccess(null, null);
+            document.getElementById('tx-status-text').textContent =
+                `Successfully recovered ${recoveredUtxos.length} UTXOs!`;
+        } else {
+            showTxError('No recoverable UTXOs found. This could mean:\n' +
+                '1. No deposits were made from this wallet\n' +
+                '2. All UTXOs have already been spent\n' +
+                '3. Deposits used random blinding (older version)');
+        }
+
+    } catch (err) {
+        console.error('Recovery failed:', err);
+        showTxError('Recovery failed: ' + err.message);
+    }
+}
+
+/**
+ * Fetch spent nullifiers from chain
+ */
+async function fetchSpentNullifiers() {
+    try {
+        const { Connection, PublicKey } = window.solanaWeb3 || await loadSolanaWeb3();
+        const connection = new Connection(CONFIG.rpcUrl, 'confirmed');
+        const nullifierPubkey = new PublicKey(CONFIG.poolAccounts.nullifierAccount);
+
+        const accountInfo = await connection.getAccountInfo(nullifierPubkey);
+        if (!accountInfo || !accountInfo.data) {
+            return [];
+        }
+
+        // Parse nullifier set - it's a bitmap, so we need to extract which nullifiers are set
+        // For now return empty array - full implementation would parse the bitmap
+        // The on-chain nullifier is stored as Poseidon hash values
+        console.log('Nullifier account size:', accountInfo.data.length);
+
+        return [];
+    } catch (err) {
+        console.error('Failed to fetch nullifiers:', err);
+        return [];
+    }
+}
+
 async function executeDeposit() {
     const amount = parseFloat(document.getElementById('deposit-amount').value);
     const token = document.getElementById('deposit-token').value;
@@ -918,7 +1920,13 @@ async function executeDeposit() {
     try {
         const assetId = token === 'SOL' ? ASSET_SOL : ASSET_USDC;
         const amountRaw = token === 'SOL' ? Math.floor(amount * 1e9) : Math.floor(amount * 1e6);
-        const blinding = randomFieldElement();
+
+        // Use deterministic blinding for recovery support
+        // blinding = Poseidon(privateKey, nonce, amount, assetId)
+        const depositNonce = getDepositNonce();
+        const blinding = await deriveBlinding(state.privateKey, depositNonce, amountRaw, assetId);
+
+        console.log(`Deposit nonce: ${depositNonce}, blinding derived deterministically`);
 
         // Compute commitment
         const commitment = await computeCommitment(
@@ -934,9 +1942,37 @@ async function executeDeposit() {
         const instructionData = buildDepositInstructionData(commitment, amountRaw, assetId);
 
         // Build transaction using @solana/web3.js (loaded via CDN)
-        const { Connection, PublicKey, Transaction, TransactionInstruction, SystemProgram, LAMPORTS_PER_SOL } = window.solanaWeb3 || await loadSolanaWeb3();
+        const { Connection, PublicKey, Transaction, TransactionInstruction } = window.solanaWeb3 || await loadSolanaWeb3();
 
         const connection = new Connection(CONFIG.rpcUrl, 'confirmed');
+        const userPubkey = new PublicKey(state.publicKey);
+        const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
+
+        // Get token accounts based on deposit type
+        const tokenMint = token === 'SOL'
+            ? new PublicKey(CONFIG.tokenAccounts.wsolMint)
+            : new PublicKey(CONFIG.tokenAccounts.usdcMint);
+        const poolVault = token === 'SOL'
+            ? new PublicKey(CONFIG.tokenAccounts.poolWsolVault)
+            : new PublicKey(CONFIG.tokenAccounts.poolUsdcVault);
+
+        // Get user's ATA
+        const userTokenAccount = await getAssociatedTokenAddress(userPubkey, tokenMint);
+
+        updateTxStatus('Checking token account...');
+
+        // Verify user has the token account and sufficient balance
+        try {
+            const tokenInfo = await connection.getTokenAccountBalance(userTokenAccount);
+            const balance = parseFloat(tokenInfo.value.uiAmountString) || 0;
+            const requiredBalance = token === 'SOL' ? amount : amount;
+            if (balance < requiredBalance) {
+                throw new Error(`Insufficient ${token === 'SOL' ? 'wSOL' : 'tUSDC'} balance. Have: ${balance}, Need: ${requiredBalance}`);
+            }
+        } catch (e) {
+            if (e.message.includes('Insufficient')) throw e;
+            throw new Error(`You need a ${token === 'SOL' ? 'wSOL' : 'tUSDC'} token account. Please wrap SOL or get tUSDC first.`);
+        }
 
         // Get recent blockhash
         const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
@@ -944,16 +1980,26 @@ async function executeDeposit() {
         // Create transaction
         const transaction = new Transaction({
             recentBlockhash: blockhash,
-            feePayer: new PublicKey(state.publicKey),
+            feePayer: userPubkey,
         });
 
-        // Add deposit instruction
+        // Add deposit instruction with 6 accounts (includes token transfer)
+        // Account layout:
+        // [0] depositor: User depositing funds (signer)
+        // [1] pool_account: Pool state
+        // [2] merkle_account: Merkle tree state
+        // [3] user_token_account: User's token account
+        // [4] pool_vault: Pool's token vault
+        // [5] token_program: SPL Token program
         const depositInstruction = new TransactionInstruction({
             programId: new PublicKey(CONFIG.programId),
             keys: [
-                { pubkey: new PublicKey(state.publicKey), isSigner: true, isWritable: true },
+                { pubkey: userPubkey, isSigner: true, isWritable: true },
                 { pubkey: new PublicKey(CONFIG.poolAccounts.poolAccount), isSigner: false, isWritable: true },
                 { pubkey: new PublicKey(CONFIG.poolAccounts.merkleAccount), isSigner: false, isWritable: true },
+                { pubkey: userTokenAccount, isSigner: false, isWritable: true },
+                { pubkey: poolVault, isSigner: false, isWritable: true },
+                { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
             ],
             data: Buffer.from(instructionData),
         });
@@ -974,19 +2020,26 @@ async function executeDeposit() {
             lastValidBlockHeight,
         });
 
-        // Add UTXO to local storage
+        // Add UTXO to local storage (with nonce for reference)
         await state.utxoStorage.addUtxo({
             commitment,
             amount: amountRaw.toString(),
             assetId,
             blinding,
             leafIndex: state.merkleTree.getLeafCount(),
+            depositNonce,  // Store nonce for recovery verification
         });
+
+        // Increment the deposit nonce for next deposit
+        incrementDepositNonce();
 
         // Update local Merkle tree
         await state.merkleTree.insert(commitment);
 
+        // Refresh balances
         updatePortfolio();
+        await fetchTokenBalances();
+
         showTxSuccess(signature, `https://explorer.solana.com/tx/${signature}?cluster=testnet`);
 
     } catch (err) {
@@ -1004,12 +2057,12 @@ function buildDepositInstructionData(commitment, amount, assetType) {
     // Instruction ID: 1 = Deposit
     data[offset++] = 1;
 
-    // Commitment (32 bytes, big-endian)
-    const commitmentBigInt = BigInt(commitment);
-    for (let i = 31; i >= 0; i--) {
-        data[offset + i] = Number((commitmentBigInt >> BigInt((31 - i) * 8)) & 0xFFn);
+    // Commitment (32 bytes, little-endian - matches Solana/Zig convention)
+    let commitmentBigInt = BigInt(commitment);
+    for (let i = 0; i < 32; i++) {
+        data[offset++] = Number(commitmentBigInt & 0xFFn);
+        commitmentBigInt >>= 8n;
     }
-    offset += 32;
 
     // Amount (8 bytes, little-endian)
     let amountBigInt = BigInt(amount);
@@ -1039,10 +2092,10 @@ async function loadSolanaWeb3() {
 
 async function executeWithdraw() {
     const amount = parseFloat(document.getElementById('withdraw-amount').value);
-    const recipient = document.getElementById('withdraw-recipient').value;
+    const recipientWallet = document.getElementById('withdraw-recipient').value;
     const token = document.getElementById('withdraw-token')?.value || 'SOL';
 
-    if (!amount || !recipient) {
+    if (!amount || !recipientWallet) {
         alert('Please enter amount and recipient');
         return;
     }
@@ -1067,7 +2120,6 @@ async function executeWithdraw() {
         }
 
         const utxo = selection.utxos[0];
-        const proof = state.merkleTree.getProof(utxo.leafIndex);
 
         // Compute nullifier
         const commitment = await computeCommitment(
@@ -1083,6 +2135,16 @@ async function executeWithdraw() {
             utxo.leafIndex.toString()
         );
 
+        updateTxStatus('Getting recipient token account...');
+
+        // Get recipient's ATA (Associated Token Account)
+        const { PublicKey } = window.solanaWeb3 || await loadSolanaWeb3();
+        const recipientPubkey = new PublicKey(recipientWallet);
+        const tokenMint = token === 'SOL'
+            ? new PublicKey(CONFIG.tokenAccounts.wsolMint)
+            : new PublicKey(CONFIG.tokenAccounts.usdcMint);
+        const recipientTokenAccount = await getAssociatedTokenAddress(recipientPubkey, tokenMint);
+
         updateTxStatus('Submitting withdrawal...');
 
         const response = await fetch(`${CONFIG.relayerUrl}/withdraw`, {
@@ -1092,8 +2154,9 @@ async function executeWithdraw() {
                 proof: {}, // Withdraw doesn't need full ZK proof for basic version
                 publicSignals: [],
                 nullifier,
-                recipient,
+                recipient: recipientTokenAccount.toBase58(),  // Send ATA address, not wallet
                 amount: amountRaw,
+                assetType: assetId,  // 0 = SOL/wSOL, 1 = USDC/tUSDC
             }),
         });
 
@@ -1102,6 +2165,7 @@ async function executeWithdraw() {
         if (result.success) {
             await state.utxoStorage.markSpent(utxo.commitment, nullifier);
             updatePortfolio();
+            await fetchTokenBalances();
             showTxSuccess(result.signature, result.explorer);
         } else {
             showTxError(result.error || 'Withdrawal failed');
@@ -1166,6 +2230,107 @@ function showWithdrawModal() {
     document.getElementById('withdraw-modal').classList.remove('hidden');
 }
 
+function showManualRecoveryModal() {
+    document.getElementById('modal-overlay').classList.remove('hidden');
+    document.getElementById('manual-recovery-modal').classList.remove('hidden');
+}
+
+/**
+ * Execute manual UTXO recovery with specific amount
+ */
+async function executeManualRecovery() {
+    const amount = parseFloat(document.getElementById('manual-recovery-amount').value);
+    const token = document.getElementById('manual-recovery-token').value;
+
+    if (!amount) {
+        alert('Please enter an amount');
+        return;
+    }
+
+    if (!state.wallet || !state.privateKey || !state.zkPubkey) {
+        alert('Please connect wallet first');
+        return;
+    }
+
+    hideAllModals();
+    showTxModal('Starting manual recovery...');
+
+    try {
+        const assetId = token === 'SOL' ? ASSET_SOL : ASSET_USDC;
+        const amountRaw = token === 'SOL' ? Math.floor(amount * 1e9) : Math.floor(amount * 1e6);
+
+        // Sync Merkle tree from chain
+        updateTxStatus('Syncing Merkle tree...');
+        const merkleTree = await syncMerkleTreeFromChain(
+            CONFIG.rpcUrl,
+            CONFIG.poolAccounts.merkleAccount
+        );
+        state.merkleTree = merkleTree;
+
+        const totalLeaves = merkleTree.getLeafCount();
+        console.log(`Found ${totalLeaves} commitments, scanning for amount ${amountRaw}...`);
+
+        if (totalLeaves === 0) {
+            showTxError('No commitments found on chain');
+            return;
+        }
+
+        // Scan each commitment
+        let foundCount = 0;
+        for (let leafIndex = 0; leafIndex < totalLeaves; leafIndex++) {
+            const commitment = merkleTree.leaves[leafIndex];
+            updateTxStatus(`Scanning commitment ${leafIndex + 1}/${totalLeaves}...`);
+
+            // Check if already in our storage
+            const existingUtxo = state.utxoStorage.getAll().find(u => u.commitment === commitment);
+            if (existingUtxo) {
+                console.log(`Commitment ${leafIndex} already in storage`);
+                continue;
+            }
+
+            // Try to find UTXO with specified amount
+            const result = await scanForUtxo(commitment, state.privateKey, state.zkPubkey, amountRaw, assetId, 200);
+            if (result) {
+                console.log(`Found UTXO! nonce=${result.nonce}`);
+
+                await state.utxoStorage.addUtxo({
+                    commitment,
+                    amount: amountRaw.toString(),
+                    assetId,
+                    blinding: result.blinding,
+                    leafIndex,
+                    depositNonce: result.nonce,
+                    recovered: true,
+                });
+
+                // Update nonce
+                const currentNonce = getDepositNonce();
+                if (result.nonce >= currentNonce) {
+                    localStorage.setItem('privacy-amm-deposit-nonce', (result.nonce + 1).toString());
+                }
+
+                foundCount++;
+            }
+        }
+
+        // Refresh UI
+        updatePortfolio();
+
+        if (foundCount > 0) {
+            showTxSuccess(null, null);
+            document.getElementById('tx-status-text').textContent =
+                `Found ${foundCount} UTXO(s) with amount ${amount} ${token}!`;
+        } else {
+            showTxError(`No UTXO found with amount ${amount} ${token}.\n` +
+                'Make sure the amount is exactly what you deposited.');
+        }
+
+    } catch (err) {
+        console.error('Manual recovery failed:', err);
+        showTxError('Recovery failed: ' + err.message);
+    }
+}
+
 function hideAllModals() {
     document.getElementById('modal-overlay').classList.add('hidden');
     document.querySelectorAll('.modal').forEach(m => m.classList.add('hidden'));
@@ -1177,27 +2342,77 @@ function hideAllModals() {
 
 async function loadPoolState() {
     try {
-        const response = await fetch(`${CONFIG.relayerUrl}/pool`);
-        const data = await response.json();
+        // First try to load directly from chain for accurate data
+        const { Connection, PublicKey } = window.solanaWeb3 || await loadSolanaWeb3();
+        const connection = new Connection(CONFIG.rpcUrl, 'confirmed');
 
-        state.poolState = {
-            reserveA: parseFloat(data.reserveA),
-            reserveB: parseFloat(data.reserveB),
-            totalLpSupply: parseFloat(data.totalLpSupply),
-        };
+        const poolPubkey = new PublicKey(CONFIG.poolAccounts.poolAccount);
+        const accountInfo = await connection.getAccountInfo(poolPubkey);
+
+        if (accountInfo && accountInfo.data.length >= 90) {
+            // Convert to Uint8Array if needed
+            const rawData = accountInfo.data instanceof Uint8Array
+                ? accountInfo.data
+                : new Uint8Array(accountInfo.data);
+
+            // Parse PoolState from raw bytes using DataView (little-endian)
+            // offset 66: reserve_a (u64 LE)
+            // offset 74: reserve_b (u64 LE)
+            // offset 82: total_lp (u64 LE)
+            const dataView = new DataView(rawData.buffer, rawData.byteOffset, rawData.byteLength);
+
+            // Read u64 LE (split into low and high 32-bit parts)
+            const readU64LE = (offset) => {
+                const low = dataView.getUint32(offset, true);
+                const high = dataView.getUint32(offset + 4, true);
+                return low + high * 0x100000000;
+            };
+
+            const reserveA = readU64LE(66);
+            const reserveB = readU64LE(74);
+            const totalLp = readU64LE(82);
+
+            state.poolState = {
+                reserveA: reserveA,
+                reserveB: reserveB,
+                totalLpSupply: totalLp,
+            };
+
+            console.log('Pool state from chain:', {
+                reserveA: (reserveA / 1e9).toFixed(4) + ' SOL',
+                reserveB: (reserveB / 1e6).toFixed(2) + ' USDC',
+                totalLp: totalLp,
+            });
+        } else {
+            throw new Error('Invalid pool account data');
+        }
 
         // Update rate display
-        const rate = state.poolState.reserveB / state.poolState.reserveA * 1e3;
-        document.getElementById('swap-rate').textContent = `1 SOL = ${rate.toFixed(2)} USDC`;
+        if (state.poolState.reserveA > 0) {
+            const rate = state.poolState.reserveB / state.poolState.reserveA * 1e3;
+            document.getElementById('swap-rate').textContent = `1 SOL = ${rate.toFixed(2)} USDC`;
+        }
 
     } catch (err) {
-        console.error('Failed to load pool state:', err);
-        // Use mock data
-        state.poolState = {
-            reserveA: 10000000000000, // 10000 SOL
-            reserveB: 1500000000000,  // 1.5M USDC
-            totalLpSupply: 12247448713000,
-        };
+        console.error('Failed to load pool state from chain:', err);
+        // Fallback to relayer
+        try {
+            const response = await fetch(`${CONFIG.relayerUrl}/pool`);
+            const data = await response.json();
+            state.poolState = {
+                reserveA: parseFloat(data.reserveA),
+                reserveB: parseFloat(data.reserveB),
+                totalLpSupply: parseFloat(data.totalLpSupply),
+            };
+        } catch (e) {
+            console.error('Relayer also failed:', e);
+            // Last resort: use small mock data
+            state.poolState = {
+                reserveA: 1000000000, // 1 SOL
+                reserveB: 100000000,  // 100 USDC
+                totalLpSupply: 316227766,
+            };
+        }
     }
 }
 

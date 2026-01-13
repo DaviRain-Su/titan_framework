@@ -342,9 +342,18 @@ async function handleDeposit(body, env) {
 
 /**
  * Handle withdraw request
+ *
+ * Account layout for withdraw with token transfer:
+ * [0] pool_account: Pool state
+ * [1] merkle_account: Merkle tree state
+ * [2] nullifier_account: Nullifier set
+ * [3] pool_vault: Pool's token vault (source)
+ * [4] recipient_token_account: Recipient's token account (destination)
+ * [5] pool_authority: PDA authority for the pool
+ * [6] token_program: SPL Token program
  */
 async function handleWithdraw(body, env) {
-    const { proof, publicSignals, nullifier, recipient, amount } = body;
+    const { proof, publicSignals, nullifier, recipient, amount, assetType } = body;
 
     if (!proof || !nullifier || !recipient) {
         return errorResponse('Missing required fields');
@@ -358,15 +367,29 @@ async function handleWithdraw(body, env) {
         amount || 0
     );
 
+    // Determine pool vault and recipient token account based on asset type
+    // assetType: 0 = SOL (wSOL), 1 = USDC (tUSDC)
+    const isSOL = assetType === 0 || assetType === 'SOL' || assetType === 'wSOL';
+    const poolVault = isSOL ? TOKEN_ACCOUNTS.poolWsolVault : TOKEN_ACCOUNTS.poolUsdcVault;
+
+    // SPL Token program
+    const TOKEN_PROGRAM_ID = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
+
+    // Build accounts for withdraw with token transfer
+    const accounts = [
+        { pubkey: POOL_ACCOUNTS.poolAccount, isSigner: false, isWritable: true },
+        { pubkey: POOL_ACCOUNTS.merkleAccount, isSigner: false, isWritable: true },
+        { pubkey: POOL_ACCOUNTS.nullifierAccount, isSigner: false, isWritable: true },
+        { pubkey: poolVault, isSigner: false, isWritable: true },
+        { pubkey: recipient, isSigner: false, isWritable: true },  // recipient token account
+        { pubkey: POOL_ACCOUNTS.poolAuthority, isSigner: false, isWritable: false },
+        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+    ];
+
     const result = await buildAndSendTransaction(
         env,
         instructionData,
-        [
-            { pubkey: POOL_ACCOUNTS.poolAccount, isSigner: false, isWritable: true },
-            { pubkey: POOL_ACCOUNTS.merkleAccount, isSigner: false, isWritable: true },
-            { pubkey: POOL_ACCOUNTS.nullifierAccount, isSigner: false, isWritable: true },
-            { pubkey: recipient, isSigner: false, isWritable: true },
-        ]
+        accounts
     );
 
     return jsonResponse({
