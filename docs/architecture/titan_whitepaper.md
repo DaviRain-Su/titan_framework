@@ -37664,6 +37664,1348 @@ pub const StateRecovery = struct {
 
 ---
 
+### 18.40 Titan Privacy DEX: ZK-AMM on Solana (Solana Privacy Hackathon 策略)
+
+> **定位**: 将 Titan Framework 的 Client-Side Validation 理念与 Solana 的 ZK 隐私工具链结合，构建面向用户的 ZK-AMM。
+
+#### 18.40.1 Solana Privacy Hackathon 背景
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                 │
+│             Solana Privacy Hackathon 2026                       │
+│                                                                 │
+│  "Write Code, Not Proofs" - 让隐私变得简单                       │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  主赛道 (Main Tracks):                                           │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │  1. Private Payments ($15,000)                          │   │
+│  │     • ZK 隐私转账方案                                   │   │
+│  │     • 重点: Light Protocol / Elusiv 集成                │   │
+│  │                                                         │   │
+│  │  2. Privacy Tooling ($15,000)                           │   │
+│  │     • 开发者工具、SDK、基础设施                         │   │
+│  │     • 重点: 改善 ZK DX (开发者体验)                     │   │
+│  │                                                         │   │
+│  │  3. Open Track ($18,000)                                │   │
+│  │     • 创新性 DeFi / DAO / 社交应用                      │   │
+│  │     • 重点: 新颖性 + 可行性                             │   │
+│  │                                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│  赞助商奖励 (Sponsor Bounties):                                  │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                                                         │   │
+│  │  • Arcium      $10,000  - MPC/FHE 隐私计算              │   │
+│  │  • Aztec/Noir  $10,000  - Noir ZK 电路语言              │   │
+│  │  • Inco        $6,000   - FHE 加密虚拟机                │   │
+│  │  • Helius      $5,000   - RPC 基础设施                  │   │
+│  │  • 10101       $5,000   - DLC / Bitcoin 集成            │   │
+│  │  • Elusiv      $3,000   - 合规隐私方案                  │   │
+│  │                                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.40.2 关键技术资源
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Hackathon 技术栈                              │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                                                         │   │
+│  │  1. Noir (Aztec)                                        │   │
+│  │     • 用 Rust-like 语法写 ZK 电路                       │   │
+│  │     • 自动生成证明，无需手写 R1CS                       │   │
+│  │     • "Write Code, Not Proofs"                          │   │
+│  │     • 文档: https://noir-lang.org/                      │   │
+│  │                                                         │   │
+│  │  2. Sunspot (Solana ZK Verifier)                        │   │
+│  │     • Solana 上的 Groth16 验证器                        │   │
+│  │     • 链上验证 Noir 生成的证明                          │   │
+│  │     • GitHub: https://github.com/Sunspot-Foundation     │   │
+│  │                                                         │   │
+│  │  3. groth16-solana                                      │   │
+│  │     • 另一个 Groth16 验证方案                           │   │
+│  │     • 可用于自定义验证逻辑                              │   │
+│  │                                                         │   │
+│  │  4. Light Protocol                                      │   │
+│  │     • ZK Compression - 压缩 Solana 状态                 │   │
+│  │     • 100-1000x 成本降低                                │   │
+│  │     • SDK: https://www.lightprotocol.com/               │   │
+│  │                                                         │   │
+│  │  5. Arcium SDK                                          │   │
+│  │     • MPC 多方计算框架                                  │   │
+│  │     • 适合需要多方输入的场景                            │   │
+│  │                                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.40.3 Titan Privacy DEX 设计理念
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                 │
+│              Titan Privacy DEX = ZK-AMM                         │
+│                                                                 │
+│  "让用户像用普通 DEX 一样使用隐私 DEX"                           │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  核心理念:                                                       │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                                                         │   │
+│  │  传统 DEX 问题:                                         │   │
+│  │                                                         │   │
+│  │  User ──► 提交交易 ──► Mempool ──► 链上执行             │   │
+│  │                  │                                      │   │
+│  │                  ▼                                      │   │
+│  │             MEV 机器人看到!                             │   │
+│  │             • 三明治攻击                                │   │
+│  │             • 抢跑交易                                  │   │
+│  │             • 尾随攻击                                  │   │
+│  │                                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                                                         │   │
+│  │  Titan Privacy DEX 方案:                                │   │
+│  │                                                         │   │
+│  │  User ──► 本地生成 ZK 证明 ──► 提交加密交易             │   │
+│  │                  │                                      │   │
+│  │                  ▼                                      │   │
+│  │             链上只验证证明!                             │   │
+│  │             • 金额隐藏                                  │   │
+│  │             • 路径隐藏                                  │   │
+│  │             • MEV 无法攻击                              │   │
+│  │                                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.40.4 技术架构: Titan SDK + Noir
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                 │
+│                  Titan Privacy DEX 架构                          │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                     用户层 (User Layer)                  │   │
+│  │                                                         │   │
+│  │  ┌───────────────────────────────────────────────────┐ │   │
+│  │  │            Titan Python SDK                       │ │   │
+│  │  │                                                   │ │   │
+│  │  │  # 用户调用简单的 Python API                      │ │   │
+│  │  │  result = titan.private_swap(                    │ │   │
+│  │  │      token_in="SOL",                             │ │   │
+│  │  │      token_out="USDC",                           │ │   │
+│  │  │      amount=10.0,                                │ │   │
+│  │  │      max_slippage=0.5%                           │ │   │
+│  │  │  )                                               │ │   │
+│  │  │                                                   │ │   │
+│  │  └───────────────────────────────────────────────────┘ │   │
+│  │                         │                                │   │
+│  │                         ▼                                │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                            │                                    │
+│                            ▼                                    │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                   核心层 (Core Layer)                    │   │
+│  │                                                         │   │
+│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────┐ │   │
+│  │  │  Noir 电路  │  │ 证明生成器  │  │  交易构建器    │ │   │
+│  │  │  (ZK AMM)   │──►│ (Prover)    │──►│ (Tx Builder)   │ │   │
+│  │  └─────────────┘  └─────────────┘  └─────────────────┘ │   │
+│  │        │                                      │          │   │
+│  │        ▼                                      ▼          │   │
+│  │  ┌─────────────────────────────────────────────────────┐│   │
+│  │  │              Zig 核心引擎                            ││   │
+│  │  │         (drivers/solana_noir.zig)                   ││   │
+│  │  │                                                     ││   │
+│  │  │  • 管理 Noir 电路编译                               ││   │
+│  │  │  • 调用 Solana RPC                                  ││   │
+│  │  │  • 处理证明序列化                                   ││   │
+│  │  │  • 优化 Gas 消耗                                    ││   │
+│  │  └─────────────────────────────────────────────────────┘│   │
+│  │                                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                            │                                    │
+│                            ▼                                    │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                   链上层 (On-Chain Layer)                │   │
+│  │                                                         │   │
+│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────┐ │   │
+│  │  │ Sunspot     │  │ AMM Pool    │  │  Light Protocol │ │   │
+│  │  │ Verifier    │  │ Contract    │  │  (压缩状态)     │ │   │
+│  │  └─────────────┘  └─────────────┘  └─────────────────┘ │   │
+│  │        │                │                  │             │   │
+│  │        └────────────────┴──────────────────┘             │   │
+│  │                         │                                │   │
+│  │                         ▼                                │   │
+│  │              Solana Blockchain                           │   │
+│  │                                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.40.5 Noir ZK 电路设计
+
+```noir
+// circuits/private_swap.nr
+// Titan Privacy DEX - ZK AMM 核心电路
+
+use dep::std;
+
+// AMM 池状态（公开输入）
+struct PoolState {
+    reserve_a: Field,       // Token A 储备量
+    reserve_b: Field,       // Token B 储备量
+    fee_rate: Field,        // 手续费率 (e.g., 30 = 0.3%)
+    pool_hash: Field,       // 池状态哈希
+}
+
+// 用户交换意图（私有输入）
+struct SwapIntent {
+    amount_in: Field,       // 输入金额 (隐私!)
+    min_amount_out: Field,  // 最小输出 (滑点保护)
+    user_pubkey: Field,     // 用户公钥
+    nullifier: Field,       // 防双花标识符
+}
+
+// 交易结果（公开输出）
+struct SwapResult {
+    amount_out_hash: Field, // 输出金额的哈希 (隐藏实际值)
+    new_pool_hash: Field,   // 新池状态哈希
+    nullifier_hash: Field,  // 空值器哈希 (防双花)
+}
+
+// 主电路: 证明交换有效性
+fn main(
+    // 公开输入
+    pool: pub PoolState,
+
+    // 私有输入
+    intent: SwapIntent,
+
+    // 输出
+    result: pub SwapResult
+) {
+    // ============================================
+    // 约束 1: 验证 AMM 公式 (x * y = k)
+    // ============================================
+
+    let amount_in_with_fee = intent.amount_in * (10000 - pool.fee_rate);
+    let numerator = amount_in_with_fee * pool.reserve_b;
+    let denominator = pool.reserve_a * 10000 + amount_in_with_fee;
+    let amount_out = numerator / denominator;
+
+    // 新储备量
+    let new_reserve_a = pool.reserve_a + intent.amount_in;
+    let new_reserve_b = pool.reserve_b - amount_out;
+
+    // 验证 k 值不变 (考虑精度)
+    let old_k = pool.reserve_a * pool.reserve_b;
+    let new_k = new_reserve_a * new_reserve_b;
+    assert(new_k >= old_k);  // 新 k 应该 >= 旧 k (手续费累积)
+
+    // ============================================
+    // 约束 2: 滑点保护
+    // ============================================
+
+    assert(amount_out >= intent.min_amount_out);
+
+    // ============================================
+    // 约束 3: 验证输出哈希
+    // ============================================
+
+    let computed_amount_hash = std::hash::pedersen([
+        amount_out,
+        intent.user_pubkey
+    ]);
+    assert(computed_amount_hash == result.amount_out_hash);
+
+    // ============================================
+    // 约束 4: 验证新池状态哈希
+    // ============================================
+
+    let computed_pool_hash = std::hash::pedersen([
+        new_reserve_a,
+        new_reserve_b,
+        pool.fee_rate
+    ]);
+    assert(computed_pool_hash == result.new_pool_hash);
+
+    // ============================================
+    // 约束 5: 空值器防双花
+    // ============================================
+
+    let computed_nullifier_hash = std::hash::pedersen([
+        intent.nullifier,
+        intent.user_pubkey
+    ]);
+    assert(computed_nullifier_hash == result.nullifier_hash);
+}
+```
+
+#### 18.40.6 Titan Python SDK 接口
+
+```python
+# titan_sdk/privacy_dex.py
+# Titan Privacy DEX - 用户友好的 Python SDK
+
+import titan
+from titan.zk import NoirCircuit, Prover
+from titan.solana import SolanaClient
+from dataclasses import dataclass
+from typing import Optional
+
+@dataclass
+class SwapResult:
+    """交换结果"""
+    tx_signature: str           # Solana 交易签名
+    amount_out: float           # 实际获得金额 (本地已知)
+    proof_time_ms: int          # 证明生成时间
+    gas_used: int               # 消耗的计算单元
+
+class TitanPrivacyDEX:
+    """
+    Titan Privacy DEX - ZK-AMM
+
+    让用户像使用普通 DEX 一样使用隐私 DEX。
+    所有 ZK 证明生成和验证在后台自动完成。
+    """
+
+    def __init__(
+        self,
+        rpc_url: str = "https://api.mainnet-beta.solana.com",
+        circuit_path: str = "./circuits/private_swap.nr"
+    ):
+        # 初始化 Solana 客户端
+        self.solana = SolanaClient(rpc_url)
+
+        # 加载 Noir 电路
+        self.circuit = NoirCircuit.load(circuit_path)
+
+        # 初始化证明器
+        self.prover = Prover(self.circuit)
+
+        # Sunspot 验证器地址
+        self.verifier_program = "SunspotVerifier111111111111111111111111111"
+
+        # AMM 池子地址
+        self.pool_program = "TitanPrivacyPool111111111111111111111111111"
+
+    def private_swap(
+        self,
+        token_in: str,
+        token_out: str,
+        amount: float,
+        max_slippage: float = 0.5,
+        wallet: Optional[titan.Wallet] = None
+    ) -> SwapResult:
+        """
+        执行隐私交换
+
+        用户调用这一个函数，后台自动:
+        1. 获取池子状态
+        2. 计算最优路径
+        3. 生成 ZK 证明
+        4. 构建并提交交易
+
+        Args:
+            token_in: 输入代币 (e.g., "SOL")
+            token_out: 输出代币 (e.g., "USDC")
+            amount: 输入金额
+            max_slippage: 最大滑点 (百分比)
+            wallet: 钱包 (默认使用环境变量中的密钥)
+
+        Returns:
+            SwapResult: 交换结果
+        """
+
+        # Step 1: 获取池子状态
+        pool_state = self._get_pool_state(token_in, token_out)
+
+        # Step 2: 计算预期输出
+        expected_out = self._calculate_output(
+            pool_state,
+            amount
+        )
+        min_amount_out = expected_out * (1 - max_slippage / 100)
+
+        # Step 3: 准备证明输入
+        private_inputs = {
+            "intent": {
+                "amount_in": self._to_field(amount),
+                "min_amount_out": self._to_field(min_amount_out),
+                "user_pubkey": wallet.public_key_field(),
+                "nullifier": self._generate_nullifier(),
+            }
+        }
+
+        public_inputs = {
+            "pool": {
+                "reserve_a": pool_state.reserve_a,
+                "reserve_b": pool_state.reserve_b,
+                "fee_rate": pool_state.fee_rate,
+                "pool_hash": pool_state.hash(),
+            }
+        }
+
+        # Step 4: 生成 ZK 证明 (耗时操作)
+        print(f"🔐 Generating ZK proof...")
+        proof, proof_time = self.prover.prove(
+            private_inputs,
+            public_inputs
+        )
+        print(f"✅ Proof generated in {proof_time}ms")
+
+        # Step 5: 构建 Solana 交易
+        tx = self._build_swap_transaction(
+            proof=proof,
+            pool_state=pool_state,
+            token_in=token_in,
+            token_out=token_out,
+        )
+
+        # Step 6: 签名并提交
+        print(f"📤 Submitting transaction...")
+        signature = self.solana.send_transaction(tx, wallet)
+
+        # Step 7: 等待确认
+        confirmation = self.solana.confirm_transaction(signature)
+
+        return SwapResult(
+            tx_signature=signature,
+            amount_out=expected_out,
+            proof_time_ms=proof_time,
+            gas_used=confirmation.compute_units_consumed,
+        )
+
+    def get_quote(
+        self,
+        token_in: str,
+        token_out: str,
+        amount: float
+    ) -> dict:
+        """
+        获取报价 (不生成证明)
+
+        快速查询预期输出，用于 UI 显示。
+        """
+        pool_state = self._get_pool_state(token_in, token_out)
+        expected_out = self._calculate_output(pool_state, amount)
+
+        return {
+            "token_in": token_in,
+            "token_out": token_out,
+            "amount_in": amount,
+            "expected_out": expected_out,
+            "price_impact": self._calculate_price_impact(pool_state, amount),
+            "fee": amount * pool_state.fee_rate / 10000,
+        }
+
+    def _get_pool_state(self, token_a: str, token_b: str):
+        """从链上获取池子状态"""
+        pool_address = self._get_pool_address(token_a, token_b)
+        return self.solana.get_account_data(
+            pool_address,
+            schema=PoolState
+        )
+
+    def _calculate_output(self, pool: "PoolState", amount_in: float) -> float:
+        """计算 AMM 输出 (x * y = k)"""
+        amount_in_with_fee = amount_in * (10000 - pool.fee_rate)
+        numerator = amount_in_with_fee * pool.reserve_b
+        denominator = pool.reserve_a * 10000 + amount_in_with_fee
+        return numerator / denominator
+
+    def _build_swap_transaction(self, proof, pool_state, token_in, token_out):
+        """构建 Solana 交易"""
+        return titan.solana.Transaction([
+            # 指令 1: 验证 ZK 证明
+            titan.solana.Instruction(
+                program_id=self.verifier_program,
+                data=proof.serialize(),
+            ),
+            # 指令 2: 执行交换
+            titan.solana.Instruction(
+                program_id=self.pool_program,
+                data=self._encode_swap_data(pool_state),
+                accounts=[
+                    pool_state.address,
+                    token_in,
+                    token_out,
+                ],
+            ),
+        ])
+
+
+# ============================================================
+# 使用示例
+# ============================================================
+
+if __name__ == "__main__":
+    # 初始化 DEX
+    dex = TitanPrivacyDEX()
+
+    # 加载钱包
+    wallet = titan.Wallet.from_env()
+
+    # 执行隐私交换
+    result = dex.private_swap(
+        token_in="SOL",
+        token_out="USDC",
+        amount=10.0,
+        max_slippage=0.5,
+        wallet=wallet,
+    )
+
+    print(f"🎉 Swap completed!")
+    print(f"   TX: {result.tx_signature}")
+    print(f"   Received: {result.amount_out:.2f} USDC")
+    print(f"   Proof time: {result.proof_time_ms}ms")
+```
+
+#### 18.40.7 Zig 核心驱动: solana_noir.zig
+
+```zig
+// drivers/solana_noir.zig
+// Titan Privacy DEX - Zig 核心引擎
+
+const std = @import("std");
+const titan = @import("titan");
+
+/// Noir 证明结果
+pub const NoirProof = struct {
+    /// Groth16 证明点 (序列化)
+    proof_bytes: [256]u8,
+
+    /// 公开输入
+    public_inputs: []const u256,
+
+    /// 验证密钥哈希
+    vk_hash: [32]u8,
+
+    /// 转换为 Solana 指令数据
+    pub fn toSolanaData(self: *const NoirProof, allocator: std.mem.Allocator) ![]u8 {
+        var buffer = std.ArrayList(u8).init(allocator);
+        errdefer buffer.deinit();
+
+        // 写入证明
+        try buffer.appendSlice(&self.proof_bytes);
+
+        // 写入公开输入数量
+        try buffer.append(@intCast(self.public_inputs.len));
+
+        // 写入公开输入
+        for (self.public_inputs) |input| {
+            try buffer.appendSlice(std.mem.asBytes(&input));
+        }
+
+        return buffer.toOwnedSlice();
+    }
+};
+
+/// Solana Noir 驱动
+pub const SolanaNoir = struct {
+    allocator: std.mem.Allocator,
+
+    /// Solana RPC 客户端
+    rpc_client: titan.SolanaRpcClient,
+
+    /// Noir 电路编译器
+    noir_compiler: titan.NoirCompiler,
+
+    /// Sunspot 验证器程序 ID
+    verifier_program_id: [32]u8,
+
+    /// 证明缓存
+    proof_cache: std.AutoHashMap([32]u8, NoirProof),
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        rpc_url: []const u8,
+        verifier_program_id: [32]u8,
+    ) !SolanaNoir {
+        return SolanaNoir{
+            .allocator = allocator,
+            .rpc_client = try titan.SolanaRpcClient.connect(rpc_url),
+            .noir_compiler = try titan.NoirCompiler.init(allocator),
+            .verifier_program_id = verifier_program_id,
+            .proof_cache = std.AutoHashMap([32]u8, NoirProof).init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *SolanaNoir) void {
+        self.proof_cache.deinit();
+        self.noir_compiler.deinit();
+        self.rpc_client.disconnect();
+    }
+
+    /// 编译 Noir 电路
+    pub fn compileCircuit(
+        self: *SolanaNoir,
+        circuit_source: []const u8,
+    ) !titan.CompiledCircuit {
+        return try self.noir_compiler.compile(circuit_source);
+    }
+
+    /// 生成证明
+    pub fn generateProof(
+        self: *SolanaNoir,
+        circuit: titan.CompiledCircuit,
+        private_inputs: anytype,
+        public_inputs: anytype,
+    ) !NoirProof {
+        // 计算输入哈希 (用于缓存查找)
+        const input_hash = computeInputHash(private_inputs, public_inputs);
+
+        // 检查缓存
+        if (self.proof_cache.get(input_hash)) |cached| {
+            return cached;
+        }
+
+        // 生成新证明
+        const proof = try self.noir_compiler.prove(
+            circuit,
+            private_inputs,
+            public_inputs,
+        );
+
+        // 缓存证明
+        try self.proof_cache.put(input_hash, proof);
+
+        return proof;
+    }
+
+    /// 构建隐私交换交易
+    pub fn buildPrivateSwapTx(
+        self: *SolanaNoir,
+        proof: NoirProof,
+        pool_address: [32]u8,
+        user_token_accounts: struct {
+            token_in: [32]u8,
+            token_out: [32]u8,
+        },
+    ) !titan.SolanaTransaction {
+        var tx = titan.SolanaTransaction.init(self.allocator);
+
+        // 指令 1: 验证 ZK 证明
+        const verify_ix = try self.buildVerifyInstruction(proof);
+        try tx.addInstruction(verify_ix);
+
+        // 指令 2: 执行交换
+        const swap_ix = try self.buildSwapInstruction(
+            pool_address,
+            user_token_accounts,
+            proof.public_inputs,
+        );
+        try tx.addInstruction(swap_ix);
+
+        return tx;
+    }
+
+    /// 构建验证指令
+    fn buildVerifyInstruction(
+        self: *SolanaNoir,
+        proof: NoirProof,
+    ) !titan.SolanaInstruction {
+        const data = try proof.toSolanaData(self.allocator);
+
+        return titan.SolanaInstruction{
+            .program_id = self.verifier_program_id,
+            .accounts = &[_]titan.AccountMeta{},
+            .data = data,
+        };
+    }
+
+    /// 构建交换指令
+    fn buildSwapInstruction(
+        self: *SolanaNoir,
+        pool_address: [32]u8,
+        token_accounts: anytype,
+        public_inputs: []const u256,
+    ) !titan.SolanaInstruction {
+        // 从公开输入提取新池哈希和空值器哈希
+        const new_pool_hash = public_inputs[0];
+        const nullifier_hash = public_inputs[1];
+
+        var data = std.ArrayList(u8).init(self.allocator);
+        try data.appendSlice(std.mem.asBytes(&new_pool_hash));
+        try data.appendSlice(std.mem.asBytes(&nullifier_hash));
+
+        return titan.SolanaInstruction{
+            .program_id = pool_address, // 池子即程序
+            .accounts = &[_]titan.AccountMeta{
+                .{ .pubkey = token_accounts.token_in, .is_signer = false, .is_writable = true },
+                .{ .pubkey = token_accounts.token_out, .is_signer = false, .is_writable = true },
+            },
+            .data = try data.toOwnedSlice(),
+        };
+    }
+
+    /// 提交交易
+    pub fn submitTransaction(
+        self: *SolanaNoir,
+        tx: titan.SolanaTransaction,
+        signer: titan.Keypair,
+    ) !titan.TransactionSignature {
+        // 签名
+        const signed_tx = try tx.sign(signer);
+
+        // 发送
+        const signature = try self.rpc_client.sendTransaction(signed_tx);
+
+        // 确认
+        try self.rpc_client.confirmTransaction(signature, .finalized);
+
+        return signature;
+    }
+};
+
+/// 计算输入哈希 (用于缓存)
+fn computeInputHash(private_inputs: anytype, public_inputs: anytype) [32]u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+
+    // 哈希私有输入
+    inline for (std.meta.fields(@TypeOf(private_inputs))) |field| {
+        const value = @field(private_inputs, field.name);
+        hasher.update(std.mem.asBytes(&value));
+    }
+
+    // 哈希公开输入
+    inline for (std.meta.fields(@TypeOf(public_inputs))) |field| {
+        const value = @field(public_inputs, field.name);
+        hasher.update(std.mem.asBytes(&value));
+    }
+
+    return hasher.finalResult();
+}
+
+// ============================================================
+// 测试
+// ============================================================
+
+test "proof generation and verification" {
+    const allocator = std.testing.allocator;
+
+    var driver = try SolanaNoir.init(
+        allocator,
+        "https://api.devnet.solana.com",
+        [_]u8{0} ** 32, // 测试验证器 ID
+    );
+    defer driver.deinit();
+
+    // 加载测试电路
+    const circuit = try driver.compileCircuit(
+        @embedFile("../circuits/private_swap.nr"),
+    );
+
+    // 生成证明
+    const proof = try driver.generateProof(
+        circuit,
+        .{
+            .amount_in = 1000,
+            .min_amount_out = 900,
+            .nullifier = 12345,
+        },
+        .{
+            .reserve_a = 100000,
+            .reserve_b = 100000,
+            .fee_rate = 30,
+        },
+    );
+
+    // 验证证明长度
+    try std.testing.expect(proof.proof_bytes.len == 256);
+}
+```
+
+#### 18.40.8 Hackathon 奖金策略
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                 │
+│               Titan Privacy DEX 奖金定位策略                     │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  主攻目标 (高概率):                                              │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                                                         │   │
+│  │  1. Aztec/Noir Bounty ($10,000)                         │   │
+│  │     • 我们深度使用 Noir 电路                            │   │
+│  │     • 展示 "Write Code, Not Proofs" 理念                │   │
+│  │     • 提供完整的 Noir → Solana 集成方案                 │   │
+│  │                                                         │   │
+│  │  2. Open Track ($18,000)                                │   │
+│  │     • ZK-AMM 是创新性应用                               │   │
+│  │     • 解决真实痛点 (MEV 保护)                           │   │
+│  │     • 用户友好的 SDK 设计                               │   │
+│  │                                                         │   │
+│  │  潜在总奖金: $28,000                                     │   │
+│  │                                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│  备选目标 (如时间充足):                                          │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                                                         │   │
+│  │  3. Privacy Tooling ($15,000)                           │   │
+│  │     • Titan Python SDK 本身就是工具                     │   │
+│  │     • 可强调 "改善 ZK 开发者体验"                       │   │
+│  │                                                         │   │
+│  │  4. Helius Bounty ($5,000)                              │   │
+│  │     • 集成 Helius RPC                                   │   │
+│  │     • 展示性能优化                                      │   │
+│  │                                                         │   │
+│  │  额外潜在奖金: $20,000                                   │   │
+│  │                                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│  理论最大奖金: $48,000                                           │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.40.9 三日开发计划
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                 │
+│                   Hackathon 三日开发计划                         │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Day 1: 核心电路 + 基础设施                                      │
+│  ─────────────────────────────────────────────────────────────  │
+│                                                                 │
+│  上午 (4h):                                                      │
+│  • 搭建开发环境 (Noir, Solana CLI, Sunspot)                     │
+│  • 编写 private_swap.nr 核心电路                                │
+│  • 本地测试电路正确性                                           │
+│                                                                 │
+│  下午 (4h):                                                      │
+│  • 编译电路，生成验证密钥                                       │
+│  • 部署 Sunspot 验证器到 Devnet                                 │
+│  • 测试链上证明验证                                             │
+│                                                                 │
+│  晚上 (2h):                                                      │
+│  • 修复 Day 1 遗留问题                                          │
+│  • 准备 Day 2 需要的账户和代币                                  │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Day 2: SDK + 集成测试                                           │
+│  ─────────────────────────────────────────────────────────────  │
+│                                                                 │
+│  上午 (4h):                                                      │
+│  • 编写 solana_noir.zig 驱动                                    │
+│  • 实现 Python SDK 核心接口                                     │
+│  • 集成 Noir Prover                                             │
+│                                                                 │
+│  下午 (4h):                                                      │
+│  • 部署测试 AMM 池到 Devnet                                     │
+│  • 端到端测试: Python SDK → 链上交换                            │
+│  • 优化证明生成时间                                             │
+│                                                                 │
+│  晚上 (2h):                                                      │
+│  • 添加错误处理和用户提示                                       │
+│  • 准备演示脚本                                                 │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Day 3: 演示 + Pitch                                             │
+│  ─────────────────────────────────────────────────────────────  │
+│                                                                 │
+│  上午 (4h):                                                      │
+│  • 制作演示视频 (2-3 分钟)                                      │
+│  • 编写 README 和文档                                           │
+│  • 准备 Pitch Deck (5 页)                                       │
+│                                                                 │
+│  下午 (4h):                                                      │
+│  • 提交到各赛道                                                 │
+│  • Pitch 彩排                                                   │
+│  • 准备 Q&A 应答                                                │
+│                                                                 │
+│  晚上:                                                           │
+│  • 展示 + 评审                                                  │
+│  • 🎉                                                           │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.40.10 Pitch 核心叙事
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                 │
+│               Titan Privacy DEX - Pitch 叙事                     │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  痛点 (Problem):                                                 │
+│  ─────────────────────────────────────────────────────────────  │
+│                                                                 │
+│  "每年 MEV 损失超过 $10 亿"                                      │
+│                                                                 │
+│  • Solana 用户每次交易都被 MEV 机器人窥视                       │
+│  • 三明治攻击让用户损失 0.5-2% 的交易价值                       │
+│  • 现有隐私方案要么太贵，要么太复杂                             │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  方案 (Solution):                                                │
+│  ─────────────────────────────────────────────────────────────  │
+│                                                                 │
+│  "像用普通 DEX 一样用隐私 DEX"                                   │
+│                                                                 │
+│  ```python                                                      │
+│  # 三行代码，完成隐私交换                                        │
+│  dex = TitanPrivacyDEX()                                        │
+│  result = dex.private_swap("SOL", "USDC", 10.0)                 │
+│  print(f"Received: {result.amount_out} USDC")                   │
+│  ```                                                            │
+│                                                                 │
+│  • ZK 证明生成 < 3 秒                                           │
+│  • 交易金额完全隐藏                                             │
+│  • MEV 机器人无法攻击                                           │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  技术亮点 (Tech Highlights):                                     │
+│  ─────────────────────────────────────────────────────────────  │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                                                         │   │
+│  │  1. Noir ZK 电路                                        │   │
+│  │     "Write Code, Not Proofs"                            │   │
+│  │     用 Rust-like 语法编写，自动生成证明                 │   │
+│  │                                                         │   │
+│  │  2. Sunspot 链上验证                                    │   │
+│  │     Groth16 证明在 Solana 上高效验证                    │   │
+│  │     ~200K 计算单元                                      │   │
+│  │                                                         │   │
+│  │  3. Titan Zig 核心                                      │   │
+│  │     高性能、零开销的证明管理                            │   │
+│  │     comptime 优化序列化                                 │   │
+│  │                                                         │   │
+│  │  4. Python SDK                                          │   │
+│  │     开发者友好的高层 API                                │   │
+│  │     一行代码完成隐私交换                                │   │
+│  │                                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  差异化 (Differentiation):                                       │
+│  ─────────────────────────────────────────────────────────────  │
+│                                                                 │
+│  vs. 其他隐私方案:                                               │
+│                                                                 │
+│  ┌──────────────────┬────────────┬────────────┬────────────┐   │
+│  │                  │ Elusiv     │ Light      │ Titan      │   │
+│  ├──────────────────┼────────────┼────────────┼────────────┤   │
+│  │ 隐私转账         │ ✅         │ ✅         │ ✅         │   │
+│  │ 隐私交换         │ ❌         │ ❌         │ ✅         │   │
+│  │ MEV 保护         │ 部分       │ ❌         │ ✅         │   │
+│  │ 开发者友好       │ 中         │ 中         │ ⭐高       │   │
+│  │ 证明时间         │ ~10s       │ N/A        │ <3s        │   │
+│  └──────────────────┴────────────┴────────────┴────────────┘   │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  路线图 (Roadmap):                                               │
+│  ─────────────────────────────────────────────────────────────  │
+│                                                                 │
+│  Phase 1 (Hackathon): ZK-AMM MVP                                │
+│  • SOL/USDC 隐私交换                                            │
+│  • Devnet 部署                                                  │
+│                                                                 │
+│  Phase 2: 多池支持                                               │
+│  • 任意 SPL 代币对                                              │
+│  • 路由聚合                                                     │
+│                                                                 │
+│  Phase 3: 跨链扩展                                               │
+│  • Bitcoin 集成 (Titan CSV)                                     │
+│  • TON 集成                                                     │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  团队 (Team):                                                    │
+│  ─────────────────────────────────────────────────────────────  │
+│                                                                 │
+│  Titan Framework 核心团队                                        │
+│  • 深耕 Zig + 区块链基础设施                                    │
+│  • 多链抽象层专家                                               │
+│  • Client-Side Validation 先行者                                │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  结语 (Closing):                                                 │
+│  ─────────────────────────────────────────────────────────────  │
+│                                                                 │
+│  "Privacy should be a feature, not a barrier."                  │
+│                                                                 │
+│  我们让每个 Solana 用户都能享受隐私保护，                        │
+│  无需理解 ZK，无需复杂操作，只需一行代码。                       │
+│                                                                 │
+│  Titan Privacy DEX - 让隐私变得简单。                            │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.40.11 与 Titan Framework 整体架构的关系
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                 │
+│          Titan Privacy DEX 在整体架构中的位置                    │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                                                         │   │
+│  │                   Titan Framework                       │   │
+│  │                                                         │   │
+│  │  ┌───────────────────────────────────────────────────┐ │   │
+│  │  │                应用层 (Applications)               │ │   │
+│  │  │                                                   │ │   │
+│  │  │  ┌─────────────┐  ┌─────────────┐  ┌───────────┐ │ │   │
+│  │  │  │ Privacy DEX │  │ DeFi Suite  │  │   ...     │ │ │   │
+│  │  │  │ (Solana)    │  │ (Bitcoin)   │  │           │ │ │   │
+│  │  │  └──────┬──────┘  └──────┬──────┘  └─────┬─────┘ │ │   │
+│  │  │         │                │                │       │ │   │
+│  │  └─────────┼────────────────┼────────────────┼───────┘ │   │
+│  │            │                │                │         │   │
+│  │  ┌─────────┼────────────────┼────────────────┼───────┐ │   │
+│  │  │         ▼                ▼                ▼       │ │   │
+│  │  │                   SDK 层                          │ │   │
+│  │  │                                                   │ │   │
+│  │  │  ┌─────────────┐  ┌─────────────┐  ┌───────────┐ │ │   │
+│  │  │  │ Python SDK  │  │ TypeScript  │  │   Zig     │ │ │   │
+│  │  │  │             │  │    SDK      │  │   SDK     │ │ │   │
+│  │  │  └──────┬──────┘  └──────┬──────┘  └─────┬─────┘ │ │   │
+│  │  │         │                │                │       │ │   │
+│  │  └─────────┼────────────────┼────────────────┼───────┘ │   │
+│  │            │                │                │         │   │
+│  │  ┌─────────┼────────────────┼────────────────┼───────┐ │   │
+│  │  │         ▼                ▼                ▼       │ │   │
+│  │  │                  驱动层 (Drivers)                  │ │   │
+│  │  │                                                   │ │   │
+│  │  │  ┌─────────────┐  ┌─────────────┐  ┌───────────┐ │ │   │
+│  │  │  │solana_noir  │  │ bitcoin_csv │  │  ton_tact │ │ │   │
+│  │  │  │   .zig      │  │    .zig     │  │   .zig    │ │ │   │
+│  │  │  └──────┬──────┘  └──────┬──────┘  └─────┬─────┘ │ │   │
+│  │  │         │                │                │       │ │   │
+│  │  └─────────┼────────────────┼────────────────┼───────┘ │   │
+│  │            │                │                │         │   │
+│  │  ┌─────────┼────────────────┼────────────────┼───────┐ │   │
+│  │  │         ▼                ▼                ▼       │ │   │
+│  │  │                   核心层 (Core)                    │ │   │
+│  │  │                                                   │ │   │
+│  │  │  ┌──────────────────────────────────────────────┐│ │   │
+│  │  │  │                                              ││ │   │
+│  │  │  │  Titan Kernel (libtitan.a)                   ││ │   │
+│  │  │  │                                              ││ │   │
+│  │  │  │  • 状态管理 (State Management)               ││ │   │
+│  │  │  │  • 密码学原语 (Crypto Primitives)            ││ │   │
+│  │  │  │  • 跨链抽象 (Chain Abstraction)              ││ │   │
+│  │  │  │  • comptime 优化                             ││ │   │
+│  │  │  │                                              ││ │   │
+│  │  │  └──────────────────────────────────────────────┘│ │   │
+│  │  │                                                   │ │   │
+│  │  └───────────────────────────────────────────────────┘ │   │
+│  │                                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│  ─────────────────────────────────────────────────────────────  │
+│                                                                 │
+│  Privacy DEX 验证了 Titan Framework 的核心理念:                  │
+│                                                                 │
+│  1. 多链支持: 同一套 SDK 可服务 Solana / Bitcoin / TON          │
+│                                                                 │
+│  2. 驱动隔离: solana_noir.zig 独立处理 ZK 集成                  │
+│                                                                 │
+│  3. 用户友好: Python SDK 隐藏复杂性                             │
+│                                                                 │
+│  4. 性能优先: Zig 核心保证低延迟                                │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.40.12 技术集成细节
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                 │
+│                   Noir + Solana 集成流程                         │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Step 1: 电路编译                                                │
+│  ─────────────────────────────────────────────────────────────  │
+│                                                                 │
+│  ```bash                                                        │
+│  # 编译 Noir 电路                                                │
+│  nargo compile                                                  │
+│                                                                 │
+│  # 输出:                                                         │
+│  # target/private_swap.json  (电路 ACIR)                        │
+│  # target/prover.toml        (证明器配置)                       │
+│  # target/verifier.toml      (验证器配置)                       │
+│  ```                                                            │
+│                                                                 │
+│  Step 2: 生成 Solana 验证器                                      │
+│  ─────────────────────────────────────────────────────────────  │
+│                                                                 │
+│  ```bash                                                        │
+│  # 使用 Sunspot 生成验证器程序                                   │
+│  sunspot generate-verifier \                                    │
+│    --circuit target/private_swap.json \                         │
+│    --output programs/verifier/                                  │
+│                                                                 │
+│  # 部署到 Devnet                                                 │
+│  anchor deploy --provider.cluster devnet                        │
+│  ```                                                            │
+│                                                                 │
+│  Step 3: 证明生成 (客户端)                                       │
+│  ─────────────────────────────────────────────────────────────  │
+│                                                                 │
+│  ```                                                            │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                     用户设备                             │   │
+│  │                                                         │   │
+│  │   Private Inputs          Public Inputs                 │   │
+│  │   ┌─────────────┐         ┌─────────────┐              │   │
+│  │   │ amount_in   │         │ reserve_a   │              │   │
+│  │   │ min_out     │         │ reserve_b   │              │   │
+│  │   │ nullifier   │         │ fee_rate    │              │   │
+│  │   └──────┬──────┘         └──────┬──────┘              │   │
+│  │          │                       │                      │   │
+│  │          └───────────┬───────────┘                      │   │
+│  │                      ▼                                  │   │
+│  │              ┌───────────────┐                          │   │
+│  │              │ Noir Prover   │                          │   │
+│  │              │ (WASM/Native) │                          │   │
+│  │              └───────┬───────┘                          │   │
+│  │                      │                                  │   │
+│  │                      ▼                                  │   │
+│  │              ┌───────────────┐                          │   │
+│  │              │ Groth16 Proof │                          │   │
+│  │              │   (256 bytes) │                          │   │
+│  │              └───────────────┘                          │   │
+│  │                                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│  Step 4: 链上验证                                                │
+│  ─────────────────────────────────────────────────────────────  │
+│                                                                 │
+│  ```                                                            │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                  Solana Transaction                      │   │
+│  │                                                         │   │
+│  │   ┌───────────────────────────────────────────────────┐│   │
+│  │   │ Instruction 1: Verify Proof                       ││   │
+│  │   │                                                   ││   │
+│  │   │ Program: Sunspot Verifier                         ││   │
+│  │   │ Data:                                             ││   │
+│  │   │   - proof_bytes (256 bytes)                       ││   │
+│  │   │   - public_inputs (3 x 32 bytes)                  ││   │
+│  │   │                                                   ││   │
+│  │   │ Compute Units: ~200,000                           ││   │
+│  │   │                                                   ││   │
+│  │   └───────────────────────────────────────────────────┘│   │
+│  │                                                         │   │
+│  │   ┌───────────────────────────────────────────────────┐│   │
+│  │   │ Instruction 2: Execute Swap                       ││   │
+│  │   │                                                   ││   │
+│  │   │ Program: Titan AMM Pool                           ││   │
+│  │   │ Data:                                             ││   │
+│  │   │   - new_pool_hash (32 bytes)                      ││   │
+│  │   │   - nullifier_hash (32 bytes)                     ││   │
+│  │   │                                                   ││   │
+│  │   │ Compute Units: ~50,000                            ││   │
+│  │   │                                                   ││   │
+│  │   └───────────────────────────────────────────────────┘│   │
+│  │                                                         │   │
+│  │   Total Compute Units: ~250,000                         │   │
+│  │   Estimated Cost: ~0.00025 SOL                          │   │
+│  │                                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.40.13 关键成功因素
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                 │
+│                Hackathon 成功关键因素                            │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ✅ 必须完成:                                                    │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                                                         │   │
+│  │  1. 端到端演示                                          │   │
+│  │     • 从 Python SDK 调用 → 链上交换成功                 │   │
+│  │     • 证明生成 + 验证完整流程                           │   │
+│  │     • 真实代币交换 (Devnet)                             │   │
+│  │                                                         │   │
+│  │  2. 代码质量                                            │   │
+│  │     • Noir 电路有完整注释                               │   │
+│  │     • Python SDK API 清晰易用                           │   │
+│  │     • Zig 驱动代码规范                                  │   │
+│  │                                                         │   │
+│  │  3. 文档完备                                            │   │
+│  │     • README 说明如何运行                               │   │
+│  │     • 架构图清晰                                        │   │
+│  │     • API 文档                                          │   │
+│  │                                                         │   │
+│  │  4. 演示视频                                            │   │
+│  │     • 2-3 分钟                                          │   │
+│  │     • 展示用户体验                                      │   │
+│  │     • 技术亮点说明                                      │   │
+│  │                                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│  ⭐ 加分项:                                                      │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                                                         │   │
+│  │  1. 性能优化                                            │   │
+│  │     • 证明生成 < 3 秒                                   │   │
+│  │     • 并行证明生成                                      │   │
+│  │                                                         │   │
+│  │  2. 多池支持                                            │   │
+│  │     • SOL/USDC, SOL/USDT 等                             │   │
+│  │     • 路由聚合                                          │   │
+│  │                                                         │   │
+│  │  3. 前端 UI                                             │   │
+│  │     • 简单的 Web 界面                                   │   │
+│  │     • 钱包连接                                          │   │
+│  │                                                         │   │
+│  │  4. Helius 集成                                         │   │
+│  │     • 性能监控                                          │   │
+│  │     • 增强型 RPC                                        │   │
+│  │                                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│  ⚠️ 风险缓解:                                                    │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                                                         │   │
+│  │  风险 1: Noir 证明生成太慢                              │   │
+│  │  缓解: 使用 native prover 而非 WASM                     │   │
+│  │                                                         │   │
+│  │  风险 2: Sunspot 验证失败                               │   │
+│  │  缓解: 准备 groth16-solana 作为备选                     │   │
+│  │                                                         │   │
+│  │  风险 3: Devnet 不稳定                                  │   │
+│  │  缓解: 录制演示视频，准备本地模拟                       │   │
+│  │                                                         │   │
+│  │  风险 4: 时间不足                                       │   │
+│  │  缓解: 优先级排序，MVP 优先                             │   │
+│  │                                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.40.14 总结: 为什么是 Titan Privacy DEX
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                 │
+│              Titan Privacy DEX - 价值主张总结                    │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  对用户:                                                         │
+│  ─────────────────────────────────────────────────────────────  │
+│                                                                 │
+│  "交易隐私，一键实现"                                            │
+│                                                                 │
+│  • 不再担心 MEV 攻击                                            │
+│  • 不需要理解 ZK 原理                                           │
+│  • 像普通 DEX 一样简单                                          │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  对开发者:                                                       │
+│  ─────────────────────────────────────────────────────────────  │
+│                                                                 │
+│  "Write Code, Not Proofs"                                       │
+│                                                                 │
+│  • Python SDK 三行代码集成                                      │
+│  • Noir 电路可复用扩展                                          │
+│  • Zig 核心保证性能                                             │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  对 Solana 生态:                                                 │
+│  ─────────────────────────────────────────────────────────────  │
+│                                                                 │
+│  "隐私 DeFi 的基础设施"                                          │
+│                                                                 │
+│  • 第一个 ZK-AMM on Solana                                      │
+│  • 展示 Noir + Solana 集成范式                                  │
+│  • 开源可复用组件                                               │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  对 Titan Framework:                                             │
+│  ─────────────────────────────────────────────────────────────  │
+│                                                                 │
+│  "多链愿景的 Solana 展示窗口"                                    │
+│                                                                 │
+│  • 验证 SDK 设计理念                                            │
+│  • 展示驱动层架构                                               │
+│  • 建立开发者社区                                               │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  一句话:                                                         │
+│  ─────────────────────────────────────────────────────────────  │
+│                                                                 │
+│  "Privacy should be a feature, not a barrier."                  │
+│                                                                 │
+│  隐私应该是一种功能，而非门槛。                                  │
+│                                                                 │
+│  Titan Privacy DEX 让 Solana 用户享受隐私保护，                  │
+│  让开发者轻松构建隐私应用，                                      │
+│  让整个生态向更安全、更公平的方向前进。                          │
+│                                                                 │
+│                                                                 │
+│                      🎯 目标: $28,000+ 奖金                       │
+│                      🚀 展示: Titan Framework 能力                │
+│                      🌊 愿景: 隐私 DeFi 基础设施                  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
 ## 相关文档
 
 | 文档 | 说明 |
