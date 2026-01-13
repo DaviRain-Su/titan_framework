@@ -21,8 +21,8 @@ const crypto = require('crypto');
 const zkProver = require('../sdk/zk_prover');
 const { createMerkleTree } = require('../sdk/merkle_tree');
 
-// Program ID (deployed to testnet - with full Groth16 verification)
-const PROGRAM_ID = new PublicKey('2mZrAMAKJ2R1Gmqwkj8vhNoLmzhfczP8wPnwq7V358Wk');
+// Program ID (deployed to testnet - with private liquidity)
+const PROGRAM_ID = new PublicKey('7DGg2ouvHsZecGDocaY1nu6ZmSDvSq9NsLSHd16ENHbQ');
 
 // Instructions
 const DEPOSIT_INSTRUCTION = 1;

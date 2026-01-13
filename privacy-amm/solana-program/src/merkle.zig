@@ -1,8 +1,11 @@
 // On-Chain Merkle Tree
 // 链上增量 Merkle 树实现
+//
+// 使用 Poseidon 哈希函数 (兼容 Circom)
 
 const std = @import("std");
 const sol = @import("solana_program_sdk");
+const poseidon = @import("poseidon.zig");
 
 /// Merkle 树深度 (支持 2^20 = 约 100 万叶子)
 pub const MERKLE_DEPTH: u32 = 20;
@@ -158,20 +161,15 @@ pub fn getNextIndex(account: sol.account.Account) u32 {
 // ============================================================================
 
 /// Poseidon 哈希 (2 个输入)
-/// 注意: 实际实现需要使用预编译或完整实现
+/// 使用 Solana 的 sol_poseidon syscall
 fn poseidonHash(left: [32]u8, right: [32]u8) [32]u8 {
-    // TODO: 实现 Poseidon 哈希
-    // 可选方案:
-    // 1. 使用 Solana 的 Poseidon syscall (如果可用)
-    // 2. 在链上实现 Poseidon (计算密集)
-    // 3. 使用 Keccak256 作为临时替代 (不安全，仅用于开发)
-
-    // 临时: 使用简单的 XOR (仅用于开发!)
-    var result: [32]u8 = undefined;
-    for (0..32) |i| {
-        result[i] = left[i] ^ right[i];
-    }
-    return result;
+    // 调用 Poseidon syscall
+    return poseidon.hash2(left, right) catch {
+        // 如果 syscall 失败，记录错误并返回零值
+        // 这不应该发生，但为了安全起见
+        sol.log.log("Poseidon hash failed!");
+        return [_]u8{0} ** 32;
+    };
 }
 
 /// 计算空树的根

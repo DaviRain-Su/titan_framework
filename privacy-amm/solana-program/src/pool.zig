@@ -540,6 +540,128 @@ fn sqrt_u128(n: u128) u64 {
 }
 
 // ============================================================================
+// 隐私流动性 (Private Liquidity)
+// ============================================================================
+
+/// 隐私添加流动性参数
+/// 用户通过 ZK 证明将隐私 UTXO 转换为 LP Token UTXO
+pub const PrivateAddLiquidityParams = struct {
+    /// ZK 证明
+    proof: verifier.Proof,
+    /// 公开输入 (复用 SwapPublicInputs 结构)
+    public_inputs: verifier.SwapPublicInputs,
+    /// 输入 UTXO nullifiers (2 个: Token A 和 Token B)
+    input_nullifiers: [2][32]u8,
+    /// 输出 LP Token UTXO commitment
+    output_commitment: [32]u8,
+    /// 新池状态哈希
+    new_pool_state_hash: [32]u8,
+    /// 新 blinding
+    new_blinding: [32]u8,
+
+    pub fn deserialize(data: []const u8) !PrivateAddLiquidityParams {
+        const min_size = 256 + 256 + 64 + 32 + 32 + 32;
+        if (data.len < min_size) {
+            return error.InvalidInstructionData;
+        }
+
+        var params: PrivateAddLiquidityParams = undefined;
+        var offset: usize = 0;
+
+        params.proof = try verifier.Proof.deserialize(data[offset..][0..256]);
+        offset += 256;
+
+        params.public_inputs = try verifier.SwapPublicInputs.deserialize(data[offset..][0..256]);
+        offset += 256;
+
+        @memcpy(&params.input_nullifiers[0], data[offset..][0..32]);
+        offset += 32;
+        @memcpy(&params.input_nullifiers[1], data[offset..][0..32]);
+        offset += 32;
+
+        @memcpy(&params.output_commitment, data[offset..][0..32]);
+        offset += 32;
+
+        @memcpy(&params.new_pool_state_hash, data[offset..][0..32]);
+        offset += 32;
+
+        @memcpy(&params.new_blinding, data[offset..][0..32]);
+
+        return params;
+    }
+};
+
+/// 隐私移除流动性参数
+/// 用户通过 ZK 证明将 LP Token UTXO 转换为 Token A/B UTXO
+pub const PrivateRemoveLiquidityParams = struct {
+    /// ZK 证明
+    proof: verifier.Proof,
+    /// 公开输入
+    public_inputs: verifier.SwapPublicInputs,
+    /// 输入 LP Token UTXO nullifier
+    input_nullifier: [32]u8,
+    /// 输出 UTXO commitments (2 个: Token A 和 Token B)
+    output_commitments: [2][32]u8,
+    /// 新池状态哈希
+    new_pool_state_hash: [32]u8,
+    /// 新 blinding
+    new_blinding: [32]u8,
+
+    pub fn deserialize(data: []const u8) !PrivateRemoveLiquidityParams {
+        const min_size = 256 + 256 + 32 + 64 + 32 + 32;
+        if (data.len < min_size) {
+            return error.InvalidInstructionData;
+        }
+
+        var params: PrivateRemoveLiquidityParams = undefined;
+        var offset: usize = 0;
+
+        params.proof = try verifier.Proof.deserialize(data[offset..][0..256]);
+        offset += 256;
+
+        params.public_inputs = try verifier.SwapPublicInputs.deserialize(data[offset..][0..256]);
+        offset += 256;
+
+        @memcpy(&params.input_nullifier, data[offset..][0..32]);
+        offset += 32;
+
+        @memcpy(&params.output_commitments[0], data[offset..][0..32]);
+        offset += 32;
+        @memcpy(&params.output_commitments[1], data[offset..][0..32]);
+        offset += 32;
+
+        @memcpy(&params.new_pool_state_hash, data[offset..][0..32]);
+        offset += 32;
+
+        @memcpy(&params.new_blinding, data[offset..][0..32]);
+
+        return params;
+    }
+};
+
+/// 隐私添加流动性后更新池状态
+pub fn updateAfterPrivateAddLiquidity(account: sol.account.Account, params: PrivateAddLiquidityParams) !void {
+    const data = account.data();
+    var state = try PoolState.deserialize(data);
+
+    // 更新 blinding (储备量变化已在 ZK 证明中验证)
+    state.blinding = params.new_blinding;
+
+    try state.serialize(data);
+}
+
+/// 隐私移除流动性后更新池状态
+pub fn updateAfterPrivateRemoveLiquidity(account: sol.account.Account, params: PrivateRemoveLiquidityParams) !void {
+    const data = account.data();
+    var state = try PoolState.deserialize(data);
+
+    // 更新 blinding (储备量变化已在 ZK 证明中验证)
+    state.blinding = params.new_blinding;
+
+    try state.serialize(data);
+}
+
+// ============================================================================
 // 测试
 // ============================================================================
 

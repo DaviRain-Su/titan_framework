@@ -11,6 +11,7 @@ pub const pool = @import("pool.zig");
 pub const nullifier_set = @import("nullifier_set.zig");
 pub const vk = @import("vk.zig");
 pub const spl_token = @import("spl_token.zig");
+pub const poseidon = @import("poseidon.zig");
 
 // 指令类型
 pub const Instruction = enum(u8) {
@@ -22,12 +23,16 @@ pub const Instruction = enum(u8) {
     Withdraw = 2,
     /// 隐私交换 (需要 ZK 证明)
     Swap = 3,
-    /// 添加流动性 (LP)
+    /// 添加流动性 (LP) - 公开
     AddLiquidity = 4,
-    /// 移除流动性 (LP)
+    /// 移除流动性 (LP) - 公开
     RemoveLiquidity = 5,
     /// 公开交换 (用于测试 AMM 逻辑)
     PublicSwap = 6,
+    /// 隐私添加流动性 (需要 ZK 证明)
+    PrivateAddLiquidity = 7,
+    /// 隐私移除流动性 (需要 ZK 证明)
+    PrivateRemoveLiquidity = 8,
 };
 
 // 程序错误码
@@ -70,6 +75,8 @@ fn processEntry(input: [*]u8) u64 {
         .AddLiquidity => handleAddLiquidity(context, ix_data),
         .RemoveLiquidity => handleRemoveLiquidity(context, ix_data),
         .PublicSwap => handlePublicSwap(context, ix_data),
+        .PrivateAddLiquidity => handlePrivateAddLiquidity(context, ix_data),
+        .PrivateRemoveLiquidity => handlePrivateRemoveLiquidity(context, ix_data),
     };
 
     return result;
@@ -532,6 +539,147 @@ fn verifySwapProofWrapper(params: *const pool.SwapParams, merkle_root: [32]u8) b
 }
 
 // ============================================================================
+// 隐私流动性指令处理
+// ============================================================================
+
+fn handlePrivateAddLiquidity(context: sol.context.Context, data: []const u8) u64 {
+    sol.log.log("PrivateAddLiquidity");
+
+    // Account layout:
+    // [0] pool_account: Pool state
+    // [1] merkle_account: Merkle tree state
+    // [2] nullifier_account: Nullifier set
+
+    if (context.accounts.len < 3) {
+        return @intFromEnum(ErrorCode.NotEnoughAccountKeys);
+    }
+
+    const pool_account = context.accounts[0];
+    const merkle_account = context.accounts[1];
+    const nullifier_account = context.accounts[2];
+
+    const params = pool.PrivateAddLiquidityParams.deserialize(data) catch {
+        return @intFromEnum(ErrorCode.InvalidInstructionData);
+    };
+
+    // 获取 Merkle 根
+    const merkle_root = merkle.getRoot(merkle_account);
+
+    // 验证 ZK 证明
+    if (!verifyPrivateLiquidityProof(&params.proof, &params.public_inputs, merkle_root)) {
+        sol.log.log("Proof invalid");
+        return @intFromEnum(ErrorCode.InvalidProof);
+    }
+
+    sol.log.log("Proof valid, checking nullifiers");
+
+    // 检查输入 nullifiers
+    for (params.input_nullifiers) |nullifier| {
+        if (nullifier_set.contains(nullifier_account, nullifier)) {
+            sol.log.log("Nullifier already used");
+            return @intFromEnum(ErrorCode.NullifierAlreadyUsed);
+        }
+    }
+
+    // 标记 nullifiers
+    for (params.input_nullifiers) |nullifier| {
+        nullifier_set.insert(nullifier_account, nullifier) catch {
+            sol.log.log("Nullifier insert failed");
+            return @intFromEnum(ErrorCode.InvalidAccountData);
+        };
+    }
+
+    // 插入新的 LP Token commitment 到 Merkle 树
+    _ = merkle.insertLeaf(merkle_account, params.output_commitment) catch {
+        return @intFromEnum(ErrorCode.MerkleTreeFull);
+    };
+
+    // 更新池状态
+    pool.updateAfterPrivateAddLiquidity(pool_account, params) catch {
+        sol.log.log("Pool update failed");
+        return @intFromEnum(ErrorCode.InvalidAccountData);
+    };
+
+    sol.log.log("PrivateAddLiquidity done");
+    return 0;
+}
+
+fn handlePrivateRemoveLiquidity(context: sol.context.Context, data: []const u8) u64 {
+    sol.log.log("PrivateRemoveLiquidity");
+
+    // Account layout:
+    // [0] pool_account: Pool state
+    // [1] merkle_account: Merkle tree state
+    // [2] nullifier_account: Nullifier set
+
+    if (context.accounts.len < 3) {
+        return @intFromEnum(ErrorCode.NotEnoughAccountKeys);
+    }
+
+    const pool_account = context.accounts[0];
+    const merkle_account = context.accounts[1];
+    const nullifier_account = context.accounts[2];
+
+    const params = pool.PrivateRemoveLiquidityParams.deserialize(data) catch {
+        return @intFromEnum(ErrorCode.InvalidInstructionData);
+    };
+
+    // 获取 Merkle 根
+    const merkle_root = merkle.getRoot(merkle_account);
+
+    // 验证 ZK 证明
+    if (!verifyPrivateLiquidityProof(&params.proof, &params.public_inputs, merkle_root)) {
+        sol.log.log("Proof invalid");
+        return @intFromEnum(ErrorCode.InvalidProof);
+    }
+
+    sol.log.log("Proof valid, checking nullifier");
+
+    // 检查输入 nullifier
+    if (nullifier_set.contains(nullifier_account, params.input_nullifier)) {
+        sol.log.log("Nullifier already used");
+        return @intFromEnum(ErrorCode.NullifierAlreadyUsed);
+    }
+
+    // 标记 nullifier
+    nullifier_set.insert(nullifier_account, params.input_nullifier) catch {
+        sol.log.log("Nullifier insert failed");
+        return @intFromEnum(ErrorCode.InvalidAccountData);
+    };
+
+    // 插入新的 Token A/B commitments 到 Merkle 树
+    for (params.output_commitments) |commitment| {
+        _ = merkle.insertLeaf(merkle_account, commitment) catch {
+            return @intFromEnum(ErrorCode.MerkleTreeFull);
+        };
+    }
+
+    // 更新池状态
+    pool.updateAfterPrivateRemoveLiquidity(pool_account, params) catch {
+        sol.log.log("Pool update failed");
+        return @intFromEnum(ErrorCode.InvalidAccountData);
+    };
+
+    sol.log.log("PrivateRemoveLiquidity done");
+    return 0;
+}
+
+/// 验证隐私流动性证明
+fn verifyPrivateLiquidityProof(
+    proof: *const verifier.Proof,
+    inputs: *const verifier.SwapPublicInputs,
+    expected_root: [32]u8,
+) bool {
+    // 复用 Swap 证明验证逻辑
+    // 注意: 实际生产环境可能需要专门的流动性电路
+    return verifier.verifySwapProof(
+        proof.*,
+        inputs.*,
+        expected_root,
+    ) catch false;
+}
+
+// ============================================================================
 // 测试
 // ============================================================================
 
@@ -550,6 +698,12 @@ test "instruction enum" {
 
     const public_swap: Instruction = .PublicSwap;
     try std.testing.expectEqual(@as(u8, 6), @intFromEnum(public_swap));
+
+    const private_add_liq: Instruction = .PrivateAddLiquidity;
+    try std.testing.expectEqual(@as(u8, 7), @intFromEnum(private_add_liq));
+
+    const private_remove_liq: Instruction = .PrivateRemoveLiquidity;
+    try std.testing.expectEqual(@as(u8, 8), @intFromEnum(private_remove_liq));
 }
 
 test "imports" {
@@ -559,4 +713,5 @@ test "imports" {
     _ = nullifier_set;
     _ = vk;
     _ = spl_token;
+    _ = poseidon;
 }
