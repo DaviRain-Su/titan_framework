@@ -119,9 +119,10 @@ pub const InitializeParams = struct {
     token_b_mint: [32]u8,
     pool_pubkey: [32]u8,
     initial_blinding: [32]u8,
+    bump: u8,
 
     pub fn deserialize(data: []const u8) !InitializeParams {
-        if (data.len < 128) {
+        if (data.len < 129) {
             return error.InvalidInstructionData;
         }
         var params: InitializeParams = undefined;
@@ -129,6 +130,7 @@ pub const InitializeParams = struct {
         @memcpy(&params.token_b_mint, data[32..64]);
         @memcpy(&params.pool_pubkey, data[64..96]);
         @memcpy(&params.initial_blinding, data[96..128]);
+        params.bump = data[128];
         return params;
     }
 };
@@ -277,7 +279,7 @@ pub fn initialize(account: sol.account.Account, params: InitializeParams) !void 
 
     var state = PoolState{
         .is_initialized = true,
-        .bump = 0, // TODO: 从 PDA 推导
+        .bump = params.bump,
         .token_a_mint = params.token_a_mint,
         .token_b_mint = params.token_b_mint,
         .reserve_a = 0,

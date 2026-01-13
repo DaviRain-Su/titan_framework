@@ -288,9 +288,14 @@ fn handleAddLiquidity(context: sol.context.Context, data: []const u8) u64 {
     };
 
     // Mint LP tokens to user (pool_authority is PDA signer)
-    // Get PDA seeds for pool authority
+    // Get bump from pool state
+    const pool_data = pool_account.data();
+    const bump_value = pool_data[1]; // bump is at offset 1 in PoolState
+    const bump_slice: [1]u8 = .{bump_value};
+
+    // Get PDA seeds for pool authority with bump
     const pool_info = pool_account.info();
-    const pool_seeds = getPoolAuthoritySeedsFromInfo(pool_info);
+    const pool_seeds = getPoolAuthoritySeedsWithBump(pool_info, &bump_slice);
     spl_token.mintToSigned(lp_mint, user_lp_account, pool_authority, result.lp, &pool_seeds) catch {
         sol.log.log("LP mint failed");
         return @intFromEnum(ErrorCode.InvalidAccountData);
@@ -353,8 +358,13 @@ fn handleRemoveLiquidity(context: sol.context.Context, data: []const u8) u64 {
     };
 
     // Transfer token A from pool vault to user (pool_authority is PDA signer)
+    // Get bump from pool state
+    const pool_data = pool_account.data();
+    const bump_value = pool_data[1]; // bump is at offset 1 in PoolState
+    const bump_slice: [1]u8 = .{bump_value};
+
     const pool_info = pool_account.info();
-    const pool_seeds = getPoolAuthoritySeedsFromInfo(pool_info);
+    const pool_seeds = getPoolAuthoritySeedsWithBump(pool_info, &bump_slice);
     spl_token.transferSigned(pool_vault_a, user_token_a, pool_authority, result.a, &pool_seeds) catch {
         sol.log.log("Token A transfer failed");
         return @intFromEnum(ErrorCode.InvalidAccountData);
@@ -373,12 +383,13 @@ fn handleRemoveLiquidity(context: sol.context.Context, data: []const u8) u64 {
 /// Pool authority PDA seed prefix
 const POOL_AUTHORITY_SEED: []const u8 = "pool_authority";
 
-/// Get PDA seeds for pool authority using pool account info
-/// The pool authority PDA is derived from: ["pool_authority", pool_pubkey]
-fn getPoolAuthoritySeedsFromInfo(pool_info: sol.account.Account.Info) [2][]const u8 {
+/// Get PDA seeds for pool authority including bump
+/// The pool authority PDA is derived from: ["pool_authority", pool_pubkey, bump]
+fn getPoolAuthoritySeedsWithBump(pool_info: sol.account.Account.Info, bump: *const [1]u8) [3][]const u8 {
     return .{
         POOL_AUTHORITY_SEED,
         &pool_info.id.bytes,
+        bump,
     };
 }
 
