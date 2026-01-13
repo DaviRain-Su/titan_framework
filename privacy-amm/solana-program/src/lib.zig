@@ -21,6 +21,10 @@ pub const Instruction = enum(u8) {
     Withdraw = 2,
     /// 隐私交换
     Swap = 3,
+    /// 添加流动性 (LP)
+    AddLiquidity = 4,
+    /// 移除流动性 (LP)
+    RemoveLiquidity = 5,
 };
 
 // 程序错误码
@@ -60,6 +64,8 @@ fn processEntry(input: [*]u8) u64 {
         .Deposit => handleDeposit(context, ix_data),
         .Withdraw => handleWithdraw(context, ix_data),
         .Swap => handleSwap(context, ix_data),
+        .AddLiquidity => handleAddLiquidity(context, ix_data),
+        .RemoveLiquidity => handleRemoveLiquidity(context, ix_data),
     };
 
     return result;
@@ -222,6 +228,82 @@ fn handleSwap(context: sol.context.Context, data: []const u8) u64 {
     return 0;
 }
 
+fn handleAddLiquidity(context: sol.context.Context, data: []const u8) u64 {
+    sol.log.log("AddLiquidity");
+
+    if (context.accounts.len < 5) {
+        return @intFromEnum(ErrorCode.NotEnoughAccountKeys);
+    }
+
+    const provider = context.accounts[0];
+    if (!provider.isSigner()) {
+        return @intFromEnum(ErrorCode.MissingRequiredSignature);
+    }
+
+    const pool_account = context.accounts[1];
+    // accounts[2] = token_a_account (LP 的 token A)
+    // accounts[3] = token_b_account (LP 的 token B)
+    // accounts[4] = pool_token_a_vault
+    // accounts[5] = pool_token_b_vault
+
+    const params = pool.AddLiquidityParams.deserialize(data) catch {
+        return @intFromEnum(ErrorCode.InvalidInstructionData);
+    };
+
+    const result = pool.addLiquidity(pool_account, params) catch |err| {
+        return switch (err) {
+            error.InsufficientLiquidity => @intFromEnum(ErrorCode.InsufficientLiquidity),
+            error.SlippageExceeded => @intFromEnum(ErrorCode.SlippageExceeded),
+            else => @intFromEnum(ErrorCode.InvalidAccountData),
+        };
+    };
+
+    // TODO: 执行实际的 SPL Token 转账
+    // - 从 provider 的 token_a_account 转移 result.a 到 pool_token_a_vault
+    // - 从 provider 的 token_b_account 转移 result.b 到 pool_token_b_vault
+    // - 铸造 result.lp 个 LP token 给 provider
+
+    _ = result;
+    sol.log.log("AddLiquidity done");
+    return 0;
+}
+
+fn handleRemoveLiquidity(context: sol.context.Context, data: []const u8) u64 {
+    sol.log.log("RemoveLiquidity");
+
+    if (context.accounts.len < 5) {
+        return @intFromEnum(ErrorCode.NotEnoughAccountKeys);
+    }
+
+    const provider = context.accounts[0];
+    if (!provider.isSigner()) {
+        return @intFromEnum(ErrorCode.MissingRequiredSignature);
+    }
+
+    const pool_account = context.accounts[1];
+
+    const params = pool.RemoveLiquidityParams.deserialize(data) catch {
+        return @intFromEnum(ErrorCode.InvalidInstructionData);
+    };
+
+    const result = pool.removeLiquidity(pool_account, params) catch |err| {
+        return switch (err) {
+            error.InsufficientLiquidity => @intFromEnum(ErrorCode.InsufficientLiquidity),
+            error.SlippageExceeded => @intFromEnum(ErrorCode.SlippageExceeded),
+            else => @intFromEnum(ErrorCode.InvalidAccountData),
+        };
+    };
+
+    // TODO: 执行实际的 SPL Token 转账
+    // - 从 pool_token_a_vault 转移 result.a 到 provider 的 token_a_account
+    // - 从 pool_token_b_vault 转移 result.b 到 provider 的 token_b_account
+    // - 销毁 provider 的 LP token
+
+    _ = result;
+    sol.log.log("RemoveLiquidity done");
+    return 0;
+}
+
 /// 包装验证函数以隔离栈使用
 fn verifySwapProofWrapper(params: *const pool.SwapParams, merkle_root: [32]u8) bool {
     return verifier.verifySwapProof(
@@ -241,6 +323,12 @@ test "instruction enum" {
 
     const swap: Instruction = .Swap;
     try std.testing.expectEqual(@as(u8, 3), @intFromEnum(swap));
+
+    const add_liq: Instruction = .AddLiquidity;
+    try std.testing.expectEqual(@as(u8, 4), @intFromEnum(add_liq));
+
+    const remove_liq: Instruction = .RemoveLiquidity;
+    try std.testing.expectEqual(@as(u8, 5), @intFromEnum(remove_liq));
 }
 
 test "imports" {

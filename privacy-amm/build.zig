@@ -85,8 +85,8 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    b.installArtifact(cli);
-    cli_step.dependOn(&cli.step);
+    const install_cli = b.addInstallArtifact(cli, .{});
+    cli_step.dependOn(&install_cli.step);
 
     // CLI tests
     const cli_tests = b.addTest(.{

@@ -11,6 +11,9 @@ pub const swap = @import("commands/swap.zig");
 pub const deposit = @import("commands/deposit.zig");
 pub const withdraw = @import("commands/withdraw.zig");
 pub const balance = @import("commands/balance.zig");
+pub const test_program = @import("commands/test_program.zig");
+pub const add_liquidity = @import("commands/add_liquidity.zig");
+pub const remove_liquidity = @import("commands/remove_liquidity.zig");
 
 /// CLI 配置
 pub const Config = struct {
@@ -114,6 +117,12 @@ pub fn main() !void {
         try withdraw.execute(allocator, global_config, sub_args);
     } else if (std.mem.eql(u8, command, "balance")) {
         try balance.execute(allocator, global_config, sub_args);
+    } else if (std.mem.eql(u8, command, "test-program")) {
+        try test_program.execute(allocator, global_config, sub_args);
+    } else if (std.mem.eql(u8, command, "add-liquidity")) {
+        try add_liquidity.execute(allocator, global_config, sub_args);
+    } else if (std.mem.eql(u8, command, "remove-liquidity")) {
+        try remove_liquidity.execute(allocator, global_config, sub_args);
     } else if (std.mem.eql(u8, command, "help")) {
         printUsage();
     } else {
@@ -129,11 +138,14 @@ fn printUsage() void {
         \\Usage: titan-privacy [OPTIONS] <COMMAND>
         \\
         \\Commands:
-        \\  swap      Execute a private swap
-        \\  deposit   Deposit tokens into the privacy pool
-        \\  withdraw  Withdraw tokens from the privacy pool
-        \\  balance   Query your private balance
-        \\  help      Print this help message
+        \\  add-liquidity     Add liquidity to AMM pool (LP)
+        \\  remove-liquidity  Remove liquidity from AMM pool (LP)
+        \\  deposit           Deposit tokens into the privacy pool
+        \\  withdraw          Withdraw tokens from the privacy pool
+        \\  swap              Execute a private swap
+        \\  balance           Query your private balance
+        \\  test-program      Test the deployed program on devnet
+        \\  help              Print this help message
         \\
         \\Options:
         \\  -r, --rpc <URL>       Solana RPC endpoint (default: devnet)
@@ -172,4 +184,7 @@ test "cli entry point" {
     _ = deposit;
     _ = withdraw;
     _ = balance;
+    _ = test_program;
+    _ = add_liquidity;
+    _ = remove_liquidity;
 }

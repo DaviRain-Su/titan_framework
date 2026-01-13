@@ -178,6 +178,48 @@ pub const WithdrawParams = struct {
     }
 };
 
+/// 添加流动性参数
+pub const AddLiquidityParams = struct {
+    /// Token A 数量
+    amount_a: u64,
+    /// Token B 数量
+    amount_b: u64,
+    /// 最小 LP token 数量（滑点保护）
+    min_lp: u64,
+
+    pub fn deserialize(data: []const u8) !AddLiquidityParams {
+        if (data.len < 24) {
+            return error.InvalidInstructionData;
+        }
+        var params: AddLiquidityParams = undefined;
+        params.amount_a = std.mem.readInt(u64, data[0..8], .little);
+        params.amount_b = std.mem.readInt(u64, data[8..16], .little);
+        params.min_lp = std.mem.readInt(u64, data[16..24], .little);
+        return params;
+    }
+};
+
+/// 移除流动性参数
+pub const RemoveLiquidityParams = struct {
+    /// 要销毁的 LP token 数量
+    lp_amount: u64,
+    /// 最小 Token A 数量（滑点保护）
+    min_amount_a: u64,
+    /// 最小 Token B 数量（滑点保护）
+    min_amount_b: u64,
+
+    pub fn deserialize(data: []const u8) !RemoveLiquidityParams {
+        if (data.len < 24) {
+            return error.InvalidInstructionData;
+        }
+        var params: RemoveLiquidityParams = undefined;
+        params.lp_amount = std.mem.readInt(u64, data[0..8], .little);
+        params.min_amount_a = std.mem.readInt(u64, data[8..16], .little);
+        params.min_amount_b = std.mem.readInt(u64, data[16..24], .little);
+        return params;
+    }
+};
+
 /// Swap 参数
 pub const SwapParams = struct {
     /// ZK 证明
@@ -300,6 +342,103 @@ pub fn updateAfterSwap(account: sol.account.Account, params: SwapParams) !void {
     // 从加密通道传递或从证明中推导
 
     try state.serialize(data);
+}
+
+/// 添加流动性
+/// 返回: (lp_minted, actual_amount_a, actual_amount_b)
+pub fn addLiquidity(account: sol.account.Account, params: AddLiquidityParams) !struct { lp: u64, a: u64, b: u64 } {
+    const data = account.data();
+    var state = try PoolState.deserialize(data);
+
+    var lp_to_mint: u64 = 0;
+    var actual_a: u64 = params.amount_a;
+    var actual_b: u64 = params.amount_b;
+
+    if (state.total_lp == 0) {
+        // 首次添加流动性: LP = sqrt(amount_a * amount_b)
+        // 为避免精度问题，使用简化计算
+        const product = @as(u128, params.amount_a) * @as(u128, params.amount_b);
+        lp_to_mint = sqrt_u128(product);
+
+        if (lp_to_mint == 0) {
+            return error.InsufficientLiquidity;
+        }
+    } else {
+        // 后续添加: 按比例计算
+        // LP = min(amount_a/reserve_a, amount_b/reserve_b) * total_lp
+        const lp_from_a = @as(u128, params.amount_a) * @as(u128, state.total_lp) / @as(u128, state.reserve_a);
+        const lp_from_b = @as(u128, params.amount_b) * @as(u128, state.total_lp) / @as(u128, state.reserve_b);
+
+        if (lp_from_a <= lp_from_b) {
+            lp_to_mint = @truncate(lp_from_a);
+            // 调整 actual_b 以匹配比例
+            actual_b = @truncate(@as(u128, params.amount_a) * @as(u128, state.reserve_b) / @as(u128, state.reserve_a));
+        } else {
+            lp_to_mint = @truncate(lp_from_b);
+            // 调整 actual_a 以匹配比例
+            actual_a = @truncate(@as(u128, params.amount_b) * @as(u128, state.reserve_a) / @as(u128, state.reserve_b));
+        }
+    }
+
+    // 检查滑点
+    if (lp_to_mint < params.min_lp) {
+        return error.SlippageExceeded;
+    }
+
+    // 更新状态
+    state.reserve_a += actual_a;
+    state.reserve_b += actual_b;
+    state.total_lp += lp_to_mint;
+
+    try state.serialize(data);
+
+    return .{ .lp = lp_to_mint, .a = actual_a, .b = actual_b };
+}
+
+/// 移除流动性
+/// 返回: (amount_a, amount_b)
+pub fn removeLiquidity(account: sol.account.Account, params: RemoveLiquidityParams) !struct { a: u64, b: u64 } {
+    const data = account.data();
+    var state = try PoolState.deserialize(data);
+
+    if (state.total_lp == 0 or params.lp_amount > state.total_lp) {
+        return error.InsufficientLiquidity;
+    }
+
+    // 计算取回的代币数量
+    // amount_a = lp_amount / total_lp * reserve_a
+    // amount_b = lp_amount / total_lp * reserve_b
+    const amount_a: u64 = @truncate(@as(u128, params.lp_amount) * @as(u128, state.reserve_a) / @as(u128, state.total_lp));
+    const amount_b: u64 = @truncate(@as(u128, params.lp_amount) * @as(u128, state.reserve_b) / @as(u128, state.total_lp));
+
+    // 检查滑点
+    if (amount_a < params.min_amount_a or amount_b < params.min_amount_b) {
+        return error.SlippageExceeded;
+    }
+
+    // 更新状态
+    state.reserve_a -= amount_a;
+    state.reserve_b -= amount_b;
+    state.total_lp -= params.lp_amount;
+
+    try state.serialize(data);
+
+    return .{ .a = amount_a, .b = amount_b };
+}
+
+/// 整数平方根 (牛顿法)
+fn sqrt_u128(n: u128) u64 {
+    if (n == 0) return 0;
+
+    var x: u128 = n;
+    var y: u128 = (x + 1) / 2;
+
+    while (y < x) {
+        x = y;
+        y = (x + n / x) / 2;
+    }
+
+    return @truncate(x);
 }
 
 // ============================================================================
