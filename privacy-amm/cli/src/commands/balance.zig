@@ -4,10 +4,12 @@
 const std = @import("std");
 const main = @import("../main.zig");
 const Config = main.Config;
+const utils = main.utils;
+const crypto = utils.crypto;
+const storage = utils.storage;
 
 /// 执行 balance 命令
 pub fn execute(allocator: std.mem.Allocator, config: Config, args: []const []const u8) !void {
-    _ = allocator;
     _ = config;
 
     var show_all = false;
@@ -40,38 +42,66 @@ pub fn execute(allocator: std.mem.Allocator, config: Config, args: []const []con
     std.debug.print("=== Private Balance ===\n", .{});
     std.debug.print("\n", .{});
 
-    // 从本地存储读取 UTXO
-    // TODO: 实现真实的 UTXO 读取逻辑
+    // 加载用户公钥 (使用默认)
+    const owner_pubkey = getDefaultPubkey();
 
-    // 模拟数据
-    const balances = [_]TokenBalance{
-        .{ .token = "SOL", .amount = 10.5, .utxo_count = 3 },
-        .{ .token = "USDC", .amount = 1500.0, .utxo_count = 2 },
-        .{ .token = "RAY", .amount = 250.75, .utxo_count = 1 },
+    // 初始化 UTXO 存储
+    var utxo_storage = storage.UtxoStorage.init(allocator, owner_pubkey) catch {
+        std.debug.print("No private balances found.\n", .{});
+        std.debug.print("Use 'titan-privacy deposit' to add funds.\n", .{});
+        std.debug.print("\n", .{});
+        return;
     };
+    defer utxo_storage.deinit();
 
     if (token) |t| {
         // 显示特定代币余额
-        for (balances) |b| {
-            if (std.mem.eql(u8, b.token, t)) {
-                std.debug.print("{s}: {d:.6}\n", .{ b.token, b.amount });
-                if (show_utxos) {
-                    std.debug.print("       ({d} UTXOs)\n", .{b.utxo_count});
-                }
+        const balance = utxo_storage.getBalance(t);
+        const balance_display = @as(f64, @floatFromInt(balance)) / 1_000_000_000.0;
+
+        std.debug.print("{s}: {d:.6}\n", .{ t, balance_display });
+
+        if (show_utxos) {
+            const utxos = try utxo_storage.getUnspentByAsset(t, allocator);
+            defer allocator.free(utxos);
+
+            if (utxos.len > 0) {
+                std.debug.print("       ({d} UTXOs)\n", .{utxos.len});
                 std.debug.print("\n", .{});
-                return;
+                printUtxoDetails(utxos);
             }
         }
-        std.debug.print("{s}: 0.000000\n", .{t});
     } else if (show_all) {
-        // 显示所有代币余额
-        std.debug.print("Token     Amount\n", .{});
-        std.debug.print("--------- ----------------\n", .{});
-        for (balances) |b| {
-            std.debug.print("{s: <9} {d:>15.6}\n", .{ b.token, b.amount });
-            if (show_utxos) {
-                std.debug.print("          ({d} UTXOs)\n", .{b.utxo_count});
+        // 获取所有余额
+        const balances = try utxo_storage.getAllBalances(allocator);
+        defer allocator.free(balances);
+
+        if (balances.len == 0) {
+            std.debug.print("No private balances found.\n", .{});
+            std.debug.print("Use 'titan-privacy deposit' to add funds.\n", .{});
+        } else {
+            std.debug.print("Token     Amount\n", .{});
+            std.debug.print("--------- ----------------\n", .{});
+
+            for (balances) |b| {
+                const symbol = b.getSymbol();
+                const amount_display = @as(f64, @floatFromInt(b.amount)) / 1_000_000_000.0;
+                std.debug.print("{s: <9} {d:>15.6}\n", .{ symbol, amount_display });
+
+                if (show_utxos) {
+                    std.debug.print("          ({d} UTXOs)\n", .{b.utxo_count});
+                }
             }
+        }
+
+        if (show_utxos and balances.len > 0) {
+            std.debug.print("\n", .{});
+            std.debug.print("UTXO Details:\n", .{});
+            std.debug.print("{s}\n", .{"-" ** 50});
+
+            const all_utxos = try utxo_storage.getAllUnspent(allocator);
+            defer allocator.free(all_utxos);
+            printUtxoDetails(all_utxos);
         }
     } else {
         std.debug.print("Use --all to show all balances or --token <TOKEN> for specific token\n", .{});
@@ -79,30 +109,49 @@ pub fn execute(allocator: std.mem.Allocator, config: Config, args: []const []con
     }
 
     std.debug.print("\n", .{});
+}
 
-    if (show_utxos) {
-        std.debug.print("UTXO Details:\n", .{});
-        std.debug.print("─────────────\n", .{});
+/// 打印 UTXO 详情
+fn printUtxoDetails(utxos: []const storage.Utxo) void {
+    var current_asset: [8]u8 = undefined;
+    @memset(&current_asset, 0);
 
-        // 模拟 UTXO 详情
-        std.debug.print("\n", .{});
-        std.debug.print("SOL UTXOs:\n", .{});
-        std.debug.print("  #1  5.000000 SOL  (commitment: 0x1234...)\n", .{});
-        std.debug.print("  #2  3.500000 SOL  (commitment: 0x5678...)\n", .{});
-        std.debug.print("  #3  2.000000 SOL  (commitment: 0x9abc...)\n", .{});
-        std.debug.print("\n", .{});
-        std.debug.print("USDC UTXOs:\n", .{});
-        std.debug.print("  #1  1000.000000 USDC  (commitment: 0xdef0...)\n", .{});
-        std.debug.print("  #2  500.000000 USDC  (commitment: 0x1357...)\n", .{});
-        std.debug.print("\n", .{});
+    for (utxos, 0..) |utxo, idx| {
+        const asset = utxo.getAssetSymbol();
+
+        // 如果是新资产，打印标题
+        if (!std.mem.eql(u8, &current_asset, &utxo.asset)) {
+            @memset(&current_asset, 0);
+            @memcpy(current_asset[0..asset.len], asset);
+            std.debug.print("\n{s} UTXOs:\n", .{asset});
+        }
+
+        const amount_display = @as(f64, @floatFromInt(utxo.amount)) / 1_000_000_000.0;
+
+        var commitment_hex: [64]u8 = undefined;
+        const commitment_str = crypto.toHexString(utxo.commitment, &commitment_hex);
+
+        const status_str = switch (utxo.status) {
+            .unspent => "unspent",
+            .pending => "pending",
+            .spent => "spent",
+        };
+
+        std.debug.print("  #{d}  {d:.6} {s}  (commitment: 0x{s}...) [{s}]\n", .{
+            idx + 1,
+            amount_display,
+            asset,
+            commitment_str[0..8],
+            status_str,
+        });
     }
 }
 
-const TokenBalance = struct {
-    token: []const u8,
-    amount: f64,
-    utxo_count: u32,
-};
+fn getDefaultPubkey() crypto.FieldElement {
+    var pubkey: crypto.FieldElement = undefined;
+    @memset(&pubkey, 0x42);
+    return pubkey;
+}
 
 fn printHelp() void {
     const help =

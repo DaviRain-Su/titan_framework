@@ -3,6 +3,9 @@
 
 const std = @import("std");
 
+// 工具模块
+pub const utils = @import("utils.zig");
+
 // 子命令模块
 pub const swap = @import("commands/swap.zig");
 pub const deposit = @import("commands/deposit.zig");
@@ -164,6 +167,7 @@ fn printUsage() void {
 
 test "cli entry point" {
     // 基本测试确保模块可以编译
+    _ = utils;
     _ = swap;
     _ = deposit;
     _ = withdraw;
