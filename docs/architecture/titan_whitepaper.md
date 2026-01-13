@@ -24684,6 +24684,866 @@ pub const UserPolicy = struct {
 
 ---
 
+### 18.20 Driver 三明治架构 (Driver Sandwich Architecture)
+
+> **核心理念**: Driver 是 Titan OS 的"翻译官"，把"讲普通话"的 Titan 接口翻译成各链"方言"。
+
+#### 18.20.1 三层架构概述
+
+Titan OS 的 Driver 系统采用**三明治架构 (Sandwich Architecture)**，清晰分离关注点：
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     Driver 三明治架构                                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                      │   │
+│  │  Layer 3: Titan Framework (顶层 - 用户代码)                         │   │
+│  │  ═══════════════════════════════════════════                        │   │
+│  │                                                                      │   │
+│  │  特点:                                                               │   │
+│  │  • 这是 Titan OS 定义的"标准"                                       │   │
+│  │  • 用户代码只看到这一层                                              │   │
+│  │  • 统一的 API，与底层链无关                                          │   │
+│  │                                                                      │   │
+│  │  示例:                                                               │   │
+│  │  ┌─────────────────────────────────────────────────────────────┐    │   │
+│  │  │  titan.storage.set("balance", 100);                         │    │   │
+│  │  │  titan.getSender();                                         │    │   │
+│  │  │  titan.transfer(recipient, amount);                         │    │   │
+│  │  └─────────────────────────────────────────────────────────────┘    │   │
+│  │                                                                      │   │
+│  │  用户心智: "我在调用一个通用的区块链 API"                            │   │
+│  │                                                                      │   │
+│  └──────────────────────────────────┬───────────────────────────────────┘   │
+│                                     │                                       │
+│                                     │  Titan 标准接口                       │
+│                                     ▼                                       │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                      │   │
+│  │  Layer 2: Driver / Adapter (中间层 - 翻译官)                        │   │
+│  │  ═══════════════════════════════════════════                        │   │
+│  │                                                                      │   │
+│  │  特点:                                                               │   │
+│  │  • 这是 Titan OS 的核心抽象层                                       │   │
+│  │  • 对上承诺: "我符合 Titan 标准"                                    │   │
+│  │  • 对下操作: "我去调用底层 SDK"                                     │   │
+│  │  • 每条链一个 Driver                                                │   │
+│  │                                                                      │   │
+│  │  示例 (EVM Driver):                                                  │   │
+│  │  ┌─────────────────────────────────────────────────────────────┐    │   │
+│  │  │  pub fn setStorage(key: []const u8, value: anytype) void {  │    │   │
+│  │  │      const slot = keccak256(key);  // 适配: key → slot      │    │   │
+│  │  │      native.raw_sstore(slot, value); // 调用底层            │    │   │
+│  │  │  }                                                          │    │   │
+│  │  └─────────────────────────────────────────────────────────────┘    │   │
+│  │                                                                      │   │
+│  │  Driver 心智: "我是翻译官，把普通话翻译成各地方言"                   │   │
+│  │                                                                      │   │
+│  └──────────────────────────────────┬───────────────────────────────────┘   │
+│                                     │                                       │
+│                                     │  链原生 SDK 调用                      │
+│                                     ▼                                       │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                      │   │
+│  │  Layer 1: Native SDK (底层 - 链原生操作)                            │   │
+│  │  ═══════════════════════════════════════════                        │   │
+│  │                                                                      │   │
+│  │  特点:                                                               │   │
+│  │  • 这是面向特定链的"裸金属"代码                                     │   │
+│  │  • 直接操作链的虚拟机指令                                            │   │
+│  │  • 只有 Driver 开发者需要了解这层                                    │   │
+│  │                                                                      │   │
+│  │  示例 (EVM Native / zig-to-yul):                                     │   │
+│  │  ┌─────────────────────────────────────────────────────────────┐    │   │
+│  │  │  pub fn raw_sstore(slot: u256, val: u256) void {            │    │   │
+│  │  │      asm volatile ("sstore"                                 │    │   │
+│  │  │          : : [slot] "r"(slot), [val] "r"(val)               │    │   │
+│  │  │      );                                                     │    │   │
+│  │  │  }                                                          │    │   │
+│  │  └─────────────────────────────────────────────────────────────┘    │   │
+│  │                                                                      │   │
+│  │  SDK 心智: "我是链的原生方言，只有本地人能听懂"                      │   │
+│  │                                                                      │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.20.2 各层代码完整对比
+
+以 **Storage 操作** 为例，展示三层代码的完整实现：
+
+**Layer 1: 底层 Native SDK (链原生操作)**
+
+```zig
+// ==========================================================================
+// libs/evm/native.zig - EVM 原生操作 (zig-to-yul 编译器理解的代码)
+// ==========================================================================
+
+/// EVM SSTORE 指令 - 存储 256 位值到指定槽位
+pub fn raw_sstore(slot: u256, value: u256) void {
+    asm volatile ("sstore"
+        :
+        : [slot] "r" (slot),
+          [value] "r" (value)
+    );
+}
+
+/// EVM SLOAD 指令 - 从指定槽位读取 256 位值
+pub fn raw_sload(slot: u256) u256 {
+    var result: u256 = undefined;
+    asm volatile ("sload %[result], %[slot]"
+        : [result] "=r" (result)
+        : [slot] "r" (slot)
+    );
+    return result;
+}
+
+/// EVM CALLER 指令 - 获取调用者地址
+pub fn raw_caller() u160 {
+    var result: u160 = undefined;
+    asm volatile ("caller %[result]"
+        : [result] "=r" (result)
+        :
+    );
+    return result;
+}
+
+/// EVM CALLVALUE 指令 - 获取发送的 ETH 数量
+pub fn raw_callvalue() u256 {
+    var result: u256 = undefined;
+    asm volatile ("callvalue %[result]"
+        : [result] "=r" (result)
+        :
+    );
+    return result;
+}
+```
+
+```zig
+// ==========================================================================
+// libs/solana/native.zig - Solana 原生操作 (solana-program-sdk-zig)
+// ==========================================================================
+
+const sdk = @import("solana-program-sdk");
+
+/// Solana Account Data 写入
+pub fn raw_account_write(
+    account: *sdk.AccountInfo,
+    offset: usize,
+    data: []const u8,
+) !void {
+    const dest = account.data[offset..][0..data.len];
+    @memcpy(dest, data);
+}
+
+/// Solana Account Data 读取
+pub fn raw_account_read(
+    account: *const sdk.AccountInfo,
+    offset: usize,
+    len: usize,
+) []const u8 {
+    return account.data[offset..][0..len];
+}
+
+/// 获取签名者
+pub fn raw_get_signer(ctx: *const sdk.Context) sdk.Pubkey {
+    return ctx.accounts[0].key.*;
+}
+```
+
+**Layer 2: Driver 适配层 (翻译官)**
+
+```zig
+// ==========================================================================
+// titan_drivers/evm/driver.zig - EVM Driver (适配器)
+// ==========================================================================
+
+const native = @import("../../libs/evm/native.zig");
+const keccak = @import("../../crypto/keccak.zig");
+const titan = @import("../../titan_os/interface.zig");
+
+/// EVM Driver - 实现 Titan 标准接口
+pub const EvmDriver = struct {
+    const Self = @This();
+
+    // ========================================================================
+    // Storage 接口实现
+    // ========================================================================
+
+    /// 设置存储值 - Titan 标准接口
+    /// 用户调用: titan.storage.set("balance", 100)
+    /// 内部转换: key → keccak256 → slot → sstore
+    pub fn setStorage(key: []const u8, value: anytype) void {
+        // 1. 适配逻辑: 把 string key 转换成 EVM slot (32 bytes)
+        const slot = computeSlot(key);
+
+        // 2. 类型适配: 把任意类型转换成 u256
+        const val_u256 = encodeValue(value);
+
+        // 3. 调用底层
+        native.raw_sstore(slot, val_u256);
+    }
+
+    /// 获取存储值 - Titan 标准接口
+    pub fn getStorage(comptime T: type, key: []const u8) T {
+        const slot = computeSlot(key);
+        const raw_value = native.raw_sload(slot);
+        return decodeValue(T, raw_value);
+    }
+
+    /// 计算 EVM Storage Slot
+    fn computeSlot(key: []const u8) u256 {
+        // EVM 使用 keccak256(key) 作为 slot
+        const hash = keccak.keccak256(key);
+        return @bitCast(hash);
+    }
+
+    // ========================================================================
+    // Context 接口实现
+    // ========================================================================
+
+    /// 获取调用者 - Titan 标准接口
+    pub fn getSender() titan.Address {
+        const caller_u160 = native.raw_caller();
+        return titan.Address.fromEvm(caller_u160);
+    }
+
+    /// 获取发送的原生代币数量
+    pub fn getValue() u256 {
+        return native.raw_callvalue();
+    }
+
+    // ========================================================================
+    // Transfer 接口实现
+    // ========================================================================
+
+    /// 转账 - Titan 标准接口
+    pub fn transfer(to: titan.Address, amount: u256) !void {
+        const to_evm = to.toEvm();
+        // 使用 EVM CALL 指令进行转账
+        const success = native.raw_call(to_evm, amount, &[_]u8{});
+        if (!success) return error.TransferFailed;
+    }
+
+    // ========================================================================
+    // 辅助函数
+    // ========================================================================
+
+    fn encodeValue(value: anytype) u256 {
+        const T = @TypeOf(value);
+        return switch (@typeInfo(T)) {
+            .Int => @intCast(value),
+            .Bool => if (value) @as(u256, 1) else @as(u256, 0),
+            .Pointer => |ptr| blk: {
+                // 字符串或字节数组
+                if (ptr.child == u8) {
+                    var result: u256 = 0;
+                    for (value) |byte| {
+                        result = (result << 8) | byte;
+                    }
+                    break :blk result;
+                }
+                @compileError("Unsupported pointer type");
+            },
+            else => @compileError("Unsupported type for EVM storage"),
+        };
+    }
+
+    fn decodeValue(comptime T: type, raw: u256) T {
+        return switch (@typeInfo(T)) {
+            .Int => @intCast(raw),
+            .Bool => raw != 0,
+            else => @compileError("Unsupported type for EVM storage"),
+        };
+    }
+};
+```
+
+```zig
+// ==========================================================================
+// titan_drivers/solana/driver.zig - Solana Driver (适配器)
+// ==========================================================================
+
+const native = @import("../../libs/solana/native.zig");
+const sdk = @import("solana-program-sdk");
+const titan = @import("../../titan_os/interface.zig");
+
+/// Solana Driver - 实现 Titan 标准接口
+pub const SolanaDriver = struct {
+    const Self = @This();
+
+    ctx: *sdk.Context,
+    data_account: *sdk.AccountInfo,
+
+    pub fn init(ctx: *sdk.Context) Self {
+        return .{
+            .ctx = ctx,
+            .data_account = &ctx.accounts[1], // PDA data account
+        };
+    }
+
+    // ========================================================================
+    // Storage 接口实现
+    // ========================================================================
+
+    /// 设置存储值 - Titan 标准接口
+    /// Solana 使用 Account Data 偏移量存储
+    pub fn setStorage(self: *Self, key: []const u8, value: anytype) !void {
+        // 1. 适配逻辑: 把 string key 映射到 account data 偏移量
+        const offset = self.computeOffset(key);
+
+        // 2. 序列化值
+        const data = serializeValue(value);
+
+        // 3. 调用底层
+        try native.raw_account_write(self.data_account, offset, data);
+    }
+
+    /// 获取存储值 - Titan 标准接口
+    pub fn getStorage(self: *const Self, comptime T: type, key: []const u8) T {
+        const offset = self.computeOffset(key);
+        const size = @sizeOf(T);
+        const raw_data = native.raw_account_read(self.data_account, offset, size);
+        return deserializeValue(T, raw_data);
+    }
+
+    fn computeOffset(self: *const Self, key: []const u8) usize {
+        // 简化实现: 使用 key 的哈希值计算偏移量
+        _ = self;
+        var hash: u32 = 0;
+        for (key) |byte| {
+            hash = hash *% 31 +% byte;
+        }
+        return hash % 8192; // 限制在 account data 范围内
+    }
+
+    // ========================================================================
+    // Context 接口实现
+    // ========================================================================
+
+    /// 获取调用者 - Titan 标准接口
+    pub fn getSender(self: *const Self) titan.Address {
+        const signer = native.raw_get_signer(self.ctx);
+        return titan.Address.fromSolana(signer);
+    }
+
+    /// 获取发送的 SOL 数量
+    pub fn getValue(self: *const Self) u64 {
+        // Solana 不像 EVM 有 msg.value，需要从账户余额变化计算
+        _ = self;
+        return 0; // 简化实现
+    }
+
+    // ========================================================================
+    // Transfer 接口实现
+    // ========================================================================
+
+    /// 转账 - Titan 标准接口
+    pub fn transfer(self: *Self, to: titan.Address, amount: u64) !void {
+        const to_pubkey = to.toSolana();
+        try sdk.system_instruction.transfer(
+            self.ctx,
+            self.ctx.accounts[0].key, // from
+            &to_pubkey,               // to
+            amount,
+        );
+    }
+};
+```
+
+**Layer 3: 顶层 Titan Framework (用户代码)**
+
+```zig
+// ==========================================================================
+// user_contract.zig - 用户编写的智能合约 (最简洁的代码)
+// ==========================================================================
+
+const titan = @import("titan_os");
+
+/// 一个简单的代币合约
+pub const TokenContract = struct {
+
+    /// 初始化
+    pub fn initialize(initial_supply: u256) void {
+        const sender = titan.getSender();
+
+        // 用户不需要知道底层是 sstore 还是 account write
+        titan.storage.set("total_supply", initial_supply);
+        titan.storage.set(sender.toKey("balance"), initial_supply);
+
+        titan.emit("Initialized", .{ sender, initial_supply });
+    }
+
+    /// 转账
+    pub fn transfer(to: titan.Address, amount: u256) !void {
+        const sender = titan.getSender();
+
+        // 检查余额
+        const sender_balance = titan.storage.get(u256, sender.toKey("balance"));
+        if (sender_balance < amount) {
+            return error.InsufficientBalance;
+        }
+
+        // 更新余额 - 用户完全不需要关心底层存储模型
+        titan.storage.set(sender.toKey("balance"), sender_balance - amount);
+
+        const to_balance = titan.storage.get(u256, to.toKey("balance"));
+        titan.storage.set(to.toKey("balance"), to_balance + amount);
+
+        titan.emit("Transfer", .{ sender, to, amount });
+    }
+
+    /// 查询余额
+    pub fn balanceOf(account: titan.Address) u256 {
+        return titan.storage.get(u256, account.toKey("balance"));
+    }
+};
+```
+
+#### 18.20.3 为什么需要中间层？
+
+**问题：为什么不让用户直接调用底层 SDK？**
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     为什么需要 Driver 中间层                                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │ 方案 A: 没有中间层 (用户直接调用底层)                                │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  用户代码 (EVM 版本):                                                       │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  const evm = @import("evm_native");                                 │   │
+│  │  const slot = keccak256("balance");                                 │   │
+│  │  evm.raw_sstore(slot, 100);  // 必须懂 EVM 存储模型                 │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  用户代码 (Solana 版本):                                                    │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  const sdk = @import("solana-sdk");                                 │   │
+│  │  const offset = calculateOffset("balance");                         │   │
+│  │  sdk.account_write(data_account, offset, &value);  // 完全不同!     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  问题:                                                                      │
+│  ❌ 用户需要学习每条链的存储模型                                            │
+│  ❌ 同样的逻辑需要写 N 遍 (每条链一份)                                      │
+│  ❌ 代码无法复用，维护成本爆炸                                              │
+│  ❌ 用户需要是"多链专家"才能开发                                            │
+│                                                                             │
+│  ─────────────────────────────────────────────────────────────────────────  │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │ 方案 B: 有 Driver 中间层 (Titan OS 方案)                            │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  用户代码 (通用版本 - 所有链都一样):                                        │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  const titan = @import("titan_os");                                 │   │
+│  │  titan.storage.set("balance", 100);  // 就这一行，所有链通用        │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  编译时自动选择 Driver:                                                     │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  titan build --target=ethereum  → 使用 EVM Driver  → sstore        │   │
+│  │  titan build --target=solana    → 使用 Solana Driver → account write│   │
+│  │  titan build --target=ton       → 使用 TON Driver → c4 storage     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  优势:                                                                      │
+│  ✅ 用户只需要学习一套 API                                                  │
+│  ✅ 同样的代码部署到所有链                                                  │
+│  ✅ 代码 100% 复用                                                          │
+│  ✅ 用户只需要是"业务专家"，不需要是"链专家"                                │
+│                                                                             │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Driver 的核心价值**：
+
+| 价值 | 描述 |
+| :--- | :--- |
+| **解耦** | 用户代码与链实现完全解耦 |
+| **复用** | 同一份代码部署到所有支持的链 |
+| **简化** | 用户无需理解每条链的底层细节 |
+| **标准化** | 所有链都遵循 Titan 标准接口 |
+| **可扩展** | 添加新链只需实现新 Driver |
+
+#### 18.20.4 Driver 如何工作：编译时 vs 运行时
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     Driver 工作机制                                          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Titan OS 的 Driver 主要在 **编译时** 工作，而非运行时。                    │
+│  这是与传统"虚拟机适配器"的核心区别。                                       │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                     编译时 Driver 选择                               │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│                         用户代码                                             │
+│                      ┌────────────┐                                         │
+│                      │ contract.zig│                                         │
+│                      └──────┬─────┘                                         │
+│                             │                                               │
+│                             ▼                                               │
+│                    ┌─────────────────┐                                      │
+│                    │  Titan Compiler │                                      │
+│                    │  (Zig comptime) │                                      │
+│                    └────────┬────────┘                                      │
+│                             │                                               │
+│            ┌────────────────┼────────────────┐                              │
+│            │                │                │                              │
+│            ▼                ▼                ▼                              │
+│   --target=ethereum  --target=solana  --target=ton                          │
+│            │                │                │                              │
+│            ▼                ▼                ▼                              │
+│   ┌─────────────┐  ┌─────────────┐  ┌─────────────┐                        │
+│   │ EVM Driver  │  │Solana Driver│  │ TON Driver  │                        │
+│   │             │  │             │  │             │                        │
+│   │ comptime {  │  │ comptime {  │  │ comptime {  │                        │
+│   │   // 生成   │  │   // 生成   │  │   // 生成   │                        │
+│   │   // Yul    │  │   // SBF    │  │   // Tact   │                        │
+│   │ }           │  │ }           │  │ }           │                        │
+│   └──────┬──────┘  └──────┬──────┘  └──────┬──────┘                        │
+│          │                │                │                                │
+│          ▼                ▼                ▼                                │
+│   ┌─────────────┐  ┌─────────────┐  ┌─────────────┐                        │
+│   │ EVM         │  │ Solana      │  │ TON         │                        │
+│   │ Bytecode    │  │ BPF Binary  │  │ TVM Binary  │                        │
+│   │ (.bin)      │  │ (.so)       │  │ (.boc)      │                        │
+│   └─────────────┘  └─────────────┘  └─────────────┘                        │
+│                                                                             │
+│  ─────────────────────────────────────────────────────────────────────────  │
+│                                                                             │
+│  关键点: Driver 在编译时被"内联"到最终产物中                               │
+│                                                                             │
+│  • 没有运行时开销                                                           │
+│  • 最终产物是纯粹的链原生代码                                               │
+│  • 部署后与手写原生合约性能一致                                             │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.20.5 如何开发新 Driver
+
+**开发一个新 Driver 的完整步骤**：
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     Driver 开发指南                                          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Step 1: 实现底层 Native SDK                                                │
+│  ═══════════════════════════════                                            │
+│                                                                             │
+│  目标: 让 Zig 能编译到目标链的虚拟机                                        │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  // libs/cosmos/native.zig                                          │   │
+│  │                                                                      │   │
+│  │  /// Cosmos SDK 原生存储操作                                        │   │
+│  │  pub fn raw_store_set(key: []const u8, value: []const u8) void {    │   │
+│  │      // 调用 Cosmos SDK 的 KVStore                                  │   │
+│  │      cosmos_sdk.kvstore_set(key.ptr, key.len, value.ptr, value.len);│   │
+│  │  }                                                                  │   │
+│  │                                                                      │   │
+│  │  pub fn raw_store_get(key: []const u8) []const u8 {                 │   │
+│  │      return cosmos_sdk.kvstore_get(key.ptr, key.len);               │   │
+│  │  }                                                                  │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  ─────────────────────────────────────────────────────────────────────────  │
+│                                                                             │
+│  Step 2: 实现 Driver 适配层                                                 │
+│  ═══════════════════════════════                                            │
+│                                                                             │
+│  目标: 把底层 SDK 包装成 Titan 标准接口                                     │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  // titan_drivers/cosmos/driver.zig                                 │   │
+│  │                                                                      │   │
+│  │  const native = @import("../../libs/cosmos/native.zig");            │   │
+│  │  const titan = @import("../../titan_os/interface.zig");             │   │
+│  │                                                                      │   │
+│  │  /// Cosmos Driver - 必须实现 Titan 标准接口                        │   │
+│  │  pub const CosmosDriver = struct {                                  │   │
+│  │                                                                      │   │
+│  │      // 必须实现: Storage 接口                                       │   │
+│  │      pub fn setStorage(key: []const u8, value: anytype) void {      │   │
+│  │          const serialized = titan.serialize(value);                 │   │
+│  │          native.raw_store_set(key, serialized);                     │   │
+│  │      }                                                              │   │
+│  │                                                                      │   │
+│  │      pub fn getStorage(comptime T: type, key: []const u8) T {       │   │
+│  │          const raw = native.raw_store_get(key);                     │   │
+│  │          return titan.deserialize(T, raw);                          │   │
+│  │      }                                                              │   │
+│  │                                                                      │   │
+│  │      // 必须实现: Context 接口                                       │   │
+│  │      pub fn getSender() titan.Address {                             │   │
+│  │          const sender = native.raw_get_sender();                    │   │
+│  │          return titan.Address.fromCosmos(sender);                   │   │
+│  │      }                                                              │   │
+│  │                                                                      │   │
+│  │      // 必须实现: Transfer 接口                                      │   │
+│  │      pub fn transfer(to: titan.Address, amount: u128) !void {       │   │
+│  │          try native.raw_bank_send(to.toCosmos(), amount);           │   │
+│  │      }                                                              │   │
+│  │  };                                                                 │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  ─────────────────────────────────────────────────────────────────────────  │
+│                                                                             │
+│  Step 3: 注册到 Titan 编译器                                                │
+│  ═══════════════════════════════                                            │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  // titan_os/drivers/registry.zig                                   │   │
+│  │                                                                      │   │
+│  │  const evm = @import("evm/driver.zig");                             │   │
+│  │  const solana = @import("solana/driver.zig");                       │   │
+│  │  const cosmos = @import("cosmos/driver.zig");  // 新增              │   │
+│  │                                                                      │   │
+│  │  pub fn getDriver(target: Target) type {                            │   │
+│  │      return switch (target) {                                       │   │
+│  │          .ethereum, .arbitrum, .base => evm.EvmDriver,              │   │
+│  │          .solana => solana.SolanaDriver,                            │   │
+│  │          .cosmos, .osmosis => cosmos.CosmosDriver,  // 新增         │   │
+│  │          else => @compileError("Unsupported target"),               │   │
+│  │      };                                                             │   │
+│  │  }                                                                  │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  ─────────────────────────────────────────────────────────────────────────  │
+│                                                                             │
+│  Step 4: 编写测试                                                           │
+│  ═══════════════════════════════                                            │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  // tests/cosmos_driver_test.zig                                    │   │
+│  │                                                                      │   │
+│  │  test "cosmos driver storage" {                                     │   │
+│  │      const driver = cosmos.CosmosDriver{};                          │   │
+│  │                                                                      │   │
+│  │      driver.setStorage("test_key", @as(u256, 12345));               │   │
+│  │      const value = driver.getStorage(u256, "test_key");             │   │
+│  │                                                                      │   │
+│  │      try std.testing.expectEqual(@as(u256, 12345), value);          │   │
+│  │  }                                                                  │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.20.6 Driver 接口标准 (Titan Driver Interface)
+
+所有 Driver 必须实现的标准接口：
+
+```zig
+// ==========================================================================
+// titan_os/interface.zig - Titan Driver 标准接口定义
+// ==========================================================================
+
+/// 所有 Driver 必须实现的接口
+pub const DriverInterface = struct {
+
+    // ========================================================================
+    // Storage 接口 (必须)
+    // ========================================================================
+
+    /// 设置存储值
+    setStorage: fn (key: []const u8, value: anytype) void,
+
+    /// 获取存储值
+    getStorage: fn (comptime T: type, key: []const u8) T,
+
+    /// 删除存储值
+    deleteStorage: fn (key: []const u8) void,
+
+    // ========================================================================
+    // Context 接口 (必须)
+    // ========================================================================
+
+    /// 获取调用者地址
+    getSender: fn () Address,
+
+    /// 获取合约自身地址
+    getSelf: fn () Address,
+
+    /// 获取发送的原生代币数量
+    getValue: fn () u256,
+
+    /// 获取当前区块号
+    getBlockNumber: fn () u64,
+
+    /// 获取当前时间戳
+    getTimestamp: fn () u64,
+
+    // ========================================================================
+    // Transfer 接口 (必须)
+    // ========================================================================
+
+    /// 转账原生代币
+    transfer: fn (to: Address, amount: u256) Error!void,
+
+    /// 调用其他合约
+    call: fn (to: Address, data: []const u8, value: u256) Error![]const u8,
+
+    // ========================================================================
+    // Event 接口 (可选)
+    // ========================================================================
+
+    /// 触发事件
+    emit: ?fn (name: []const u8, data: anytype) void,
+
+    // ========================================================================
+    // Crypto 接口 (可选)
+    // ========================================================================
+
+    /// Keccak256 哈希
+    keccak256: ?fn (data: []const u8) [32]u8,
+
+    /// 签名验证
+    ecrecover: ?fn (hash: [32]u8, sig: [65]u8) ?Address,
+};
+```
+
+#### 18.20.7 现有 Driver 一览
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     Titan OS Driver 生态                                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  已实现 / 开发中                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  ┌────────────────┬──────────────────┬─────────────────┬───────────────┐   │
+│  │ Driver         │ 底层 SDK         │ 编译目标        │ 状态          │   │
+│  ├────────────────┼──────────────────┼─────────────────┼───────────────┤   │
+│  │ EVM Driver     │ zig-to-yul       │ EVM Bytecode    │ ✅ 开发中     │   │
+│  │ Solana Driver  │ solana-sdk-zig   │ SBF/eBPF        │ ✅ 已完成     │   │
+│  │ TON Driver     │ zig-to-tact      │ TVM Binary      │ 📋 规划中     │   │
+│  │ NEAR Driver    │ near-sdk-zig     │ Wasm            │ 📋 规划中     │   │
+│  │ Cosmos Driver  │ cosmos-sdk-zig   │ Wasm            │ 📋 规划中     │   │
+│  └────────────────┴──────────────────┴─────────────────┴───────────────┘   │
+│                                                                             │
+│  ─────────────────────────────────────────────────────────────────────────  │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  Driver 开发优先级                                                   │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  P0 (立即):                                                                 │
+│  • Solana Driver - Hackathon 核心 ✅                                       │
+│  • EVM Driver - 最大开发者群体                                             │
+│                                                                             │
+│  P1 (短期):                                                                 │
+│  • TON Driver - Telegram 9亿用户                                           │
+│  • NEAR Driver - AI Agent 生态                                             │
+│                                                                             │
+│  P2 (中期):                                                                 │
+│  • Cosmos Driver - IBC 跨链                                                │
+│  • Sui/Aptos Driver - Move 生态                                            │
+│                                                                             │
+│  ─────────────────────────────────────────────────────────────────────────  │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  社区贡献指南                                                        │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  想要贡献新 Driver?                                                         │
+│                                                                             │
+│  1. Fork titan_framework 仓库                                              │
+│  2. 在 titan_drivers/{chain}/ 下创建新目录                                 │
+│  3. 实现 DriverInterface 所有必须接口                                      │
+│  4. 编写测试并通过 CI                                                      │
+│  5. 提交 PR                                                                │
+│                                                                             │
+│  参考实现: titan_drivers/solana/driver.zig                                 │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.20.8 总结：Driver 是 Titan OS 的核心壁垒
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                                                             │
+│                                                                             │
+│     ┌───────────────────────────────────────────────────────────────────┐   │
+│     │                                                                    │   │
+│     │                                                                    │   │
+│     │         Driver 的本质:                                             │   │
+│     │                                                                    │   │
+│     │         把"讲各地方言"的底层 SDK                                   │   │
+│     │         包装成"讲 Titan 普通话"的模块                              │   │
+│     │                                                                    │   │
+│     │                                                                    │   │
+│     │         ─────────────────────────────────────────────────────────  │   │
+│     │                                                                    │   │
+│     │                                                                    │   │
+│     │         类比:                                                      │   │
+│     │                                                                    │   │
+│     │         ┌─────────────────────────────────────────────────────┐   │   │
+│     │         │                                                      │   │   │
+│     │         │  联合国秘书长 (Titan OS)                            │   │   │
+│     │         │       │                                              │   │   │
+│     │         │       │ "请各位代表发言"                             │   │   │
+│     │         │       │                                              │   │   │
+│     │         │       ▼                                              │   │   │
+│     │         │  ┌─────────┐ ┌─────────┐ ┌─────────┐                │   │   │
+│     │         │  │ 英语    │ │ 中文    │ │ 法语    │                │   │   │
+│     │         │  │ 翻译官  │ │ 翻译官  │ │ 翻译官  │                │   │   │
+│     │         │  │(EVM     │ │(Solana  │ │(TON     │                │   │   │
+│     │         │  │ Driver) │ │ Driver) │ │ Driver) │                │   │   │
+│     │         │  └────┬────┘ └────┬────┘ └────┬────┘                │   │   │
+│     │         │       │          │          │                        │   │   │
+│     │         │       ▼          ▼          ▼                        │   │   │
+│     │         │  ┌─────────┐ ┌─────────┐ ┌─────────┐                │   │   │
+│     │         │  │ 英国    │ │ 中国    │ │ 法国    │                │   │   │
+│     │         │  │ 代表    │ │ 代表    │ │ 代表    │                │   │   │
+│     │         │  │(EVM)    │ │(Solana) │ │(TON)    │                │   │   │
+│     │         │  └─────────┘ └─────────┘ └─────────┘                │   │   │
+│     │         │                                                      │   │   │
+│     │         └─────────────────────────────────────────────────────┘   │   │
+│     │                                                                    │   │
+│     │                                                                    │   │
+│     │         ─────────────────────────────────────────────────────────  │   │
+│     │                                                                    │   │
+│     │                                                                    │   │
+│     │         这就是为什么 Titan OS 是"操作系统":                        │   │
+│     │                                                                    │   │
+│     │         它制定了标准，让不同的底层实现都能"说同一种语言"。          │   │
+│     │                                                                    │   │
+│     │         一旦你完成了这个封装，                                     │   │
+│     │         Titan OS 就不再依赖于具体的链，                            │   │
+│     │         而是依赖于你的标准。                                       │   │
+│     │                                                                    │   │
+│     │         这才是操作系统的核心壁垒。                                 │   │
+│     │                                                                    │   │
+│     │                                                                    │   │
+│     └───────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
 ## 相关文档
 
 | 文档 | 说明 |
