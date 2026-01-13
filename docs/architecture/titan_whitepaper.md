@@ -46514,6 +46514,822 @@ ZK Privacy (单笔):
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
+### 18.47 Zig 组件差距分析与电路复用策略
+
+> 状态: **实施指南**
+> 目的: 分析现有 Zig 组件与 ZK 工作流的差距，以及电路复用策略
+
+#### 18.47.1 现有组件 vs ZK 工作流需求
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    已有的 Zig 组件                                       │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│   ┌─────────────────────────┐     ┌─────────────────────────┐          │
+│   │ solana-program-sdk-zig  │     │      zig-to-yul         │          │
+│   │                         │     │                         │          │
+│   │ • Solana 账户模型       │     │ • Zig → Yul 转译        │          │
+│   │ • Syscall 封装          │     │ • EVM 存储模型          │          │
+│   │ • 交易处理              │     │ • ABI 生成              │          │
+│   │ • 链上程序开发          │     │ • Gas 估算              │          │
+│   └─────────────────────────┘     └─────────────────────────┘          │
+│              │                                                          │
+│              └──────────── 都是 链上 执行 ────────────────────          │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    ZK 工作流需要但缺少的                                 │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│   ┌─────────────────────────┐     ┌─────────────────────────┐          │
+│   │   链下业务逻辑 (Zig)    │     │   链下状态管理 (Zig)    │          │
+│   │                         │     │                         │          │
+│   │ • Merkle Tree 构建      │     │ • Note 数据库           │          │
+│   │ • Nullifier 生成        │     │ • 本地状态同步          │          │
+│   │ • Witness 准备          │     │ • RPC 客户端            │          │
+│   │ • 证明数据序列化        │     │ • 交易构建/签名         │          │
+│   └─────────────────────────┘     └─────────────────────────┘          │
+│                                                                         │
+│   ┌─────────────────────────┐     ┌─────────────────────────┐          │
+│   │   CLI 编排器 (Zig)      │     │   Groth16 验证 (链上)   │          │
+│   │                         │     │                         │          │
+│   │ • 调用 nargo/sunspot    │     │ • groth16-solana 移植   │          │
+│   │ • 解析 proof 文件       │     │   或                    │          │
+│   │ • 客户端预验证          │     │ • CPI 调用 Rust 程序    │          │
+│   │ • 用户意图匹配          │     │                         │          │
+│   └─────────────────────────┘     └─────────────────────────┘          │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.47.2 需要实现的 Zig 组件清单
+
+##### Layer 1: 链下核心库 (titan-zk-core)
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  1.1 Merkle Tree (merkle.zig)                                           │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  pub const IncrementalMerkleTree = struct {                            │
+│      depth: u8,                                                         │
+│      zeros: []Hash,        // 预计算的零值                              │
+│      filled_subtrees: []Hash,                                          │
+│      current_index: u64,                                                │
+│                                                                         │
+│      pub fn insert(self: *Self, leaf: Hash) !void;                     │
+│      pub fn getRoot(self: *Self) Hash;                                 │
+│      pub fn generateProof(self: *Self, index: u64) ![DEPTH]Hash;       │
+│  };                                                                     │
+│                                                                         │
+│  pub const SparseMerkleTree = struct {                                 │
+│      // 用于 nullifier set，支持任意 key 的存在性证明                  │
+│      pub fn insert(self: *Self, key: Hash, value: Hash) !void;         │
+│      pub fn generateInclusionProof(self: *Self, key: Hash) !Proof;     │
+│      pub fn generateExclusionProof(self: *Self, key: Hash) !Proof;     │
+│  };                                                                     │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│  1.2 密码学原语 (crypto.zig)                                            │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  // Poseidon Hash (ZK 友好)                                            │
+│  pub fn poseidon_hash(inputs: []const Field) Field;                    │
+│  pub fn poseidon_hash_2(a: Field, b: Field) Field;                     │
+│                                                                         │
+│  // Pedersen Hash (曲线点)                                              │
+│  pub fn pedersen_hash(inputs: []const Field) Point;                    │
+│                                                                         │
+│  // Nullifier 计算                                                      │
+│  pub fn compute_nullifier(                                              │
+│      note_commitment: Hash,                                             │
+│      owner_secret: Field,                                               │
+│      leaf_index: u64,                                                   │
+│  ) Hash;                                                                │
+│                                                                         │
+│  // Commitment 计算                                                     │
+│  pub fn compute_commitment(note: Note) Hash;                           │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│  1.3 Note 结构 (note.zig)                                               │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  pub const Note = struct {                                              │
+│      amount: u256,         // 金额                                      │
+│      asset: Hash,          // 资产类型                                  │
+│      owner: PublicKey,     // 所有者公钥                                │
+│      nonce: Field,         // 随机数 (防重放)                           │
+│                                                                         │
+│      pub fn commitment(self: Note) Hash;                               │
+│      pub fn nullifier(self: Note, secret: Field) Hash;                 │
+│      pub fn encrypt(self: Note, pubkey: PublicKey) EncryptedNote;      │
+│      pub fn decrypt(enc: EncryptedNote, privkey: SecretKey) !Note;     │
+│  };                                                                     │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+##### Layer 2: Witness 构建器 (titan-zk-witness)
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  2.1 Witness Builder (witness.zig)                                      │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  pub const SwapWitness = struct {                                       │
+│      // 公开输入                                                        │
+│      merkle_root: Field,                                                │
+│      nullifier: Field,                                                  │
+│      output_commitment: Field,                                          │
+│      pool_state_hash: Field,                                            │
+│                                                                         │
+│      // 私有输入                                                        │
+│      note: Note,                                                        │
+│      merkle_path: [20]Field,                                            │
+│      merkle_indices: [20]u1,                                            │
+│      sender_key: Field,                                                 │
+│      swap_amount_in: Field,                                             │
+│      swap_amount_out: Field,                                            │
+│      pool_reserve_a: Field,                                             │
+│      pool_reserve_b: Field,                                             │
+│  };                                                                     │
+│                                                                         │
+│  pub fn buildSwapWitness(                                               │
+│      note: Note,                                                        │
+│      merkle_tree: *MerkleTree,                                         │
+│      swap_params: SwapParams,                                          │
+│      pool_state: PoolState,                                            │
+│  ) !SwapWitness;                                                        │
+│                                                                         │
+│  pub fn serializeToToml(witness: anytype, allocator: Allocator) ![]u8; │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+##### Layer 3: CLI 编排器 (titan-zk-cli)
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  3.1 Prover 封装 (prover.zig)                                           │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  pub const Prover = struct {                                            │
+│      circuit_dir: []const u8,                                          │
+│      allocator: Allocator,                                              │
+│                                                                         │
+│      pub fn writeProverToml(self: *Self, witness: anytype) !void {     │
+│          // 将 witness 序列化为 Prover.toml                            │
+│          const toml = try serializeToToml(witness, self.allocator);    │
+│          const path = try std.fs.path.join(                            │
+│              self.allocator,                                            │
+│              &.{ self.circuit_dir, "Prover.toml" },                    │
+│          );                                                             │
+│          try std.fs.cwd().writeFile(path, toml);                       │
+│      }                                                                  │
+│                                                                         │
+│      pub fn executeNargo(self: *Self) !void {                          │
+│          // nargo execute                                               │
+│          var child = std.process.Child.init(                           │
+│              &.{ "nargo", "execute" },                                  │
+│              self.allocator,                                            │
+│          );                                                             │
+│          child.cwd = self.circuit_dir;                                 │
+│          _ = try child.spawnAndWait();                                 │
+│      }                                                                  │
+│                                                                         │
+│      pub fn executeSunspot(self: *Self) !Proof {                       │
+│          // sunspot prove --circuit-dir ... --witness-dir ...          │
+│          var child = std.process.Child.init(                           │
+│              &.{ "sunspot", "prove",                                   │
+│                  "--circuit-dir", self.circuit_dir,                    │
+│                  "--witness-dir", self.circuit_dir,                    │
+│              },                                                         │
+│              self.allocator,                                            │
+│          );                                                             │
+│          _ = try child.spawnAndWait();                                 │
+│                                                                         │
+│          // 读取生成的 proof                                            │
+│          return try self.parseProofFile();                             │
+│      }                                                                  │
+│                                                                         │
+│      pub fn generateProof(self: *Self, witness: anytype) !Proof {      │
+│          try self.writeProverToml(witness);                            │
+│          try self.executeNargo();                                       │
+│          return try self.executeSunspot();                             │
+│      }                                                                  │
+│  };                                                                     │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│  3.2 交易构建 (transaction.zig)                                         │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  pub fn buildVerifyInstruction(                                         │
+│      program_id: Pubkey,                                                │
+│      proof: Proof,                                                      │
+│      accounts: []const AccountMeta,                                    │
+│  ) Instruction {                                                        │
+│      // 指令数据格式: proof_bytes (388) || public_inputs (128)         │
+│      var data: [516]u8 = undefined;                                    │
+│      @memcpy(data[0..388], proof.bytes);                               │
+│      @memcpy(data[388..516], proof.public_inputs);                     │
+│                                                                         │
+│      return Instruction{                                                │
+│          .program_id = program_id,                                      │
+│          .accounts = accounts,                                          │
+│          .data = &data,                                                 │
+│      };                                                                  │
+│  }                                                                      │
+│                                                                         │
+│  pub fn buildTransaction(                                               │
+│      instructions: []const Instruction,                                │
+│      payer: Pubkey,                                                     │
+│      recent_blockhash: Blockhash,                                      │
+│  ) Transaction;                                                         │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│  3.3 RPC 客户端 (rpc.zig)                                               │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  pub const SolanaRpc = struct {                                         │
+│      endpoint: []const u8,                                              │
+│      http_client: std.http.Client,                                     │
+│                                                                         │
+│      pub fn init(endpoint: []const u8) !SolanaRpc;                     │
+│                                                                         │
+│      pub fn getAccountInfo(self: *Self, pubkey: Pubkey) !AccountInfo;  │
+│      pub fn getLatestBlockhash(self: *Self) !Blockhash;                │
+│      pub fn sendTransaction(self: *Self, tx: Transaction) !Signature;  │
+│      pub fn confirmTransaction(self: *Self, sig: Signature) !bool;     │
+│  };                                                                     │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+##### Layer 4: 状态管理 (titan-zk-state)
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  4.1 链上状态同步 (sync.zig)                                            │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  pub const StateSync = struct {                                         │
+│      rpc: *SolanaRpc,                                                   │
+│      program_id: Pubkey,                                                │
+│                                                                         │
+│      pub fn fetchMerkleRoot(self: *Self) !Hash {                       │
+│          const account = try self.rpc.getAccountInfo(self.state_pda);  │
+│          return account.data[0..32].*;  // Merkle root at offset 0     │
+│      }                                                                  │
+│                                                                         │
+│      pub fn isNullifierUsed(self: *Self, nullifier: Hash) !bool {      │
+│          // 查询 nullifier PDA 是否存在                                │
+│          const pda = deriveNullifierPda(self.program_id, nullifier);   │
+│          const account = self.rpc.getAccountInfo(pda) catch return false; │
+│          return account.lamports > 0;                                  │
+│      }                                                                  │
+│                                                                         │
+│      pub fn fetchPoolState(self: *Self, pool_id: Pubkey) !PoolState;   │
+│  };                                                                     │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.47.3 链上验证方案选择
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    链上 Groth16 验证 - 两种方案                          │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  方案 A: CPI 调用 Rust (推荐 MVP)                                       │
+│  ═════════════════════════════════                                      │
+│                                                                         │
+│  ┌────────────────────────────────────────────────────────────────┐    │
+│  │                                                                │    │
+│  │   Zig Program (业务逻辑)                                       │    │
+│  │        │                                                       │    │
+│  │        │  CPI                                                  │    │
+│  │        ▼                                                       │    │
+│  │   groth16-solana (Rust, Light Protocol)                       │    │
+│  │        │                                                       │    │
+│  │        ▼                                                       │    │
+│  │   altbn254 syscalls (Solana 原生)                             │    │
+│  │                                                                │    │
+│  │   优点: 快速实现，已验证                                       │    │
+│  │   缺点: 依赖 Rust 程序                                         │    │
+│  │                                                                │    │
+│  └────────────────────────────────────────────────────────────────┘    │
+│                                                                         │
+│  方案 B: 纯 Zig 实现 (长期)                                             │
+│  ═══════════════════════════                                            │
+│                                                                         │
+│  ┌────────────────────────────────────────────────────────────────┐    │
+│  │                                                                │    │
+│  │   groth16_verify.zig (~2000 行)                               │    │
+│  │   ├─ Syscall 封装                                             │    │
+│  │   │   ├─ sol_alt_bn128_group_op                               │    │
+│  │   │   ├─ sol_alt_bn128_compression                            │    │
+│  │   │   └─ sol_poseidon                                         │    │
+│  │   │                                                            │    │
+│  │   ├─ 椭圆曲线运算 (G1/G2)                                     │    │
+│  │   │                                                            │    │
+│  │   └─ Groth16 验证                                             │    │
+│  │       e(A,B) = e(α,β) · e(L,γ) · e(C,δ)                       │    │
+│  │                                                                │    │
+│  │   优点: 纯 Zig，无依赖                                         │    │
+│  │   缺点: 工作量大，需验证正确性                                 │    │
+│  │                                                                │    │
+│  └────────────────────────────────────────────────────────────────┘    │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.47.4 与 noir-examples 的对应关系
+
+| noir-examples 组件 | 语言 | Titan 对应 | 状态 |
+|:---|:---|:---|:---|
+| `circuits/*.nr` | Noir | 保持 Noir | 直接复用 |
+| `lib/*.ts` (witness) | TypeScript | `titan-zk-witness` | **需实现** |
+| `lib/*.ts` (proof) | TypeScript | `titan-zk-cli/prover.zig` | **需实现** |
+| `lib/*.ts` (tx) | TypeScript | `titan-zk-cli/transaction.zig` | **需实现** |
+| `programs/*.rs` | Rust | CPI 或 纯 Zig | MVP 用 CPI |
+
+#### 18.47.5 实现优先级
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    实现优先级                                            │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  P0 (Hackathon MVP) ~500 行 Zig                                         │
+│  ═══════════════════════════════                                        │
+│  ┌────────────────────────────────────────────────────────────────┐    │
+│  │  1. prover.zig       - 调用 nargo/sunspot                      │    │
+│  │  2. witness.zig      - 构建 Prover.toml                        │    │
+│  │  3. transaction.zig  - 构建 Solana 交易                        │    │
+│  │  4. rpc.zig          - 基础 RPC 调用                           │    │
+│  └────────────────────────────────────────────────────────────────┘    │
+│                                                                         │
+│  P1 (功能完整) ~1500 行 Zig                                             │
+│  ═════════════════════════════                                          │
+│  ┌────────────────────────────────────────────────────────────────┐    │
+│  │  5. merkle.zig       - Incremental Merkle Tree                 │    │
+│  │  6. crypto.zig       - Poseidon/Pedersen hash                  │    │
+│  │  7. note.zig         - Note 加密/解密                          │    │
+│  │  8. client_verify.zig - 三重客户端验证                         │    │
+│  └────────────────────────────────────────────────────────────────┘    │
+│                                                                         │
+│  P2 (生产级) ~2500 行 Zig                                               │
+│  ═════════════════════════                                              │
+│  ┌────────────────────────────────────────────────────────────────┐    │
+│  │  9. db.zig           - 本地 Note 数据库                        │    │
+│  │  10. sync.zig        - 链上状态订阅                            │    │
+│  │  11. groth16.zig     - 纯 Zig 链上验证                         │    │
+│  └────────────────────────────────────────────────────────────────┘    │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.47.6 电路复用策略 - 新业务逻辑如何处理
+
+##### 核心问题
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                                                                         │
+│  问题: 每个新业务逻辑都需要重新实现电路吗？                              │
+│                                                                         │
+│  答案: 部分是，部分否                                                   │
+│                                                                         │
+│  ┌────────────────────────────────────────────────────────────────┐    │
+│  │                                                                │    │
+│  │   可复用 (Core Gadgets)          需重写 (Business Logic)      │    │
+│  │   ════════════════════           ═══════════════════════       │    │
+│  │                                                                │    │
+│  │   • Merkle 验证                  • AMM 价格公式                │    │
+│  │   • Nullifier 计算               • 借贷抵押率检查              │    │
+│  │   • 所有权证明                   • 期权行权条件                │    │
+│  │   • 余额范围证明                 • 订单簿匹配逻辑              │    │
+│  │   • 哈希计算                     • 清算阈值判断                │    │
+│  │                                                                │    │
+│  │   ~60% 可复用                    ~40% 业务特定                 │    │
+│  │                                                                │    │
+│  └────────────────────────────────────────────────────────────────┘    │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+##### 电路组件化架构
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Noir 电路库架构                                       │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  circuits/                                                              │
+│  ├── lib/                        # 可复用组件库                        │
+│  │   ├── merkle.nr              # Merkle 验证 gadget                   │
+│  │   ├── nullifier.nr           # Nullifier 计算                       │
+│  │   ├── ownership.nr           # 所有权证明                           │
+│  │   ├── range.nr               # 范围证明 (0 ≤ x < 2^64)             │
+│  │   └── hash.nr                # 哈希函数封装                         │
+│  │                                                                      │
+│  ├── private_swap/              # AMM 业务电路                         │
+│  │   └── main.nr                # 组合: lib/* + AMM 价格逻辑          │
+│  │                                                                      │
+│  ├── private_lending/           # 借贷业务电路                         │
+│  │   └── main.nr                # 组合: lib/* + 抵押率逻辑            │
+│  │                                                                      │
+│  ├── private_perp/              # 永续合约电路                         │
+│  │   └── main.nr                # 组合: lib/* + 资金费率逻辑          │
+│  │                                                                      │
+│  └── private_auction/           # 拍卖电路                             │
+│      └── main.nr                # 组合: lib/* + 出价比较逻辑          │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+##### 可复用组件示例 (Noir)
+
+```noir
+// circuits/lib/merkle.nr
+// ═══════════════════════════════════════════════════════════════════════
+// 可复用: 任何需要 Merkle 验证的业务都可以直接 use
+
+use std::hash::poseidon2;
+
+/// 验证 Merkle 路径
+/// @param root - 预期的 Merkle root
+/// @param leaf - 叶子节点值
+/// @param path - Merkle 路径 (sibling hashes)
+/// @param indices - 路径方向 (0=左, 1=右)
+pub fn verify_merkle_path<let DEPTH: u32>(
+    root: Field,
+    leaf: Field,
+    path: [Field; DEPTH],
+    indices: [u1; DEPTH],
+) {
+    let mut computed = leaf;
+    for i in 0..DEPTH {
+        let (left, right) = if indices[i] == 0 {
+            (computed, path[i])
+        } else {
+            (path[i], computed)
+        };
+        computed = poseidon2([left, right]);
+    }
+    assert(computed == root, "Merkle verification failed");
+}
+
+// circuits/lib/nullifier.nr
+// ═══════════════════════════════════════════════════════════════════════
+// 可复用: 任何需要防双花的业务
+
+/// 计算 nullifier
+pub fn compute_nullifier(
+    commitment: Field,
+    owner_secret: Field,
+    leaf_index: Field,
+) -> Field {
+    poseidon2([commitment, owner_secret, leaf_index])
+}
+
+/// 验证 nullifier 计算正确
+pub fn verify_nullifier(
+    expected_nullifier: Field,
+    commitment: Field,
+    owner_secret: Field,
+    leaf_index: Field,
+) {
+    let computed = compute_nullifier(commitment, owner_secret, leaf_index);
+    assert(computed == expected_nullifier, "Invalid nullifier");
+}
+
+// circuits/lib/ownership.nr
+// ═══════════════════════════════════════════════════════════════════════
+// 可复用: 任何需要证明所有权的业务
+
+/// 验证所有者身份
+pub fn verify_ownership(
+    note_owner: Field,      // Note 中记录的 owner
+    sender_secret: Field,   // 发送者提供的私钥
+) {
+    let derived_owner = poseidon2([sender_secret]);
+    assert(derived_owner == note_owner, "Not the owner");
+}
+
+// circuits/lib/range.nr
+// ═══════════════════════════════════════════════════════════════════════
+// 可复用: 金额非负、余额充足等检查
+
+/// 范围证明: 0 ≤ value < 2^bits
+pub fn assert_range<let BITS: u32>(value: Field) {
+    let _ = value as u64;  // Noir 自动约束
+}
+
+/// 余额充足证明
+pub fn assert_sufficient_balance(balance: Field, amount: Field) {
+    let balance_u64 = balance as u64;
+    let amount_u64 = amount as u64;
+    assert(balance_u64 >= amount_u64, "Insufficient balance");
+}
+```
+
+##### 业务电路示例 - 如何组合
+
+```noir
+// circuits/private_swap/main.nr
+// ═══════════════════════════════════════════════════════════════════════
+// AMM Swap: 复用 lib/* + 添加 AMM 特定逻辑
+
+use crate::lib::merkle::verify_merkle_path;
+use crate::lib::nullifier::{compute_nullifier, verify_nullifier};
+use crate::lib::ownership::verify_ownership;
+use crate::lib::range::assert_sufficient_balance;
+
+fn main(
+    // === 公开输入 ===
+    pub merkle_root: Field,
+    pub nullifier: Field,
+    pub output_commitment: Field,
+    pub pool_state_hash: Field,
+
+    // === 私有输入 ===
+    note_amount: Field,
+    note_owner: Field,
+    note_nonce: Field,
+    merkle_path: [Field; 20],
+    merkle_indices: [u1; 20],
+    sender_secret: Field,
+    swap_amount_in: Field,
+    swap_amount_out: Field,
+    pool_reserve_a: Field,
+    pool_reserve_b: Field,
+) {
+    // ─────────────────────────────────────────────────────────────────
+    // 复用部分 (来自 lib/*)
+    // ─────────────────────────────────────────────────────────────────
+
+    // 1. Merkle 验证 (复用)
+    let commitment = poseidon2([note_amount, note_owner, note_nonce]);
+    verify_merkle_path(merkle_root, commitment, merkle_path, merkle_indices);
+
+    // 2. Nullifier 验证 (复用)
+    verify_nullifier(nullifier, commitment, sender_secret, leaf_index);
+
+    // 3. 所有权验证 (复用)
+    verify_ownership(note_owner, sender_secret);
+
+    // 4. 余额充足验证 (复用)
+    assert_sufficient_balance(note_amount, swap_amount_in);
+
+    // ─────────────────────────────────────────────────────────────────
+    // 业务特定部分 (AMM 逻辑，需要新写)
+    // ─────────────────────────────────────────────────────────────────
+
+    // 5. AMM 价格公式验证 (特定于 AMM)
+    //    x * y = k (恒定乘积)
+    //    允许 0.3% 滑点
+    let k_before = pool_reserve_a * pool_reserve_b;
+    let new_reserve_a = pool_reserve_a + swap_amount_in;
+    let new_reserve_b = pool_reserve_b - swap_amount_out;
+    let k_after = new_reserve_a * new_reserve_b;
+
+    // k_after >= k_before * 0.997 (0.3% 手续费)
+    assert(k_after * 1000 >= k_before * 997, "Price slippage exceeded");
+
+    // 6. Pool 状态哈希验证 (特定于 AMM)
+    let computed_pool_hash = poseidon2([pool_reserve_a, pool_reserve_b]);
+    assert(computed_pool_hash == pool_state_hash, "Invalid pool state");
+
+    // 7. 输出验证 (部分复用模式)
+    let change_amount = note_amount - swap_amount_in;
+    // ... output commitment 计算
+}
+```
+
+```noir
+// circuits/private_lending/main.nr
+// ═══════════════════════════════════════════════════════════════════════
+// 借贷: 复用 lib/* + 添加借贷特定逻辑
+
+use crate::lib::merkle::verify_merkle_path;
+use crate::lib::nullifier::verify_nullifier;
+use crate::lib::ownership::verify_ownership;
+use crate::lib::range::{assert_range, assert_sufficient_balance};
+
+fn main(
+    // ... 公开/私有输入 ...
+    collateral_amount: Field,
+    borrow_amount: Field,
+    collateral_price: Field,   // Oracle 价格
+    liquidation_threshold: Field,  // 清算阈值 (如 150%)
+) {
+    // 复用部分
+    verify_merkle_path(...);
+    verify_nullifier(...);
+    verify_ownership(...);
+
+    // ─────────────────────────────────────────────────────────────────
+    // 借贷特定逻辑 (需要新写)
+    // ─────────────────────────────────────────────────────────────────
+
+    // 抵押率检查: collateral_value >= borrow_amount * threshold
+    let collateral_value = collateral_amount * collateral_price;
+    let required_collateral = borrow_amount * liquidation_threshold / 100;
+    assert(
+        collateral_value >= required_collateral,
+        "Insufficient collateral"
+    );
+
+    // 利率计算 (特定于借贷)
+    // ...
+}
+```
+
+##### 电路复用总结
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    新业务电路开发流程                                    │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  Step 1: 识别可复用组件                                                 │
+│  ─────────────────────────                                              │
+│  ┌────────────────────────────────────────────────────────────────┐    │
+│  │  ✅ Merkle 验证       → use lib/merkle.nr                      │    │
+│  │  ✅ Nullifier 计算    → use lib/nullifier.nr                   │    │
+│  │  ✅ 所有权证明        → use lib/ownership.nr                   │    │
+│  │  ✅ 范围证明          → use lib/range.nr                       │    │
+│  └────────────────────────────────────────────────────────────────┘    │
+│                                                                         │
+│  Step 2: 实现业务特定逻辑                                               │
+│  ──────────────────────────                                             │
+│  ┌────────────────────────────────────────────────────────────────┐    │
+│  │  业务类型          需要新写的逻辑                 约束数量      │    │
+│  │  ─────────────────────────────────────────────────────────────  │    │
+│  │  AMM Swap          价格公式、滑点检查            ~20 约束       │    │
+│  │  借贷 Borrow       抵押率、利率计算              ~30 约束       │    │
+│  │  永续 Perp         资金费率、杠杆检查            ~50 约束       │    │
+│  │  拍卖 Auction      出价比较、时间锁              ~25 约束       │    │
+│  │  空投 Airdrop      资格验证 (可能只需 Merkle)   ~5 约束        │    │
+│  └────────────────────────────────────────────────────────────────┘    │
+│                                                                         │
+│  Step 3: 组合并测试                                                     │
+│  ───────────────────                                                    │
+│  ┌────────────────────────────────────────────────────────────────┐    │
+│  │  • 导入 lib/* 组件                                             │    │
+│  │  • 添加业务逻辑                                                 │    │
+│  │  • 编写测试用例                                                 │    │
+│  │  • 生成 verification key                                       │    │
+│  │  • 部署链上验证器                                               │    │
+│  └────────────────────────────────────────────────────────────────┘    │
+│                                                                         │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  工作量估算:                                                            │
+│  ────────────                                                           │
+│                                                                         │
+│  ┌────────────────────────────────────────────────────────────────┐    │
+│  │                                                                │    │
+│  │   首个业务 (AMM):                                              │    │
+│  │   • lib/* 组件: ~300 行 Noir (一次性)                         │    │
+│  │   • AMM 逻辑: ~100 行 Noir                                    │    │
+│  │   • 总计: ~400 行                                              │    │
+│  │                                                                │    │
+│  │   后续业务 (借贷):                                             │    │
+│  │   • lib/* 组件: 0 行 (复用)                                   │    │
+│  │   • 借贷逻辑: ~150 行 Noir                                    │    │
+│  │   • 总计: ~150 行                                              │    │
+│  │                                                                │    │
+│  │   结论: 首个业务后，后续业务只需 30-40% 的代码量               │    │
+│  │                                                                │    │
+│  └────────────────────────────────────────────────────────────────┘    │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.47.7 完整项目结构
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Titan ZK 项目结构                                     │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  titan-zk/                                                              │
+│  │                                                                      │
+│  ├── circuits/                    # Noir 电路 (ZK 逻辑)                │
+│  │   ├── lib/                    # 可复用组件库                        │
+│  │   │   ├── merkle.nr          # Merkle 验证                          │
+│  │   │   ├── nullifier.nr       # Nullifier 计算                       │
+│  │   │   ├── ownership.nr       # 所有权证明                           │
+│  │   │   └── range.nr           # 范围证明                             │
+│  │   │                                                                  │
+│  │   ├── private_swap/          # AMM 业务电路                         │
+│  │   │   ├── Nargo.toml                                                │
+│  │   │   └── src/main.nr                                               │
+│  │   │                                                                  │
+│  │   └── private_lending/       # 借贷业务电路                         │
+│  │       ├── Nargo.toml                                                │
+│  │       └── src/main.nr                                               │
+│  │                                                                      │
+│  ├── titan-zk-core/              # Zig 核心库 (链下)                   │
+│  │   ├── src/                                                          │
+│  │   │   ├── merkle.zig         # Merkle Tree 实现                     │
+│  │   │   ├── crypto.zig         # Poseidon/Pedersen                    │
+│  │   │   ├── note.zig           # Note 结构                            │
+│  │   │   └── root.zig                                                  │
+│  │   └── build.zig                                                     │
+│  │                                                                      │
+│  ├── titan-zk-witness/           # Zig Witness 构建器                  │
+│  │   ├── src/                                                          │
+│  │   │   ├── witness.zig        # Witness 构建                         │
+│  │   │   ├── public_inputs.zig  # 公开输入提取                         │
+│  │   │   └── toml.zig           # TOML 序列化                          │
+│  │   └── build.zig                                                     │
+│  │                                                                      │
+│  ├── titan-zk-cli/               # Zig CLI 编排器                      │
+│  │   ├── src/                                                          │
+│  │   │   ├── main.zig           # CLI 入口                             │
+│  │   │   ├── prover.zig         # nargo/sunspot 封装                   │
+│  │   │   ├── transaction.zig    # Solana 交易构建                      │
+│  │   │   ├── rpc.zig            # RPC 客户端                           │
+│  │   │   └── client_verify.zig  # 客户端验证                           │
+│  │   └── build.zig                                                     │
+│  │                                                                      │
+│  ├── programs/                   # 链上程序                            │
+│  │   ├── amm-verifier/          # Rust (groth16-solana)               │
+│  │   │   ├── Cargo.toml                                                │
+│  │   │   └── src/lib.rs                                                │
+│  │   │                                                                  │
+│  │   └── amm-state/             # Zig (业务状态)                       │
+│  │       ├── build.zig                                                 │
+│  │       └── src/main.zig       # CPI 调用 verifier                    │
+│  │                                                                      │
+│  └── README.md                                                         │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.47.8 总结
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                                                                         │
+│                    Zig 组件差距分析 - 总结                               │
+│                                                                         │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  已有:                                                                  │
+│  ──────                                                                 │
+│  ✅ solana-program-sdk-zig    (链上程序)                               │
+│  ✅ zig-to-yul                (EVM 合约)                               │
+│                                                                         │
+│  缺失:                                                                  │
+│  ──────                                                                 │
+│  ❌ titan-zk-core             (Merkle, Crypto, Note)                   │
+│  ❌ titan-zk-witness          (Witness 构建)                           │
+│  ❌ titan-zk-cli              (编排器, RPC)                            │
+│                                                                         │
+│  MVP 工作量:                                                            │
+│  ────────────                                                           │
+│  P0: ~500 行 Zig  (prover, witness, tx, rpc)                           │
+│  P1: ~1500 行 Zig (merkle, crypto, note, verify)                       │
+│  P2: ~2500 行 Zig (db, sync, groth16)                                  │
+│                                                                         │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  电路复用策略:                                                          │
+│  ──────────────                                                         │
+│                                                                         │
+│  ┌──────────────────────┬──────────────────────┐                       │
+│  │     可复用 (~60%)    │   业务特定 (~40%)    │                       │
+│  ├──────────────────────┼──────────────────────┤                       │
+│  │ • Merkle 验证        │ • AMM 价格公式       │                       │
+│  │ • Nullifier 计算     │ • 借贷抵押率         │                       │
+│  │ • 所有权证明         │ • 永续资金费率       │                       │
+│  │ • 范围证明           │ • 拍卖出价逻辑       │                       │
+│  └──────────────────────┴──────────────────────┘                       │
+│                                                                         │
+│  结论:                                                                  │
+│  ──────                                                                 │
+│  • 首个业务: ~400 行 Noir (含 lib)                                     │
+│  • 后续业务: ~150 行 Noir (仅业务逻辑)                                 │
+│  • 复用率: 60-70%                                                       │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
 ---
 
 ## 相关文档
