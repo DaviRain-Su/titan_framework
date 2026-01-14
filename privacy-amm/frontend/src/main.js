@@ -25,7 +25,7 @@ import {
 
 import {
     createMerkleTree,
-    syncMerkleTreeFromChain,
+    syncMerkleTreeFromRelayer,
     watchMerkleTreeUpdates,
 } from './merkleTree.js';
 
@@ -38,10 +38,10 @@ import {
 
 // Configuration
 const CONFIG = {
-    relayerUrl: 'https://privacy-amm-relayer-staging.davirain-yin.workers.dev',
-    rpcUrl: 'https://api.testnet.solana.com',
-    wsUrl: 'wss://api.testnet.solana.com',
-    network: 'testnet',
+    relayerUrl: import.meta.env.VITE_RELAYER_URL || 'https://privacy-amm-relayer-staging.davirain-yin.workers.dev',
+    rpcUrl: import.meta.env.VITE_SOLANA_RPC_URL || 'https://api.testnet.solana.com',
+    wsUrl: import.meta.env.VITE_SOLANA_WS_URL || 'wss://api.testnet.solana.com',
+    network: import.meta.env.VITE_SOLANA_NETWORK || 'testnet',
     programId: 'GZfqgHqekzR4D8TAq165XB8U2boVdK5ehEEH4n7u4Xts',
     poolAccounts: {
         poolAccount: '4K65JKhxhUtDarHarbKXLnk6Uq8XN6ocnqfPTTmweQ1D',
@@ -59,6 +59,8 @@ const CONFIG = {
     },
 };
 
+const MERKLE_STORAGE_KEY = `privacy-amm-merkle-tree-${CONFIG.poolAccounts.merkleAccount}`;
+
 // Asset IDs
 const ASSET_SOL = 0;
 const ASSET_USDC = 1;
@@ -74,6 +76,7 @@ const state = {
     merkleTree: null,
     poolState: null,
     initialized: false,
+    relayerBackfilled: false,
 };
 
 // ============================================================================
@@ -99,19 +102,31 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Load pool state
     await loadPoolState();
 
-    // Initialize Merkle tree
-    state.merkleTree = await createMerkleTree();
+    // Initialize Merkle tree from local storage
+    state.merkleTree = await loadMerkleTreeFromStorage();
+    if (!state.merkleTree) {
+        state.merkleTree = await createMerkleTree();
+    }
     console.log('Merkle tree initialized');
 
-    // Try to sync from chain
+    // Prefer relayer leaves for cross-device recovery
     try {
-        state.merkleTree = await syncMerkleTreeFromChain(
-            CONFIG.rpcUrl,
-            CONFIG.poolAccounts.merkleAccount
-        );
-        console.log('Merkle tree synced from chain');
+        const relayerTree = await syncMerkleTreeFromRelayer(CONFIG.relayerUrl);
+        state.merkleTree = relayerTree;
+        await saveMerkleTreeToStorage();
+        console.log('Merkle tree synced from relayer');
     } catch (err) {
-        console.warn('Failed to sync Merkle tree:', err);
+        console.warn('Failed to sync Merkle tree from relayer:', err);
+    }
+
+    // Check on-chain root for consistency
+    try {
+        const chainRoot = await fetchMerkleRootFromChain();
+        if (chainRoot && state.merkleTree.getRoot() !== chainRoot) {
+            console.warn('Local Merkle tree root does not match on-chain root');
+        }
+    } catch (err) {
+        console.warn('Failed to fetch Merkle root:', err);
     }
 
     state.initialized = true;
@@ -186,6 +201,7 @@ async function connectWallet() {
         updateWalletUI(true);
         updateButtonStates(true);
         updatePortfolio();
+        await syncRelayerLeavesFromLocal();
 
         // Fetch SPL Token balances for public swap
         await fetchTokenBalances();
@@ -352,16 +368,25 @@ function initSwap() {
     const fromAmountInput = document.getElementById('swap-from-amount');
     const directionBtn = document.getElementById('swap-direction');
     const swapBtn = document.getElementById('swap-btn');
+    const fromTokenSelect = document.getElementById('swap-from-token');
+    const toTokenSelect = document.getElementById('swap-to-token');
 
     fromAmountInput.addEventListener('input', updateSwapQuote);
     directionBtn.addEventListener('click', swapDirection);
     swapBtn.addEventListener('click', executeSwap);
+    fromTokenSelect.addEventListener('change', updateSwapQuote);
+    toTokenSelect.addEventListener('change', updateSwapQuote);
 }
 
 function updateSwapQuote() {
     const fromAmount = parseFloat(document.getElementById('swap-from-amount').value) || 0;
     const fromToken = document.getElementById('swap-from-token').value;
     const toToken = document.getElementById('swap-to-token').value;
+
+    if (state.utxoStorage) {
+        const { totalSol, totalUsdc } = getPrivateTotals();
+        updatePrivateSwapBalances(totalSol, totalUsdc);
+    }
 
     if (!state.poolState || fromAmount === 0) {
         document.getElementById('swap-to-amount').value = '';
@@ -433,19 +458,29 @@ async function executeSwap() {
         return;
     }
 
-    showTxModal('Syncing Merkle tree...');
+    showTxModal('Checking Merkle root...');
 
     try {
-        // CRITICAL: Sync Merkle tree from chain before swap
         try {
-            state.merkleTree = await syncMerkleTreeFromChain(
-                CONFIG.rpcUrl,
-                CONFIG.poolAccounts.merkleAccount
-            );
-            console.log(`Merkle tree synced: ${state.merkleTree.getLeafCount()} leaves`);
+            let relayerSynced = false;
+            try {
+                const relayerTree = await syncMerkleTreeFromRelayer(CONFIG.relayerUrl);
+                state.merkleTree = relayerTree;
+                await saveMerkleTreeToStorage();
+                relayerSynced = true;
+            } catch (err) {
+                console.warn('Failed to sync Merkle tree from relayer:', err);
+            }
+
+            if (!relayerSynced) {
+                const chainRoot = await fetchMerkleRootFromChain();
+                if (chainRoot && state.merkleTree.getRoot() !== chainRoot) {
+                    throw new Error('Local Merkle tree is out of sync with on-chain root. Please avoid refresh or re-deposit.');
+                }
+            }
         } catch (syncErr) {
-            console.error('Failed to sync Merkle tree:', syncErr);
-            throw new Error('Failed to sync with blockchain. Please try again.');
+            console.error('Failed to check Merkle root:', syncErr);
+            throw new Error('Failed to verify Merkle root. Please try again.');
         }
 
         updateTxStatus('Selecting UTXOs...');
@@ -476,13 +511,27 @@ async function executeSwap() {
         console.log('Balance for asset:', balanceForAsset.toString());
         console.log('=== End Debug ===');
 
-        // Select UTXOs for input
+        const leafIndexMap = buildLeafIndexMap(state.merkleTree);
+        const validUtxos = dedupeUtxosByCommitment(state.utxoStorage.getByAsset(fromAssetId))
+            .filter(u => leafIndexMap.has(u.commitment));
+
+        // Select UTXOs for input (only those present in on-chain Merkle tree)
         let selection;
         try {
-            selection = state.utxoStorage.selectUtxos(fromAssetId, fromAmountRaw);
+            const usedNullifiers = await fetchSpentNullifiers();
+            const availableUtxos = await filterSpentUtxos(validUtxos, usedNullifiers);
+            selection = selectUtxosFromList(availableUtxos, fromAmountRaw);
         } catch (selectErr) {
             console.error('selectUtxos failed:', selectErr);
-            throw new Error(`Insufficient private ${fromToken} balance. Please deposit first or recover your UTXOs. (Balance: ${balanceForAsset.toString()}, Need: ${fromAmountRaw})`);
+            if (selectErr.message && selectErr.message.includes('Insufficient balance')) {
+                const validBalance = validUtxos.reduce((sum, u) => sum + BigInt(u.amount), 0n);
+                console.log('Valid UTXOs for swap:', validUtxos.map(u => u.commitment));
+                throw new Error(
+                    `Insufficient private ${fromToken} balance. ` +
+                    `Local balance: ${validBalance.toString()}, Need: ${fromAmountRaw}.`
+                );
+            }
+            throw selectErr;
         }
 
         if (selection.utxos.length === 0) {
@@ -491,35 +540,36 @@ async function executeSwap() {
 
         // Get all unspent UTXOs of the same asset type (circuit requires same-asset inputs)
         const allUtxos = state.utxoStorage.getUnspent();
-        const sameAssetUtxos = allUtxos.filter(u => u.assetId === fromAssetId);
+        const usedNullifiers = await fetchSpentNullifiers();
+        const sameAssetUtxos = await filterSpentUtxos(validUtxos, usedNullifiers);
 
         // Check if we have at least 2 UTXOs of the same asset (circuit requirement)
         if (sameAssetUtxos.length < 2) {
+            console.log('Valid UTXOs for swap:', validUtxos.map(u => u.commitment));
             throw new Error(
                 `Private swap requires at least 2 ${fromToken} UTXOs. ` +
-                `You currently have ${sameAssetUtxos.length} ${fromToken} UTXO(s). ` +
+                `You currently have ${sameAssetUtxos.length} unspent ${fromToken} UTXO(s). ` +
                 `Please make ${2 - sameAssetUtxos.length} more ${fromToken} deposit(s) first, or use Public Swap instead.`
             );
         }
 
         updateTxStatus('Validating UTXOs...');
 
-        // Validate that UTXOs are in the Merkle tree
-        // If leafIndex is wrong, try to find the correct index
-        for (const utxo of selection.utxos) {
+        const ensureLeafIndex = async (utxo) => {
             const treeLeaves = state.merkleTree.leaves;
+            const normalizedIndex = Number(utxo.leafIndex);
+
             console.log(`Validating UTXO: commitment=${utxo.commitment.slice(0, 20)}..., leafIndex=${utxo.leafIndex}`);
 
-            // First check if the stored leafIndex is correct
-            if (utxo.leafIndex !== undefined && utxo.leafIndex < treeLeaves.length) {
-                const treeCommitment = treeLeaves[utxo.leafIndex];
+            if (Number.isInteger(normalizedIndex) && normalizedIndex >= 0 && normalizedIndex < treeLeaves.length) {
+                const treeCommitment = treeLeaves[normalizedIndex];
                 if (treeCommitment === utxo.commitment) {
-                    console.log(`UTXO validated at leafIndex ${utxo.leafIndex}`);
-                    continue; // Valid!
+                    utxo.leafIndex = normalizedIndex;
+                    console.log(`UTXO validated at leafIndex ${normalizedIndex}`);
+                    return;
                 }
             }
 
-            // LeafIndex is wrong - try to find the commitment in the tree
             console.log(`LeafIndex ${utxo.leafIndex} invalid, searching tree for commitment...`);
             let foundIndex = -1;
             for (let i = 0; i < treeLeaves.length; i++) {
@@ -532,19 +582,24 @@ async function executeSwap() {
             if (foundIndex >= 0) {
                 console.log(`Found commitment at index ${foundIndex}, updating UTXO`);
                 utxo.leafIndex = foundIndex;
-                // Save the corrected leafIndex
                 await state.utxoStorage.save();
-            } else {
-                console.error('Commitment not found in tree:', {
-                    stored: utxo.commitment,
-                    treeSize: treeLeaves.length,
-                    firstFewLeaves: treeLeaves.slice(0, 5),
-                });
-                throw new Error(
-                    `UTXO commitment not found on-chain. This UTXO may not have been deposited successfully. ` +
-                    `Try using Auto-Recover to find your UTXOs.`
-                );
+                return;
             }
+
+            console.error('Commitment not found in tree:', {
+                stored: utxo.commitment,
+                treeSize: treeLeaves.length,
+                firstFewLeaves: treeLeaves.slice(0, 5),
+            });
+            throw new Error(
+                `UTXO commitment not found on-chain. This UTXO may not have been deposited successfully. ` +
+                `Try using Auto-Recover to find your UTXOs.`
+            );
+        };
+
+        // Validate that UTXOs are in the Merkle tree
+        for (const utxo of selection.utxos) {
+            await ensureLeafIndex(utxo);
         }
 
         updateTxStatus('Building input UTXOs...');
@@ -571,6 +626,7 @@ async function executeSwap() {
             }
 
             // Get Merkle proof for this UTXO
+            await ensureLeafIndex(utxo);
             proof = state.merkleTree.getProof(utxo.leafIndex);
             const treeCommitment = state.merkleTree.leaves[utxo.leafIndex];
             console.log(`Input UTXO ${i}: leafIndex=${utxo.leafIndex}, amount=${utxo.amount}, assetId=${utxo.assetId}`);
@@ -676,6 +732,11 @@ async function executeSwap() {
         const result = await response.json();
 
         if (result.success) {
+            for (const commitment of proofResult.outputCommitments) {
+                await state.merkleTree.insert(commitment);
+            }
+            await saveMerkleTreeToStorage();
+
             // Mark input UTXOs as spent
             for (const utxo of selection.utxos) {
                 await state.utxoStorage.markSpent(utxo.commitment, proofResult.inputNullifiers[0]);
@@ -689,7 +750,7 @@ async function executeSwap() {
                         amount: outputUtxos[i].amount,
                         assetId: parseInt(outputUtxos[i].assetId),
                         blinding: outputUtxos[i].blinding,
-                        leafIndex: state.merkleTree.getLeafCount() + i,
+                        leafIndex: state.merkleTree.getLeafCount() - 2 + i,
                     });
                 }
             }
@@ -1653,16 +1714,7 @@ function updatePortfolio() {
     console.log('All UTXOs (including spent):', state.utxoStorage.getAll());
 
     // Calculate totals
-    let totalSol = 0n;
-    let totalUsdc = 0n;
-    let totalLp = 0n;
-
-    utxos.forEach(utxo => {
-        const amount = BigInt(utxo.amount);
-        if (utxo.assetId === ASSET_SOL) totalSol += amount;
-        if (utxo.assetId === ASSET_USDC) totalUsdc += amount;
-        if (utxo.assetId === ASSET_LP) totalLp += amount;
-    });
+    const { totalSol, totalUsdc, totalLp } = getPrivateTotals(utxos);
 
     // Update UI
     const solPrice = 150; // Mock price
@@ -1678,19 +1730,196 @@ function updatePortfolio() {
     } else {
         listContent.innerHTML = `
             <div class="asset-item">SOL: ${(Number(totalSol) / 1e9).toFixed(4)}</div>
-            <div class="asset-item">USDC: ${(Number(totalUsdc) / 1e6).toFixed(2)}</div>
+            <div class="asset-item">tUSDC: ${(Number(totalUsdc) / 1e6).toFixed(2)}</div>
             ${totalLp > 0n ? `<div class="asset-item">LP: ${(Number(totalLp) / 1e6).toFixed(2)}</div>` : ''}
         `;
     }
 
     // Update balances in other tabs
-    document.getElementById('from-balance').textContent = (Number(totalSol) / 1e9).toFixed(4);
+    updatePrivateSwapBalances(totalSol, totalUsdc);
     document.getElementById('lp-balance').textContent = (Number(totalLp) / 1e6).toFixed(2);
 }
 
+async function syncRelayerLeavesFromLocal() {
+    if (state.relayerBackfilled || !state.utxoStorage) {
+        return;
+    }
+
+    try {
+        const response = await fetch(`${CONFIG.relayerUrl}/merkle-leaves`);
+        if (!response.ok) {
+            return;
+        }
+
+        const result = await response.json();
+        const leaves = result.leaves || [];
+        const commitments = dedupeUtxosByCommitment(state.utxoStorage.getAll()).map(u => u.commitment);
+        if (commitments.length === 0) {
+            return;
+        }
+
+        const leafSet = new Set(leaves);
+        const missing = commitments.filter(c => !leafSet.has(c));
+        if (missing.length === 0) {
+            state.relayerBackfilled = true;
+            return;
+        }
+
+        await fetch(`${CONFIG.relayerUrl}/merkle-leaves`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ commitments: missing }),
+        });
+
+        state.relayerBackfilled = true;
+    } catch (err) {
+        console.warn('Failed to backfill relayer leaves:', err);
+    }
+}
+
+function getPrivateTotals(utxosOverride) {
+    const utxos = utxosOverride || state.utxoStorage?.getUnspent() || [];
+    let totalSol = 0n;
+    let totalUsdc = 0n;
+    let totalLp = 0n;
+
+    utxos.forEach(utxo => {
+        const amount = BigInt(utxo.amount);
+        if (utxo.assetId === ASSET_SOL) totalSol += amount;
+        if (utxo.assetId === ASSET_USDC) totalUsdc += amount;
+        if (utxo.assetId === ASSET_LP) totalLp += amount;
+    });
+
+    return { totalSol, totalUsdc, totalLp };
+}
+
+function updatePrivateSwapBalances(totalSol, totalUsdc) {
+    const fromToken = document.getElementById('swap-from-token')?.value || 'SOL';
+    const toToken = document.getElementById('swap-to-token')?.value || 'USDC';
+
+    const solBalance = (Number(totalSol) / 1e9).toFixed(4);
+    const usdcBalance = (Number(totalUsdc) / 1e6).toFixed(2);
+
+    document.getElementById('from-balance').textContent = fromToken === 'SOL' ? solBalance : usdcBalance;
+    document.getElementById('to-balance').textContent = toToken === 'SOL' ? solBalance : usdcBalance;
+}
+
+async function filterSpentUtxos(utxos, spentNullifiers) {
+    if (!spentNullifiers || spentNullifiers.length === 0) {
+        return utxos;
+    }
+
+    const spentSet = new Set(spentNullifiers);
+    const filtered = [];
+    const leafIndexMap = buildLeafIndexMap(state.merkleTree);
+
+    for (const utxo of utxos) {
+        const treeLeaves = state.merkleTree.leaves;
+        const leafIndexValid =
+            Number.isInteger(utxo.leafIndex) &&
+            utxo.leafIndex >= 0 &&
+            utxo.leafIndex < treeLeaves.length &&
+            treeLeaves[utxo.leafIndex] === utxo.commitment;
+
+        if (!leafIndexValid) {
+            const mappedIndex = leafIndexMap.get(utxo.commitment);
+            if (Number.isInteger(mappedIndex)) {
+                utxo.leafIndex = mappedIndex;
+                await state.utxoStorage.save();
+            } else {
+                console.log('Skipping UTXO missing from Merkle tree:', utxo.commitment);
+                continue;
+            }
+        }
+
+        let proof;
+        try {
+            proof = state.merkleTree.getProof(utxo.leafIndex);
+        } catch (err) {
+            console.warn('Failed to get Merkle proof for UTXO:', {
+                commitment: utxo.commitment,
+                leafIndex: utxo.leafIndex,
+            });
+            continue;
+        }
+        const nullifier = await computeNullifier(
+            utxo.commitment,
+            state.privateKey,
+            proof.pathIndices[0]
+        );
+
+        if (spentSet.has(nullifier)) {
+            console.log('UTXO marked spent by nullifier:', {
+                commitment: utxo.commitment,
+                leafIndex: utxo.leafIndex,
+            });
+            continue;
+        }
+
+        filtered.push(utxo);
+    }
+
+    return filtered;
+}
+
+async function loadMerkleTreeFromStorage() {
+    try {
+        const data = localStorage.getItem(MERKLE_STORAGE_KEY);
+        if (!data) {
+            return null;
+        }
+
+        const tree = await createMerkleTree();
+        await tree.deserialize(data);
+        return tree;
+    } catch (err) {
+        console.warn('Failed to load Merkle tree from storage:', err);
+        return null;
+    }
+}
+
+async function saveMerkleTreeToStorage() {
+    try {
+        if (!state.merkleTree) {
+            return;
+        }
+        localStorage.setItem(MERKLE_STORAGE_KEY, state.merkleTree.serialize());
+    } catch (err) {
+        console.warn('Failed to save Merkle tree to storage:', err);
+    }
+}
+
+async function fetchMerkleRootFromChain() {
+    const response = await fetch(CONFIG.rpcUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'getAccountInfo',
+            params: [CONFIG.poolAccounts.merkleAccount, { encoding: 'base64' }],
+        }),
+    });
+
+    const result = await response.json();
+    if (!result.result || !result.result.value) {
+        return null;
+    }
+
+    const data = Buffer.from(result.result.value.data[0], 'base64');
+    const rootBytes = data.slice(0, 32);
+
+    let rootValue = BigInt(0);
+    for (let i = 31; i >= 0; i--) {
+        rootValue = rootValue * 256n + BigInt(rootBytes[i]);
+    }
+
+    return rootValue.toString();
+}
+
 /**
- * Clear local UTXOs and rebuild from chain
- * Use this when local data is out of sync with on-chain state
+ * Clear local UTXOs and rebuild from relayer storage
+ * Use this when local data is out of sync with relayer state
  */
 async function clearAndRebuildUtxos() {
     if (!state.wallet || !state.privateKey || !state.zkPubkey) {
@@ -1698,7 +1927,7 @@ async function clearAndRebuildUtxos() {
         return;
     }
 
-    if (!confirm('This will clear your local UTXO data and try to recover from the blockchain. Continue?')) {
+    if (!confirm('This will clear your local UTXO data and try to recover from the relayer. Continue?')) {
         return;
     }
 
@@ -1709,11 +1938,13 @@ async function clearAndRebuildUtxos() {
         await state.utxoStorage.clear();
         console.log('Cleared local UTXO storage');
 
+        localStorage.removeItem(MERKLE_STORAGE_KEY);
+
         // Reset deposit nonce to 0 to scan from beginning
         resetDepositNonce();
         console.log('Reset deposit nonce to 0');
 
-        updateTxStatus('Rebuilding from chain...');
+        updateTxStatus('Rebuilding from relayer...');
 
         // Now run the recovery function
         await recoverUtxos();
@@ -1726,7 +1957,7 @@ async function clearAndRebuildUtxos() {
 
 /**
  * UTXO Recovery Function
- * Scans on-chain Merkle tree commitments and tries to find user's UTXOs
+ * Scans relayer Merkle leaves and tries to find user's UTXOs
  * using deterministic blinding derivation
  */
 async function recoverUtxos() {
@@ -1738,27 +1969,29 @@ async function recoverUtxos() {
     showTxModal('Starting UTXO recovery...');
 
     try {
-        // Step 1: Sync Merkle tree from chain to get all commitments
-        updateTxStatus('Syncing Merkle tree from chain...');
-        const merkleTree = await syncMerkleTreeFromChain(
-            CONFIG.rpcUrl,
-            CONFIG.poolAccounts.merkleAccount
-        );
+        // Step 1: Sync Merkle tree from relayer to get all commitments
+        updateTxStatus('Syncing Merkle tree from relayer...');
+        const merkleTree = await syncMerkleTreeFromRelayer(CONFIG.relayerUrl);
         state.merkleTree = merkleTree;
+        await saveMerkleTreeToStorage();
 
         const totalLeaves = merkleTree.getLeafCount();
-        console.log(`Found ${totalLeaves} commitments on chain`);
+        console.log(`Found ${totalLeaves} commitments in relayer`);
 
         if (totalLeaves === 0) {
-            showTxError('No commitments found on chain');
+            showTxError('No commitments found in relayer');
             return;
         }
 
-        // Step 2: Get nullifier set to check which UTXOs are spent
+        // Step 2: Fix local leafIndex values from relayer data
+        updateTxStatus('Syncing local UTXO indexes...');
+        await syncLocalUtxoLeafIndices(merkleTree);
+
+        // Step 3: Get nullifier set to check which UTXOs are spent
         updateTxStatus('Checking nullifier set...');
         const spentNullifiers = await fetchSpentNullifiers();
 
-        // Step 3: Scan each commitment
+        // Step 4: Scan each commitment
         updateTxStatus(`Scanning ${totalLeaves} commitments...`);
         const recoveredUtxos = [];
 
@@ -1774,38 +2007,38 @@ async function recoverUtxos() {
             50000000, 100000000, 500000000, 1000000000,
         ];
 
-        for (let leafIndex = 0; leafIndex < totalLeaves; leafIndex++) {
-            const commitment = merkleTree.leaves[leafIndex];
-            updateTxStatus(`Scanning commitment ${leafIndex + 1}/${totalLeaves}...`);
+        const existingCommitments = new Set(state.utxoStorage.getAll().map(u => u.commitment));
+        const recoveryConcurrency = 4;
+        const commitments = merkleTree.leaves.slice(0, totalLeaves);
 
-            // Check if already in our storage
-            const existingUtxo = state.utxoStorage.getAll().find(u => u.commitment === commitment);
-            if (existingUtxo) {
-                console.log(`Commitment ${leafIndex} already in storage`);
-                continue;
-            }
-
-            // Try SOL asset (assetId = 0)
-            for (const amount of solAmounts) {
-                const result = await scanForUtxo(commitment, state.privateKey, state.zkPubkey, amount, ASSET_SOL, 100);
-                if (result) {
-                    console.log(`Recovered SOL UTXO: amount=${amount}, nonce=${result.nonce}`);
-                    recoveredUtxos.push({
-                        commitment,
-                        amount: amount.toString(),
-                        assetId: ASSET_SOL,
-                        blinding: result.blinding,
-                        leafIndex,
-                        depositNonce: result.nonce,
-                        recovered: true,
-                    });
-                    break;
+        await runRecoveryScan(
+            commitments,
+            recoveryConcurrency,
+            async (commitment, leafIndex) => {
+                if (existingCommitments.has(commitment)) {
+                    return;
                 }
-            }
 
-            // Try USDC asset (assetId = 1)
-            const existingSol = recoveredUtxos.find(u => u.commitment === commitment);
-            if (!existingSol) {
+                // Try SOL asset (assetId = 0)
+                for (const amount of solAmounts) {
+                    const result = await scanForUtxo(commitment, state.privateKey, state.zkPubkey, amount, ASSET_SOL, 100);
+                    if (result) {
+                        console.log(`Recovered SOL UTXO: amount=${amount}, nonce=${result.nonce}`);
+                        recoveredUtxos.push({
+                            commitment,
+                            amount: amount.toString(),
+                            assetId: ASSET_SOL,
+                            blinding: result.blinding,
+                            leafIndex,
+                            depositNonce: result.nonce,
+                            recovered: true,
+                        });
+                        existingCommitments.add(commitment);
+                        return;
+                    }
+                }
+
+                // Try USDC asset (assetId = 1)
                 for (const amount of usdcAmounts) {
                     const result = await scanForUtxo(commitment, state.privateKey, state.zkPubkey, amount, ASSET_USDC, 100);
                     if (result) {
@@ -1819,13 +2052,17 @@ async function recoverUtxos() {
                             depositNonce: result.nonce,
                             recovered: true,
                         });
-                        break;
+                        existingCommitments.add(commitment);
+                        return;
                     }
                 }
+            },
+            (completed, total) => {
+                updateTxStatus(`Scanning commitment ${completed}/${total}...`);
             }
-        }
+        );
 
-        // Step 4: Add recovered UTXOs to storage
+        // Step 5: Add recovered UTXOs to storage
         updateTxStatus(`Recovered ${recoveredUtxos.length} UTXOs, saving...`);
 
         for (const utxo of recoveredUtxos) {
@@ -1845,6 +2082,8 @@ async function recoverUtxos() {
                 console.log(`Skipping spent UTXO: ${utxo.commitment.slice(0, 10)}...`);
             }
         }
+
+        await state.utxoStorage.dedupe();
 
         // Update nonce to max found + 1
         const maxNonce = Math.max(0, ...recoveredUtxos.map(u => u.depositNonce));
@@ -1879,21 +2118,13 @@ async function recoverUtxos() {
  */
 async function fetchSpentNullifiers() {
     try {
-        const { Connection, PublicKey } = window.solanaWeb3 || await loadSolanaWeb3();
-        const connection = new Connection(CONFIG.rpcUrl, 'confirmed');
-        const nullifierPubkey = new PublicKey(CONFIG.poolAccounts.nullifierAccount);
-
-        const accountInfo = await connection.getAccountInfo(nullifierPubkey);
-        if (!accountInfo || !accountInfo.data) {
+        const response = await fetch(`${CONFIG.relayerUrl}/nullifiers`);
+        if (!response.ok) {
             return [];
         }
 
-        // Parse nullifier set - it's a bitmap, so we need to extract which nullifiers are set
-        // For now return empty array - full implementation would parse the bitmap
-        // The on-chain nullifier is stored as Poseidon hash values
-        console.log('Nullifier account size:', accountInfo.data.length);
-
-        return [];
+        const result = await response.json();
+        return result.nullifiers || [];
     } catch (err) {
         console.error('Failed to fetch nullifiers:', err);
         return [];
@@ -1918,6 +2149,14 @@ async function executeDeposit() {
     showTxModal('Computing commitment...');
 
     try {
+        try {
+            const relayerTree = await syncMerkleTreeFromRelayer(CONFIG.relayerUrl);
+            state.merkleTree = relayerTree;
+            await saveMerkleTreeToStorage();
+        } catch (err) {
+            console.warn('Failed to sync Merkle tree from relayer:', err);
+        }
+
         const assetId = token === 'SOL' ? ASSET_SOL : ASSET_USDC;
         const amountRaw = token === 'SOL' ? Math.floor(amount * 1e9) : Math.floor(amount * 1e6);
 
@@ -2020,21 +2259,45 @@ async function executeDeposit() {
             lastValidBlockHeight,
         });
 
+        const statusResponse = await connection.getSignatureStatuses([signature], { searchTransactionHistory: true });
+        const status = statusResponse.value[0];
+        if (status && status.err) {
+            throw new Error(`Deposit failed on-chain: ${JSON.stringify(status.err)}`);
+        }
+
+        const previousTreeState = state.merkleTree.serialize();
+        await state.merkleTree.insert(commitment);
+
+        const chainRoot = await fetchMerkleRootFromChain();
+        if (chainRoot && state.merkleTree.getRoot() !== chainRoot) {
+            console.warn('Deposit confirmed, but Merkle root mismatch. Local tree may be out of sync.');
+            await state.merkleTree.deserialize(previousTreeState);
+        }
+
+        await saveMerkleTreeToStorage();
+
         // Add UTXO to local storage (with nonce for reference)
         await state.utxoStorage.addUtxo({
             commitment,
             amount: amountRaw.toString(),
             assetId,
             blinding,
-            leafIndex: state.merkleTree.getLeafCount(),
+            leafIndex: state.merkleTree.getLeafCount() - 1,
             depositNonce,  // Store nonce for recovery verification
         });
 
+        try {
+            await fetch(`${CONFIG.relayerUrl}/merkle-leaves`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ commitment }),
+            });
+        } catch (err) {
+            console.warn('Failed to record commitment in relayer:', err);
+        }
+
         // Increment the deposit nonce for next deposit
         incrementDepositNonce();
-
-        // Update local Merkle tree
-        await state.merkleTree.insert(commitment);
 
         // Refresh balances
         updatePortfolio();
@@ -2091,12 +2354,13 @@ async function loadSolanaWeb3() {
 }
 
 async function executeWithdraw() {
-    const amount = parseFloat(document.getElementById('withdraw-amount').value);
-    const recipientWallet = document.getElementById('withdraw-recipient').value;
+    const amountInput = document.getElementById('withdraw-amount');
+    const amount = parseFloat(amountInput.value);
+    const recipientWalletInput = document.getElementById('withdraw-recipient').value;
     const token = document.getElementById('withdraw-token')?.value || 'SOL';
 
-    if (!amount || !recipientWallet) {
-        alert('Please enter amount and recipient');
+    if (!recipientWalletInput && !state.publicKey) {
+        alert('Please connect wallet first');
         return;
     }
 
@@ -2110,7 +2374,22 @@ async function executeWithdraw() {
 
     try {
         const assetId = token === 'SOL' ? ASSET_SOL : ASSET_USDC;
-        const amountRaw = token === 'SOL' ? Math.floor(amount * 1e9) : Math.floor(amount * 1e6);
+
+        const availableUtxos = state.utxoStorage.getByAsset(assetId);
+        if (availableUtxos.length === 0) {
+            throw new Error('No private balance available for withdrawal.');
+        }
+
+        let amountRaw;
+        if (!amount || Number.isNaN(amount)) {
+            const selected = availableUtxos[0];
+            amountRaw = Number(selected.amount);
+            amountInput.value = token === 'SOL'
+                ? (Number(amountRaw) / 1e9).toString()
+                : (Number(amountRaw) / 1e6).toString();
+        } else {
+            amountRaw = token === 'SOL' ? Math.floor(amount * 1e9) : Math.floor(amount * 1e6);
+        }
 
         // Select UTXOs
         const selection = state.utxoStorage.selectUtxos(assetId, amountRaw);
@@ -2119,7 +2398,23 @@ async function executeWithdraw() {
             throw new Error('Insufficient private balance');
         }
 
-        const utxo = selection.utxos[0];
+        let utxo = selection.utxos[0];
+        if (BigInt(utxo.amount) !== BigInt(amountRaw)) {
+            const exact = availableUtxos.find(u => BigInt(u.amount) === BigInt(amountRaw));
+            if (exact) {
+                utxo = exact;
+            } else {
+                const options = availableUtxos.map(u =>
+                    token === 'SOL'
+                        ? (Number(u.amount) / 1e9).toString()
+                        : (Number(u.amount) / 1e6).toString()
+                );
+                throw new Error(
+                    'Partial withdraw is not supported. Please withdraw the full UTXO amount. ' +
+                    `Available amounts: ${options.join(', ')}`
+                );
+            }
+        }
 
         // Compute nullifier
         const commitment = await computeCommitment(
@@ -2139,7 +2434,7 @@ async function executeWithdraw() {
 
         // Get recipient's ATA (Associated Token Account)
         const { PublicKey } = window.solanaWeb3 || await loadSolanaWeb3();
-        const recipientPubkey = new PublicKey(recipientWallet);
+        const recipientPubkey = new PublicKey(recipientWalletInput || state.publicKey);
         const tokenMint = token === 'SOL'
             ? new PublicKey(CONFIG.tokenAccounts.wsolMint)
             : new PublicKey(CONFIG.tokenAccounts.usdcMint);
@@ -2151,8 +2446,7 @@ async function executeWithdraw() {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                proof: {}, // Withdraw doesn't need full ZK proof for basic version
-                publicSignals: [],
+                root: state.merkleTree.getRoot(),
                 nullifier,
                 recipient: recipientTokenAccount.toBase58(),  // Send ATA address, not wallet
                 amount: amountRaw,
@@ -2259,38 +2553,41 @@ async function executeManualRecovery() {
         const assetId = token === 'SOL' ? ASSET_SOL : ASSET_USDC;
         const amountRaw = token === 'SOL' ? Math.floor(amount * 1e9) : Math.floor(amount * 1e6);
 
-        // Sync Merkle tree from chain
+        // Sync Merkle tree from relayer
         updateTxStatus('Syncing Merkle tree...');
-        const merkleTree = await syncMerkleTreeFromChain(
-            CONFIG.rpcUrl,
-            CONFIG.poolAccounts.merkleAccount
-        );
+        const merkleTree = await syncMerkleTreeFromRelayer(CONFIG.relayerUrl);
         state.merkleTree = merkleTree;
+        await saveMerkleTreeToStorage();
 
         const totalLeaves = merkleTree.getLeafCount();
         console.log(`Found ${totalLeaves} commitments, scanning for amount ${amountRaw}...`);
 
         if (totalLeaves === 0) {
-            showTxError('No commitments found on chain');
+            showTxError('No commitments found in relayer');
             return;
         }
 
+        await syncLocalUtxoLeafIndices(merkleTree);
+
         // Scan each commitment
         let foundCount = 0;
-        for (let leafIndex = 0; leafIndex < totalLeaves; leafIndex++) {
-            const commitment = merkleTree.leaves[leafIndex];
-            updateTxStatus(`Scanning commitment ${leafIndex + 1}/${totalLeaves}...`);
+        const existingCommitments = new Set(state.utxoStorage.getAll().map(u => u.commitment));
+        const recoveryConcurrency = 4;
+        const commitments = merkleTree.leaves.slice(0, totalLeaves);
 
-            // Check if already in our storage
-            const existingUtxo = state.utxoStorage.getAll().find(u => u.commitment === commitment);
-            if (existingUtxo) {
-                console.log(`Commitment ${leafIndex} already in storage`);
-                continue;
-            }
+        await runRecoveryScan(
+            commitments,
+            recoveryConcurrency,
+            async (commitment, leafIndex) => {
+                if (existingCommitments.has(commitment)) {
+                    return;
+                }
 
-            // Try to find UTXO with specified amount
-            const result = await scanForUtxo(commitment, state.privateKey, state.zkPubkey, amountRaw, assetId, 200);
-            if (result) {
+                const result = await scanForUtxo(commitment, state.privateKey, state.zkPubkey, amountRaw, assetId, 200);
+                if (!result) {
+                    return;
+                }
+
                 console.log(`Found UTXO! nonce=${result.nonce}`);
 
                 await state.utxoStorage.addUtxo({
@@ -2303,15 +2600,18 @@ async function executeManualRecovery() {
                     recovered: true,
                 });
 
-                // Update nonce
+                existingCommitments.add(commitment);
+                foundCount++;
+
                 const currentNonce = getDepositNonce();
                 if (result.nonce >= currentNonce) {
                     localStorage.setItem('privacy-amm-deposit-nonce', (result.nonce + 1).toString());
                 }
-
-                foundCount++;
+            },
+            (completed, total) => {
+                updateTxStatus(`Scanning commitment ${completed}/${total}...`);
             }
-        }
+        );
 
         // Refresh UI
         updatePortfolio();
@@ -2329,6 +2629,100 @@ async function executeManualRecovery() {
         console.error('Manual recovery failed:', err);
         showTxError('Recovery failed: ' + err.message);
     }
+}
+
+function buildLeafIndexMap(merkleTree) {
+    const map = new Map();
+    for (let i = 0; i < merkleTree.leaves.length; i++) {
+        map.set(merkleTree.leaves[i], i);
+    }
+    return map;
+}
+
+async function syncLocalUtxoLeafIndices(merkleTree) {
+    const leafIndexMap = buildLeafIndexMap(merkleTree);
+    const allUtxos = state.utxoStorage.getAll();
+    let updated = false;
+
+    for (const utxo of allUtxos) {
+        const index = leafIndexMap.get(utxo.commitment);
+        if (index === undefined) {
+            continue;
+        }
+
+        const normalizedIndex = Number(utxo.leafIndex);
+        if (!Number.isInteger(normalizedIndex) || normalizedIndex !== index) {
+            utxo.leafIndex = index;
+            updated = true;
+        }
+    }
+
+    if (updated) {
+        await state.utxoStorage.save();
+    }
+}
+
+async function runRecoveryScan(commitments, concurrency, worker, onProgress) {
+    const total = commitments.length;
+    let cursor = 0;
+    let completed = 0;
+
+    const runners = Array.from({ length: concurrency }, async () => {
+        while (true) {
+            const index = cursor++;
+            if (index >= total) {
+                return;
+            }
+
+            await worker(commitments[index], index);
+
+            completed++;
+            if (onProgress) {
+                onProgress(completed, total);
+            }
+        }
+    });
+
+    await Promise.all(runners);
+}
+
+function selectUtxosFromList(utxos, targetAmount) {
+    const available = [...utxos].sort((a, b) => {
+        const diff = BigInt(b.amount) - BigInt(a.amount);
+        if (diff > 0n) return 1;
+        if (diff < 0n) return -1;
+        return 0;
+    });
+
+    const selected = [];
+    let total = 0n;
+    const target = BigInt(targetAmount);
+
+    for (const utxo of available) {
+        if (total >= target) break;
+        selected.push(utxo);
+        total += BigInt(utxo.amount);
+    }
+
+    if (total < target) {
+        throw new Error('Insufficient balance');
+    }
+
+    return {
+        utxos: selected,
+        total: total.toString(),
+        change: (total - target).toString(),
+    };
+}
+
+function dedupeUtxosByCommitment(utxos) {
+    const map = new Map();
+    for (const utxo of utxos) {
+        if (!map.has(utxo.commitment)) {
+            map.set(utxo.commitment, utxo);
+        }
+    }
+    return Array.from(map.values());
 }
 
 function hideAllModals() {

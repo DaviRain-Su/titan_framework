@@ -102,14 +102,15 @@ export class MerkleTree {
      * Get Merkle proof for a leaf
      */
     getProof(leafIndex) {
-        if (leafIndex >= this.nextIndex) {
+        const index = Number(leafIndex);
+        if (!Number.isInteger(index) || index < 0 || index >= this.nextIndex) {
             throw new Error('Leaf index out of bounds');
         }
 
         const pathElements = [];
         const pathIndices = [];
 
-        let currentIndex = leafIndex;
+        let currentIndex = index;
 
         for (let level = 0; level < MERKLE_DEPTH; level++) {
             const siblingIndex = currentIndex ^ 1;
@@ -248,6 +249,26 @@ export async function syncMerkleTreeFromChain(rpcUrl, merkleAccountPubkey) {
         console.error('Failed to sync Merkle tree:', err);
         return createMerkleTree();
     }
+}
+
+/**
+ * Sync Merkle tree from relayer storage
+ */
+export async function syncMerkleTreeFromRelayer(relayerUrl) {
+    const response = await fetch(`${relayerUrl}/merkle-leaves`);
+    if (!response.ok) {
+        throw new Error(`Relayer returned ${response.status}`);
+    }
+
+    const result = await response.json();
+    const leaves = result.leaves || [];
+
+    const tree = await createMerkleTree();
+    for (const commitment of leaves) {
+        await tree.insert(commitment);
+    }
+
+    return tree;
 }
 
 /**

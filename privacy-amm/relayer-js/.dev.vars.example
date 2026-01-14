@@ -1,0 +1,7 @@
+SOLANA_RPC_URL=https://api.testnet.solana.com
+PROGRAM_ID=GZfqgHqekzR4D8TAq165XB8U2boVdK5ehEEH4n7u4Xts
+RELAYER_SECRET_KEY=[1,2,3]
+# Optional if using proxy
+# RPC_AUTH_TOKEN=local-secret
+# Optional for KV-backed Merkle leaves
+# MERKLE_KV=unused

@@ -118,7 +118,7 @@
                                 <input type="number" id="swap-from-amount" placeholder="0.0" step="0.000001">
                                 <select id="swap-from-token">
                                     <option value="SOL">SOL</option>
-                                    <option value="USDC">USDC</option>
+                                    <option value="USDC">tUSDC</option>
                                 </select>
                             </div>
                             <div class="balance">Private Balance: <span id="from-balance">0.00</span></div>
@@ -131,7 +131,7 @@
                             <div class="token-input">
                                 <input type="number" id="swap-to-amount" placeholder="0.0" readonly>
                                 <select id="swap-to-token">
-                                    <option value="USDC">USDC</option>
+                                    <option value="USDC">tUSDC</option>
                                     <option value="SOL">SOL</option>
                                 </select>
                             </div>
@@ -141,7 +141,7 @@
                         <div class="swap-info">
                             <div class="info-row">
                                 <span>Rate</span>
-                                <span id="swap-rate">1 SOL = 150 USDC</span>
+                                <span id="swap-rate">1 SOL = 150 tUSDC</span>
                             </div>
                             <div class="info-row">
                                 <span>Price Impact</span>
@@ -275,10 +275,10 @@
                     <div class="recovery-section" style="margin-top: 1.5rem; padding-top: 1.5rem; border-top: 1px solid var(--border-color);">
                         <h3 style="font-size: 14px; margin-bottom: 0.5rem;">Lost your UTXOs?</h3>
                         <p style="font-size: 12px; color: var(--text-secondary); margin-bottom: 0.75rem;">
-                            If you cleared browser data or switched devices, click below to scan the blockchain and recover your private assets.
+                            If you cleared browser data or switched devices, click below to recover from the relayer.
                         </p>
                         <button id="clear-rebuild-btn" class="btn btn-primary" style="width: 100%; margin-bottom: 0.5rem;" disabled>
-                            Clear & Rebuild from Chain
+                            Clear & Rebuild from Relayer
                         </button>
                         <button id="recover-utxo-btn" class="btn btn-secondary" style="width: 100%; margin-bottom: 0.5rem;" disabled>
                             Auto-Recover (Common Amounts)
@@ -379,12 +379,12 @@
                         </div>
                     </div>
                     <div class="input-group">
-                        <label>Recipient Wallet Address</label>
-                        <input type="text" id="withdraw-recipient" placeholder="Solana wallet address...">
+                        <label>Recipient Wallet Address (Optional)</label>
+                        <input type="text" id="withdraw-recipient" placeholder="Defaults to connected wallet">
                     </div>
                     <p class="info-text">
-                        This will transfer wSOL/tUSDC from the private pool to the recipient's
-                        token account. The recipient must have the corresponding token account.
+                        Leave blank to withdraw to your connected wallet. The recipient must have the corresponding
+                        token account.
                     </p>
                     <button id="confirm-withdraw" class="btn btn-primary btn-large">
                         Withdraw
@@ -413,7 +413,7 @@
                         </div>
                     </div>
                     <p style="font-size: 11px; color: var(--text-secondary); margin-bottom: 1rem;">
-                        Note: This only works for deposits made after the recovery update.
+                        Note: This only works for deposits recorded by the relayer.
                         Deposits made with the old version cannot be recovered.
                     </p>
                     <button id="confirm-manual-recovery" class="btn btn-primary btn-large">

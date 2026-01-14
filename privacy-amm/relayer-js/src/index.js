@@ -34,6 +34,16 @@ import {
     RELAYER_CONFIG,
 } from './keypair.js';
 
+import { Buffer } from 'buffer';
+
+import {
+    Connection,
+    Keypair,
+    PublicKey,
+    Transaction,
+    TransactionInstruction,
+} from '@solana/web3.js';
+
 // Pool accounts (from testnet deployment - new pool with correct PDA bump)
 const POOL_ACCOUNTS = {
     poolAccount: '4K65JKhxhUtDarHarbKXLnk6Uq8XN6ocnqfPTTmweQ1D',
@@ -58,6 +68,8 @@ const corsHeaders = {
     'Access-Control-Allow-Headers': 'Content-Type',
 };
 
+const MERKLE_LEAVES_KEY = 'merkle_leaves';
+
 // Handle CORS preflight
 function handleOptions() {
     return new Response(null, { headers: corsHeaders });
@@ -77,6 +89,14 @@ function jsonResponse(data, status = 200) {
 // Error response helper
 function errorResponse(message, status = 400) {
     return jsonResponse({ error: message }, status);
+}
+
+function rpcHeaders(env) {
+    const headers = { 'Content-Type': 'application/json' };
+    if (env.RPC_AUTH_TOKEN) {
+        headers['X-Auth-Token'] = env.RPC_AUTH_TOKEN;
+    }
+    return headers;
 }
 
 // Base58 encoding for Solana
@@ -184,6 +204,14 @@ export default {
                     return await handleGetMerkleRoot(env);
                 }
 
+                if (path === '/merkle-leaves') {
+                    return await handleGetMerkleLeaves(env);
+                }
+
+                if (path === '/nullifiers') {
+                    return await handleGetNullifiers(env);
+                }
+
                 if (path === '/accounts') {
                     return jsonResponse({
                         programId: env.PROGRAM_ID,
@@ -220,6 +248,10 @@ export default {
 
                 if (path === '/remove-liquidity') {
                     return await handleRemoveLiquidity(body, env);
+                }
+
+                if (path === '/merkle-leaves') {
+                    return await handleAppendMerkleLeaves(body, env);
                 }
 
                 return errorResponse('Not found', 404);
@@ -277,6 +309,8 @@ async function handleSwap(body, env) {
         ]
     );
 
+    await appendMerkleLeaves(env, outputCommitments);
+
     return jsonResponse({
         success: true,
         signature: result.signature,
@@ -325,6 +359,8 @@ async function handleDeposit(body, env) {
             ]
         );
 
+        await appendMerkleLeaves(env, [commitment]);
+
         return jsonResponse({
             success: true,
             signature: result.signature,
@@ -353,18 +389,20 @@ async function handleDeposit(body, env) {
  * [6] token_program: SPL Token program
  */
 async function handleWithdraw(body, env) {
-    const { proof, publicSignals, nullifier, recipient, amount, assetType } = body;
+    const { root, nullifier, recipient, amount, assetType } = body;
 
-    if (!proof || !nullifier || !recipient) {
+    if (!root || !nullifier || !recipient) {
         return errorResponse('Missing required fields');
     }
 
+    const currentRoot = await fetchMerkleRoot(env);
+
     // Build instruction data
     const instructionData = buildWithdrawData(
-        proof,
-        publicSignals,
+        currentRoot || root,
         nullifier,
-        amount || 0
+        amount || 0,
+        assetType || 0
     );
 
     // Determine pool vault and recipient token account based on asset type
@@ -397,6 +435,34 @@ async function handleWithdraw(body, env) {
         signature: result.signature,
         explorer: `https://explorer.solana.com/tx/${result.signature}?cluster=testnet`,
     });
+}
+
+async function fetchMerkleRoot(env) {
+    const response = await fetch(env.SOLANA_RPC_URL, {
+        method: 'POST',
+        headers: rpcHeaders(env),
+        body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'getAccountInfo',
+            params: [POOL_ACCOUNTS.merkleAccount, { encoding: 'base64' }],
+        }),
+    });
+
+    const result = await response.json();
+    if (!result.result || !result.result.value) {
+        return null;
+    }
+
+    const data = Buffer.from(result.result.value.data[0], 'base64');
+    const rootBytes = data.slice(0, 32);
+
+    let rootValue = BigInt(0);
+    for (let i = 31; i >= 0; i--) {
+        rootValue = rootValue * 256n + BigInt(rootBytes[i]);
+    }
+
+    return rootValue.toString();
 }
 
 /**
@@ -438,6 +504,8 @@ async function handleAddLiquidity(body, env) {
             { pubkey: POOL_ACCOUNTS.nullifierAccount, isSigner: false, isWritable: true },
         ]
     );
+
+    await appendMerkleLeaves(env, [outputCommitment]);
 
     return jsonResponse({
         success: true,
@@ -486,6 +554,8 @@ async function handleRemoveLiquidity(body, env) {
         ]
     );
 
+    await appendMerkleLeaves(env, outputCommitments);
+
     return jsonResponse({
         success: true,
         signature: result.signature,
@@ -500,7 +570,7 @@ async function handleGetStatus(txid, env) {
     try {
         const response = await fetch(env.SOLANA_RPC_URL, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: rpcHeaders(env),
             body: JSON.stringify({
                 jsonrpc: '2.0',
                 id: 1,
@@ -542,7 +612,11 @@ async function handleGetStatus(txid, env) {
  */
 async function handleGetPool(env) {
     try {
-        const poolState = await fetchPoolState(env.SOLANA_RPC_URL, POOL_ACCOUNTS.poolAccount);
+        const poolState = await fetchPoolState(
+            env.SOLANA_RPC_URL,
+            POOL_ACCOUNTS.poolAccount,
+            rpcHeaders(env)
+        );
 
         if (poolState) {
             return jsonResponse({
@@ -578,7 +652,7 @@ async function handleGetMerkleRoot(env) {
     try {
         const response = await fetch(env.SOLANA_RPC_URL, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: rpcHeaders(env),
             body: JSON.stringify({
                 jsonrpc: '2.0',
                 id: 1,
@@ -600,9 +674,9 @@ async function handleGetMerkleRoot(env) {
         const data = Buffer.from(result.result.value.data[0], 'base64');
 
         // Parse Merkle state
-        // Layout: [next_index: u32, root: [32]u8, ...]
-        const leafCount = data.readUInt32LE(0);
-        const rootBytes = data.slice(4, 36);
+        // Layout: [root: [32]u8, next_index: u32, ...]
+        const rootBytes = data.slice(0, 32);
+        const leafCount = data.readUInt32LE(32);
 
         // Convert root to decimal string
         let root = BigInt(0);
@@ -626,6 +700,121 @@ async function handleGetMerkleRoot(env) {
     }
 }
 
+async function handleGetNullifiers(env) {
+    try {
+        const response = await fetch(env.SOLANA_RPC_URL, {
+            method: 'POST',
+            headers: rpcHeaders(env),
+            body: JSON.stringify({
+                jsonrpc: '2.0',
+                id: 1,
+                method: 'getAccountInfo',
+                params: [POOL_ACCOUNTS.nullifierAccount, { encoding: 'base64' }],
+            }),
+        });
+
+        const result = await response.json();
+        if (!result.result || !result.result.value) {
+            return jsonResponse({ nullifiers: [] });
+        }
+
+        const data = Buffer.from(result.result.value.data[0], 'base64');
+        if (data.length < 10) {
+            return jsonResponse({ nullifiers: [] });
+        }
+
+        const isInitialized = data[0] !== 0;
+        if (!isInitialized) {
+            return jsonResponse({ nullifiers: [] });
+        }
+
+        const count = data.readUInt32LE(1);
+        const bloomSize = data.readUInt32LE(5);
+        const bloomBytes = Math.floor(bloomSize / 8);
+        const overflowStart = 10 + bloomBytes;
+
+        const nullifiers = [];
+        for (let i = 0; i < count; i++) {
+            const offset = overflowStart + i * 32;
+            if (offset + 32 > data.length) {
+                break;
+            }
+
+            const bytes = data.slice(offset, offset + 32);
+            let value = 0n;
+            for (let j = 31; j >= 0; j--) {
+                value = value * 256n + BigInt(bytes[j]);
+            }
+            nullifiers.push(value.toString());
+        }
+
+        return jsonResponse({ nullifiers });
+    } catch (err) {
+        console.error('Failed to fetch nullifiers:', err);
+        return errorResponse('Failed to fetch nullifiers');
+    }
+}
+
+async function handleGetMerkleLeaves(env) {
+    const leaves = await getMerkleLeaves(env);
+    return jsonResponse({
+        leaves,
+        count: leaves.length,
+    });
+}
+
+async function handleAppendMerkleLeaves(body, env) {
+    const { commitments, commitment } = body || {};
+    const toAppend = commitments || (commitment ? [commitment] : []);
+
+    if (!Array.isArray(toAppend) || toAppend.length === 0) {
+        return errorResponse('No commitments provided');
+    }
+
+    const count = await appendMerkleLeaves(env, toAppend);
+    return jsonResponse({ success: true, count });
+}
+
+async function getMerkleLeaves(env) {
+    if (env.MERKLE_KV) {
+        const stored = await env.MERKLE_KV.get(MERKLE_LEAVES_KEY);
+        return stored ? JSON.parse(stored) : [];
+    }
+
+    if (!globalThis.__merkleLeaves) {
+        globalThis.__merkleLeaves = [];
+    }
+    return globalThis.__merkleLeaves;
+}
+
+async function setMerkleLeaves(env, leaves) {
+    if (env.MERKLE_KV) {
+        await env.MERKLE_KV.put(MERKLE_LEAVES_KEY, JSON.stringify(leaves));
+        return;
+    }
+    globalThis.__merkleLeaves = leaves;
+}
+
+async function appendMerkleLeaves(env, newLeaves) {
+    const leaves = await getMerkleLeaves(env);
+    const leafSet = new Set(leaves);
+    let updated = false;
+
+    for (const leaf of newLeaves) {
+        if (!leafSet.has(leaf)) {
+            leaves.push(leaf);
+            leafSet.add(leaf);
+            updated = true;
+        }
+    }
+
+    if (updated) {
+        await setMerkleLeaves(env, leaves);
+    }
+
+    return leaves.length;
+}
+
 // ============================================================================
 // Transaction Building
 // ============================================================================
@@ -647,96 +836,43 @@ function getRelayerKeypair(env) {
  * Build and send transaction
  */
 async function buildAndSendTransaction(env, instructionData, accounts) {
-    // Get recent blockhash
-    const blockhashResponse = await fetch(env.SOLANA_RPC_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            jsonrpc: '2.0',
-            id: 1,
-            method: 'getLatestBlockhash',
-            params: [{ commitment: 'confirmed' }],
-        }),
-    });
-
-    const blockhashResult = await blockhashResponse.json();
-
-    if (blockhashResult.error) {
-        throw new Error('Failed to get blockhash: ' + blockhashResult.error.message);
+    if (!env.RELAYER_SECRET_KEY) {
+        throw new Error('RELAYER_SECRET_KEY is not set');
     }
 
-    const blockhash = blockhashResult.result.value.blockhash;
-    const lastValidBlockHeight = blockhashResult.result.value.lastValidBlockHeight;
+    const secretKey = new Uint8Array(JSON.parse(env.RELAYER_SECRET_KEY));
+    const keypair = Keypair.fromSecretKey(secretKey);
 
-    // Get relayer keypair
-    const keypair = getRelayerKeypair(env);
-    const relayerPubkey = getPublicKeyBase58(keypair);
+    const connection = new Connection(env.SOLANA_RPC_URL, 'confirmed');
+    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
 
-    // Build transaction message
-    // Note: This is simplified - in production use @solana/web3.js
-    const message = buildTransactionMessage({
-        feePayer: relayerPubkey,
+    const instruction = new TransactionInstruction({
+        programId: new PublicKey(env.PROGRAM_ID),
+        keys: accounts.map(account => ({
+            pubkey: new PublicKey(account.pubkey),
+            isSigner: account.isSigner,
+            isWritable: account.isWritable,
+        })),
+        data: Buffer.from(instructionData),
+    });
+
+    const transaction = new Transaction({
+        feePayer: keypair.publicKey,
         recentBlockhash: blockhash,
-        programId: env.PROGRAM_ID,
-        accounts,
-        data: instructionData,
+    }).add(instruction);
+
+    transaction.sign(keypair);
+
+    const signature = await connection.sendRawTransaction(transaction.serialize(), {
+        preflightCommitment: 'confirmed',
+        maxRetries: 3,
     });
 
-    // Sign the message
-    const signature = await signMessage(message, keypair.secretKey);
-    const signatureBase58 = base58Encode(signature);
-
-    // If we have a real keypair configured, send the transaction
-    if (env.RELAYER_SECRET_KEY) {
-        try {
-            // Serialize and send transaction
-            // Note: This is a simplified version
-            // In production, use proper Solana transaction serialization
-            const txResponse = await fetch(env.SOLANA_RPC_URL, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    jsonrpc: '2.0',
-                    id: 1,
-                    method: 'sendTransaction',
-                    params: [
-                        // Base64 encoded signed transaction
-                        btoa(String.fromCharCode(...serializeTransaction(message, signature))),
-                        {
-                            encoding: 'base64',
-                            preflightCommitment: 'confirmed',
-                            maxRetries: 3,
-                        },
-                    ],
-                }),
-            });
-
-            const txResult = await txResponse.json();
-
-            if (txResult.error) {
-                console.error('Transaction failed:', txResult.error);
-                // Fall back to mock for demo
-            } else {
-                return {
-                    signature: txResult.result,
-                    blockhash,
-                    lastValidBlockHeight,
-                    relayerPubkey,
-                };
-            }
-        } catch (err) {
-            console.error('Failed to send transaction:', err);
-        }
-    }
-
-    // For demo/testing without real keypair, return mock signature
-    console.log('Demo mode: returning mock signature');
     return {
-        signature: signatureBase58,
+        signature,
         blockhash,
         lastValidBlockHeight,
-        relayerPubkey,
-        demo: true,
+        relayerPubkey: keypair.publicKey.toBase58(),
     };
 }
 

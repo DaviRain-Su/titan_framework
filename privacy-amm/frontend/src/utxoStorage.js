@@ -112,6 +112,7 @@ export class UTXOStorage {
         // The storage is still isolated per wallet address
         this.key = null;
         this.loadWalletUtxos();
+        await this.dedupe();
         this.initialized = true;
 
         console.log(`UTXO storage initialized for wallet ${publicKey.slice(0, 8)}...`);
@@ -207,10 +208,15 @@ export class UTXOStorage {
      * Add a UTXO
      */
     async addUtxo(utxo) {
-        this.utxos.push({
-            ...utxo,
-            createdAt: Date.now(),
-        });
+        const existing = this.utxos.find(u => u.commitment === utxo.commitment);
+        if (existing) {
+            Object.assign(existing, utxo, { createdAt: existing.createdAt || Date.now() });
+        } else {
+            this.utxos.push({
+                ...utxo,
+                createdAt: Date.now(),
+            });
+        }
         await this.save();
     }
 
@@ -305,6 +311,24 @@ export class UTXOStorage {
     async clear() {
         this.utxos = [];
         await this.save();
+    }
+
+    /**
+     * Deduplicate UTXOs by commitment
+     */
+    async dedupe() {
+        const seen = new Map();
+        for (const utxo of this.utxos) {
+            if (!seen.has(utxo.commitment)) {
+                seen.set(utxo.commitment, utxo);
+            }
+        }
+
+        const deduped = Array.from(seen.values());
+        if (deduped.length !== this.utxos.length) {
+            this.utxos = deduped;
+            await this.save();
+        }
     }
 
     /**

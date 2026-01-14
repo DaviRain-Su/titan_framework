@@ -71,16 +71,13 @@ export function buildDepositData(commitment, amount, assetType) {
 /**
  * Build withdraw instruction data
  */
-export function buildWithdrawData(proof, publicSignals, nullifier, amount) {
-    const proofBytes = formatProofBytes(proof);
-    const signalsBytes = formatSignalsBytes(publicSignals);
-
+export function buildWithdrawData(root, nullifier, amount, assetType) {
     return concat(
         new Uint8Array([INSTRUCTIONS.Withdraw]),
-        proofBytes,
-        signalsBytes,
+        decimalTo32Bytes(root),
         decimalTo32Bytes(nullifier),
-        numberTo8Bytes(amount)
+        numberTo8Bytes(amount),
+        new Uint8Array([assetType])
     );
 }
 
@@ -228,11 +225,11 @@ function formatSignalsBytes(publicSignals) {
 /**
  * Create transaction with instruction
  */
-export async function createTransaction(rpcUrl, programId, accounts, data, payer) {
+export async function createTransaction(rpcUrl, programId, accounts, data, payer, headers = { 'Content-Type': 'application/json' }) {
     // Fetch recent blockhash
     const blockhashResponse = await fetch(rpcUrl, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
             jsonrpc: '2.0',
             id: 1,
@@ -265,10 +262,10 @@ export async function createTransaction(rpcUrl, programId, accounts, data, payer
 /**
  * Send transaction via RPC
  */
-export async function sendTransaction(rpcUrl, signedTransaction) {
+export async function sendTransaction(rpcUrl, signedTransaction, headers = { 'Content-Type': 'application/json' }) {
     const response = await fetch(rpcUrl, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
             jsonrpc: '2.0',
             id: 1,
@@ -292,13 +289,13 @@ export async function sendTransaction(rpcUrl, signedTransaction) {
 /**
  * Confirm transaction
  */
-export async function confirmTransaction(rpcUrl, signature, timeout = 30000) {
+export async function confirmTransaction(rpcUrl, signature, timeout = 30000, headers = { 'Content-Type': 'application/json' }) {
     const start = Date.now();
 
     while (Date.now() - start < timeout) {
         const response = await fetch(rpcUrl, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers,
             body: JSON.stringify({
                 jsonrpc: '2.0',
                 id: 1,
@@ -341,10 +338,10 @@ export async function getPoolAccounts(rpcUrl, programId) {
 /**
  * Fetch pool state from on-chain
  */
-export async function fetchPoolState(rpcUrl, poolAccount) {
+export async function fetchPoolState(rpcUrl, poolAccount, headers = { 'Content-Type': 'application/json' }) {
     const response = await fetch(rpcUrl, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
             jsonrpc: '2.0',
             id: 1,

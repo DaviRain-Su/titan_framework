@@ -29,6 +29,15 @@ name = "privacy-amm-relayer-staging"
 SOLANA_RPC_URL = "https://api.testnet.solana.com"
 PROGRAM_ID = "GZfqgHqekzR4D8TAq165XB8U2boVdK5ehEEH4n7u4Xts"
 
+# KV namespace for relayer Merkle leaves
+[[kv_namespaces]]
+binding = "MERKLE_KV"
+id = "cf7ca814363345dcb9f397afdf505693"
+
+[[env.staging.kv_namespaces]]
+binding = "MERKLE_KV"
+id = "CHANGE_ME"
+
 # Secrets (set via wrangler secret put):
 # - RELAYER_SECRET_KEY: JSON array of the relayer's secret key bytes
 #

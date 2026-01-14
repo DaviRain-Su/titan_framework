@@ -12,7 +12,8 @@
     "test": "node test/test_relayer.js"
   },
   "dependencies": {
-    "@solana/web3.js": "^1.87.6"
+    "@solana/web3.js": "^1.87.6",
+    "tweetnacl": "^1.0.3"
   },
   "devDependencies": {
     "wrangler": "^3.114.16"
